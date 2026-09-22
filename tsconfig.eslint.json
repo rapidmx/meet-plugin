@@ -1,0 +1,10 @@
+{
+    "extends": "./tsconfig.test.json",
+    "compilerOptions": {
+        "noEmit": true,
+        "strict": true,
+        "allowJs": true
+    },
+    "include": ["src/**/*.ts", "apps/**/*.ts", "apps/**/*.tsx", "test/**/*.ts", "test/**/*.tsx"],
+    "exclude": []
+}

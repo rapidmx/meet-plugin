@@ -1,0 +1,181 @@
+{
+    "name": "@rapidmx/videoconf-plugin",
+    "version": "0.1.0",
+    "description": "RapidMX plugin that provides WebRTC video conferencing, joinable from a calendar invite or a shared link.",
+    "repository": "https://github.com/RapidMX/videoconf.git",
+    "author": "RapidREST <rapidrests@gmail.com>",
+    "license": "MPL-2.0",
+    "contributors": [
+        "Jean-Philippe Steinmetz"
+    ],
+    "scripts": {
+        "build": "yarn lint && rimraf dist && tsc && tsc -p tsconfig.apps.json",
+        "lint": "eslint ./src ./apps ./test",
+        "local-audit": "yarn install && yarn npm audit -A -R \"$@\"",
+        "checkup": "yarn dlx @yarnpkg/doctor \"$@\"",
+        "dependency-check": "yarn dlx depcheck \"$@\"",
+        "report-coverage": "cat ./coverage/lcov.info | coveralls",
+        "test": "vitest run",
+        "test:prod": "npm run lint && vitest run --coverage",
+        "test:watch": "vitest",
+        "release": "npx @rapidrest/cli release",
+        "prepublish": "yarn build"
+    },
+    "peerDependencies": {
+        "@rapidmx/react-shared": ">=0.6.0 <1",
+        "@rapidmx/restapi": ">=0.17.0 <1",
+        "@rapidmx/web-client": ">=0.11.0 <1",
+        "@rapidrest/core": "5.x",
+        "@rapidrest/service-core": "2.x",
+        "react": "19.x",
+        "react-dom": "19.x"
+    },
+    "devDependencies": {
+        "@rapidmx/react-shared": "^0.11.0",
+        "@rapidmx/restapi": "^0.17.0",
+        "@rapidmx/web-client": "^0.11.0",
+        "@rapidrest/core": "^5.2.2",
+        "@rapidrest/service-core": "^2.1.1",
+        "@swc/core": "^1.16.2",
+        "@testing-library/dom": "^10.4.1",
+        "@testing-library/jest-dom": "^7.0.1",
+        "@testing-library/react": "^16.3.3",
+        "@testing-library/user-event": "^14.6.7",
+        "@types/nconf": "^0.10.7",
+        "@types/node": "^26.5.0",
+        "@types/react": "^19.2.18",
+        "@types/react-dom": "^19.2.7",
+        "@typescript-eslint/eslint-plugin": "^8.70.0",
+        "@typescript-eslint/parser": "^8.70.0",
+        "@vitest/coverage-v8": "^5.0.0",
+        "better-sqlite3": "^13.0.3",
+        "eslint": "^10.10.0",
+        "eslint-config-prettier": "^10.1.8",
+        "eslint-plugin-import": "^2.32.0",
+        "eslint-plugin-jsdoc": "^64.3.6",
+        "globals": "^17.12.0",
+        "jsdom": "^30.0.1",
+        "lodash-es": "^4.18.1",
+        "mongodb": "^7.6.0",
+        "mongodb-memory-server": "^11.2.0",
+        "nconf": "^0.13.0",
+        "openapi3-ts": "^4.6.1",
+        "prom-client": "^15.1.3",
+        "react": "^19.2.8",
+        "react-dom": "^19.2.8",
+        "redis": "^6.2.1",
+        "reflect-metadata": "^0.2.2",
+        "rimraf": "^6.1.3",
+        "ts-node": "^10.9.2",
+        "tsx": "^4.23.13",
+        "typeorm": "^1.1.1",
+        "typescript": "^6.0.3",
+        "unplugin-swc": "^1.6.0",
+        "uuid": "^14.0.2",
+        "vite": "^8.2.2",
+        "vitest": "^5.0.0",
+        "winston": "^3.19.0"
+    },
+    "resolutions": {
+        "@rapidmx/react-shared": "^0.11.0",
+        "@rapidmx/restapi": "^0.17.0",
+        "@rapidmx/web-client": "^0.11.0"
+    },
+    "packageManager": "yarn@4.5.3",
+    "engines": {
+        "node": ">=24.0.0"
+    },
+    "publishConfig": {
+        "registry": "https://registry.npmjs.org/"
+    },
+    "type": "module",
+    "main": "dist/lib/index.js",
+    "exports": {
+        ".": {
+            "import": "./dist/lib/index.js",
+            "types": "./dist/types/index.d.ts"
+        },
+        "./mongo": {
+            "import": "./dist/lib/mongo.js",
+            "types": "./dist/types/mongo.d.ts"
+        },
+        "./sql": {
+            "import": "./dist/lib/sql.js",
+            "types": "./dist/types/sql.d.ts"
+        }
+    },
+    "typings": "dist/types/index.d.ts",
+    "files": [
+        "apps",
+        "dist"
+    ],
+    "rapidmx": {
+        "plugin": {
+            "apiVersion": 1,
+            "displayName": "Video Conferencing",
+            "description": "Private and public WebRTC video meetings. A private meeting mints one link per invitee for a calendar invite's location and body; a public meeting shares a single link. Joining needs no account - a guest picks a name, checks their camera and microphone, and enters.",
+            "mailboxScopedData": true,
+            "settings": [
+                {
+                    "key": "mail:videoconf:public_url",
+                    "label": "Public join page URL",
+                    "type": "string",
+                    "default": "",
+                    "help": "The address of the public join pages, for example https://mail.example.com/meet. Calendar invites include a join link only when this is set."
+                },
+                {
+                    "key": "mail:videoconf:turn:url",
+                    "label": "TURN server URL",
+                    "type": "string",
+                    "default": "",
+                    "help": "A turn: or turns: URL (e.g. turns:turn.example.com:5349) relaying media for a participant behind a restrictive NAT or firewall, for whom a direct peer-to-peer connection fails. Public STUN servers are used for everyone else and need no configuration. Leave empty to serve calls with STUN only - most calls will still connect, but some participants may not."
+                },
+                {
+                    "key": "mail:videoconf:turn:username",
+                    "label": "TURN server username",
+                    "type": "string",
+                    "default": "",
+                    "help": "Used as-is unless a shared secret is also set below, in which case it is combined with a per-join expiring credential instead (coturn's time-limited REST credential mechanism) and this value is ignored."
+                },
+                {
+                    "key": "mail:videoconf:turn:credential",
+                    "label": "TURN server credential (static)",
+                    "type": "string",
+                    "default": "",
+                    "help": "The TURN server's password for the username above. Ignored when a shared secret is set below."
+                },
+                {
+                    "key": "mail:videoconf:turn:shared_secret",
+                    "label": "TURN server shared secret (for expiring credentials)",
+                    "type": "string",
+                    "default": "",
+                    "help": "coturn's static-auth-secret, if configured. When set, every join mints its own short-lived username/credential pair (an HMAC-SHA1 of a timestamp with this secret) instead of handing out one permanent password to every participant - the recommended setup. Leave empty to use the static username/credential above instead."
+                }
+            ],
+            "ui": {
+                "apps": [
+                    {
+                        "id": "meet",
+                        "host": "public",
+                        "mount": "/meet",
+                        "dir": "apps/meet"
+                    },
+                    {
+                        "id": "video-conferencing",
+                        "host": "www",
+                        "mount": "/settings/video-conferencing",
+                        "dir": "apps/settings-video-conferencing"
+                    }
+                ],
+                "settingsSections": [
+                    {
+                        "id": "video-conferencing",
+                        "label": "Video Conferencing",
+                        "href": "/settings/video-conferencing",
+                        "icon": "HiOutlineVideoCamera"
+                    }
+                ]
+            }
+        }
+    }
+}
