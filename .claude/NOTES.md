@@ -97,3 +97,128 @@ each, replaced by their real phases). `yarn lint`/`tsc --noEmit`/`yarn build`/`y
 - **Deferred beyond Phase 1** (noted, not forgotten): no `GET .../:id/invitees` re-fetch endpoint (invitee join
   links are only ever returned once, at creation); no bulk create; no GC job for accumulated guest ACL records or
   never-expiring invitee tokens (matches `Booking`'s own precedent).
+
+## 2026-09-22: Phase 2 (join/lobby + in-call UI) implemented
+
+Frontend-only, entirely inside `apps/meet/` plus reusable non-page modules under a new `apps/shared/` (mirroring
+`booking-plugin`'s own `apps/shared/` convention). `yarn lint`/`tsc --noEmit` (root and `-p tsconfig.apps.json`)/
+`yarn build`/`yarn test:prod` all clean; 321 tests, 100% statement/function/line coverage, 97.24% branch (floor 95%).
+
+- **`apps/shared/` vs `src/`**: reusable non-UI logic (device media helpers, the mesh connection manager, the
+  guest signaling client, active-speaker picking, the level meter) was originally written under this plugin's
+  backend `src/` (the task brief allowed a `src/` util for logic "reused by both the lobby and the call view").
+  That does not actually build: `tsconfig.apps.json` sets `rootDir: "apps"`, and `tsc -p tsconfig.apps.json` fails
+  (`TS6059`) the moment an `apps/` file imports anything under `../../src/` - **and, worse, silently emits the
+  offending files' compiled output back into the real `src/` tree** (a rootDir-violation relative-path escape,
+  not a `noEmitOnError` situation - discovered the hard way as stray `.js`/`.d.ts` files alongside the real `.ts`
+  sources; deleted before finishing). Moved everything to `apps/shared/{media,webrtc,push}/` instead, which is
+  under `tsconfig.apps.json`'s own `rootDir` and matches `booking-plugin`'s exact precedent (`apps/shared/
+  bookingApi.ts`, `apps/shared/imageResize.ts`) for reusable, non-page frontend code. `src/` itself is untouched
+  by Phase 2 - the plugin's backend npm surface (`src/index.ts`'s exports) is unchanged.
+- **Push client**: investigated reusing `@rapidmx/react-shared`'s `PushClient`/`getPushClient()` first, as
+  required. It doesn't fit: its `connect()` opens a bare `WebSocket` and relies entirely on the browser
+  automatically attaching this deployment's `jwt` `HttpOnly` cookie - it has no parameter anywhere to supply an
+  arbitrary/guest bearer token, and its shared-singleton-per-tab design is also the wrong shape for a guest
+  identity that must never share a socket with whatever webmail session, if any, is already open in the same
+  browser. Built a standalone `apps/shared/push/GuestSignalingClient.ts` instead, matching `BasePushRoute`'s real
+  wire protocol exactly (not `PushClient`'s more generic one): `SUBSCRIBE`/`SUBSCRIBED` over the WebSocket for
+  receiving, but publishing (`send()`) is a plain authenticated `POST /push/:id` with `Authorization: Bearer
+  <token>` - no browser limitation applies there. The one real limitation: a browser's native `WebSocket` cannot
+  attach a custom header to its upgrade request at all, so the *subscribe* side has no way to present the guest
+  bearer token except by writing it into a non-`HttpOnly` `jwt` cookie via `document.cookie` immediately before
+  connecting (`applyAuthCookie()`). This works for the common case (a guest with no prior session on this origin)
+  but is silently blocked by the browser if a *real* `HttpOnly` `jwt` session cookie already exists for this exact
+  origin - the WebSocket then authenticates as that real session instead, and (since the meeting's ACL only names
+  the guest uid) the `SUBSCRIBE` is just refused, a safe and visible failure, never a cross-identity leak. The
+  clean fix is backend/cross-repo (`@rapidrest/service-core`'s `JWTStrategy`/`BasePushRoute` - e.g. a
+  `Sec-WebSocket-Protocol`-carried bearer token, which a browser *can* set on a `WebSocket`) and is out of this
+  frontend-only phase's scope - flagged for a later phase/repo rather than fixed here.
+- **Mesh who-calls-whom**: the lexicographically smaller uid is always the offerer for a pair
+  (`isOfferer()` in `MeshConnectionManager.ts`) - deterministic, no coordination round trip. Roster discovery
+  handles arbitrary join order despite the push channel having no replay: whoever learns of a genuinely new peer
+  (via `hello` or an incoming `offer`) echoes its own `hello` once, so within one extra round trip everyone
+  converges on the same roster regardless of who joined first.
+- **Single-presenter rule**: `presenter-claim` is applied optimistically and locally; a genuine claim-collision
+  (two claims in flight before either side heard the other's) is resolved deterministically by every participant
+  the same way - the lexicographically smaller uid wins, and the losing claimant self-revokes (stops its own
+  capture, sends `presenter-release`) once it observes the winning claim. Screen sharing itself never renegotiates
+  a connection: `replaceLocalVideoTrack()` swaps each peer connection's existing outgoing video `RTCRtpSender`'s
+  track in place.
+- **Session-based name prefill - not implemented**: the spec asks the lobby to prefill the name field from
+  `Profile.givenName` when the browser already holds a RapidMX session. Investigated `react-shared`'s
+  `profileApi.ts`/`session.ts` as directed: `getMyProfile()` needs an `authServerUrl`, and `session.ts` confirms
+  `userUid`/`authServerUrl` are only ever supplied via server-side `fetchProps` on the `www`/admin console hosts
+  (`@rapidmx/server`'s `wwwRoute`/`AdminConsoleRoute`) - never on the `public` host `/meet` is mounted on.
+  `PublicPageRoute` (also `@rapidmx/server`) returns only branding props; no public-host plugin page anywhere in
+  this codebase does session detection today, so there was no convention to extend. Left the name field always
+  empty and editable instead (correct for the common no-account case); a real fix needs a cross-repo
+  (`@rapidmx/server`/`react-shared`) change - either have `PublicPageRoute.fetchProps()` check the incoming `jwt`
+  cookie the way `wwwRoute` does, or add a same-origin authenticated "who am I" endpoint - flagged, not built here.
+- **Known media limitation**: a participant who joins with zero camera/mic tracks (declined permission, or no
+  devices at all) still joins signaling-wise, but this design's renegotiation-free mesh (tracks are attached once,
+  at peer-connection-creation time, screen share only ever *replaces* an existing sender) means their peer
+  connections carry no media m-lines in either direction - not fixable without adding renegotiation, out of scope
+  for this phase.
+- **Testing**: this is the first browser-API surface (`getUserMedia`/`MediaStream`/`RTCPeerConnection`/
+  `enumerateDevices`/`AudioContext`) anywhere in this codebase, so there was no existing mocking convention -
+  `test/apps/testUtils.ts` adds fakes for all of them (`fakeMediaDevices`, `fakeRTCPeerConnection`,
+  `fakePushSocket`, `fakeMediaStream`/`fakeTrack`), reused across the plugin's own component and signaling tests.
+  `MeshConnectionManager`'s tests include a two-real-instance convergence test (an in-memory pub/sub bus wiring two
+  managers together) alongside single-manager, message-injection tests for each race/edge case.
+
+## 2026-09-22: Fix - a logged-in user could not actually join a call (browser-session-collision, folded into Phase 2)
+
+Found during review of Phase 2, before it was committed - not a separate phase, folded into the same working-tree
+change `yarn lint`/`tsc --noEmit` (root and `-p tsconfig.apps.json`)/`yarn build`/`yarn test:prod` all still clean;
+338 tests, 100% statement/function/line coverage, 97.28% branch (floor 95%).
+
+- **The bug**: `GuestSignalingClient.applyAuthCookie()` authenticates `/push`'s WebSocket upgrade by writing a
+  plain (non-`HttpOnly`) `jwt` `document.cookie` to the guest token `join()` minted, immediately before connecting
+  - this is the *only* way a browser `WebSocket` can present a bearer credential at all (see that module's own doc
+  comment). If the visiting browser already held a **real, `HttpOnly` `jwt` session cookie** for this exact origin
+  (an internal invitee with webmail open, or a mailbox owner testing their own link - exactly the "logged in user"
+  scenario the original spec calls out), that `document.cookie` write was silently blocked by the browser's own
+  "script cannot override an `HttpOnly` cookie of the same name" protection: the intended guest cookie never
+  actually got written, the WebSocket authenticated as the *real* session instead, and since the meeting's
+  `AccessControlList` grant from `join()` only ever named the synthetic guest uid, the real session's `SUBSCRIBE`
+  was simply, safely refused (never a cross-identity leak - just broken). **Net effect: a logged-in RapidMX user
+  could not join a call at all.** This is a connection-level failure, independent of (and more fundamental than)
+  Phase 2's separately-flagged, purely cosmetic "name isn't prefilled for a session" limitation above - even a
+  user who typed their own name by hand still couldn't get signaling access.
+- **The fix, backend** (`BaseVideoMeetingRoute.join()`): now accepts an optional `@AuthUser user?: JWTUser` - the
+  same "whatever the framework's existing auth middleware already populated from the caller's cookie/header"
+  pattern `create()` on this same class, and `BaseScopedChildRoute.resolveEffectiveUser()` elsewhere in this
+  codebase's family, already use. A **real, already-authenticated** caller (`user` present, uid not starting with
+  the new `GUEST_UID_PREFIX = "guest:"` - the cleanest signal available, since a guest uid can never be a real
+  mailbox-owning identity, and it correctly still treats a *returning guest* presenting a prior `join()`'s own
+  guest JWT as anonymous, not authenticated) is granted `READ`/`CREATE` on the meeting's channel **under their own
+  real uid** via the renamed/generalized `ensureChannelGrant()` (was `ensureGuestChannelGrant()` - same method,
+  now also called for a real uid), and `join()` mints no guest JWT at all for them. A true anonymous caller
+  (`user` absent - the common case, no existing session to collide with in the first place) is unchanged from
+  Phase 1.
+- **`VideoMeetingJoinResult` shape change**: added `authenticated: boolean` and a `selfUid: string` (always
+  present - the identity to grant/identify as on the signaling channel, replacing the guest-only `guestUid` field
+  now that this can be a real identity too); `token`/`expiresAt` are now optional, present only when
+  `authenticated` is `false`. Chose this shape over the literal "just omit `token`/`guestUid`" suggestion because
+  the frontend's mesh layer (`MeshConnectionManager`) always needs *some* self uid to identify with on the
+  channel regardless of path, and the public/anonymous `/meet` page has no independent way to learn a real
+  caller's own uid except from this response (see the Phase 2 "session-based name prefill" note above on why
+  there's no session-detection convention on this host at all) - so `selfUid` had to be unconditional either way.
+- **The fix, frontend** (`apps/shared/push/GuestSignalingClient.ts`, `apps/meet/_CallView.tsx`, `apps/meet/
+  [token].tsx`, `apps/meet/_meetApi.ts`): `GuestSignalingClient`'s `token` option is now optional. When present
+  (the common anonymous case), behavior is exactly Phase 2's original. When absent (`authenticated: true`), it
+  writes no cookie at all (`applyAuthCookie()` no-ops) and sends no `Authorization` header on `send()`'s `POST
+  /push/:id` either - relying entirely on the browser's own already-existing real `jwt` cookie, which `fetch()`'s
+  default same-origin credentials mode already attaches with zero extra code, exactly like `JWTStrategy` would
+  authenticate any other same-origin call. `[token].tsx` passes `joinResult.token` straight through (naturally
+  `undefined` in the authenticated case) rather than branching explicitly.
+- **Tests updated**: both Mongo/SQL `VideoMeetingRoute.test.ts` (new `GET /join/:token` cases: an
+  already-authenticated real caller gets `authenticated: true`/`selfUid`/no token and a real ACL grant; a
+  returning guest presenting its own prior guest JWT still gets a fresh guest identity, never the authenticated
+  path; `ensureGuestChannelGrant` renamed to `ensureChannelGrant` throughout; a new push-channel-access test proves
+  the real caller's own uid, not a guest uid, gets `READ`/`CREATE`), `videoMeetingSecuritySuite.ts` (added
+  `strangerUid` to the shared context; the same three scenarios, backend-agnostic), `GuestSignalingClient.test.ts`
+  (no cookie written and no `Authorization` header sent when `token` is omitted), `_CallView.test.tsx` (forwards
+  an absent `token` to the signaling client untouched), `[token].test.tsx`/`_meetApi.test.ts` (the
+  `authenticated: true` response shape end-to-end). `test/plugin.test.ts`'s exported-surface list picked up the
+  new `GUEST_UID_PREFIX` export.

@@ -14,7 +14,7 @@ import { MailboxMongo } from "@rapidmx/restapi/mongo";
 import { VideoMeetingMongo } from "../../../src/models/mongo/VideoMeetingMongo.js";
 import { VideoMeetingInviteeMongo } from "../../../src/models/mongo/VideoMeetingInviteeMongo.js";
 import { VideoMeetingStatus, VideoMeetingVisibility } from "../../../src/models/types.js";
-import { GUEST_JWT_TTL_SECONDS } from "../../../src/routes/BaseVideoMeetingRoute.js";
+import { GUEST_JWT_TTL_SECONDS, GUEST_UID_PREFIX } from "../../../src/routes/BaseVideoMeetingRoute.js";
 import { turnRestCredential } from "../../../src/util/IceServerUtils.js";
 import { videoMeetingSecuritySuite } from "../videoMeetingSecuritySuite.js";
 
@@ -334,13 +334,46 @@ describe("Route:VideoMeetingMongo Tests", () => {
             expect(result.body.meeting.hostDisplayName).toBe("Ada Lovelace");
             expect(result.body.meeting.mailboxUid).toBeUndefined();
             expect(result.body.iceServers.length).toBeGreaterThanOrEqual(2);
-            expect(result.body.guestUid).toMatch(/^guest:/);
+            expect(result.body.authenticated).toBe(false);
+            expect(result.body.selfUid).toMatch(/^guest:/);
             expect(new Date(result.body.expiresAt).getTime()).toBeGreaterThan(Date.now());
             expect(new Date(result.body.expiresAt).getTime()).toBeLessThanOrEqual(Date.now() + GUEST_JWT_TTL_SECONDS * 1000 + 5000);
 
             const decoded: any = await JWTUtils.decodeToken(config.get("auth"), result.body.token);
-            expect(decoded.profile.uid).toBe(result.body.guestUid);
+            expect(decoded.profile.uid).toBe(result.body.selfUid);
             expect(decoded.profile.roles).toEqual([]);
+        });
+
+        it("Grants the caller's own real uid (no guest token minted) when already authenticated.", async () => {
+            const created = await authed(ownerToken)
+                .post(baseUrl)
+                .send({ mailboxUid: mailbox.uid, title: "Private Meeting", visibility: "private", invitees: [{ email: "a@example.com" }] });
+            const joinToken = (await inviteeRepo.find({ meetingUid: created.body.meeting.uid }).toArray())[0].joinToken;
+
+            const result = await authed(strangerToken).get(`${baseUrl}/join/${joinToken}`);
+
+            expect(result.status).toBe(200);
+            expect(result.body.authenticated).toBe(true);
+            expect(result.body.selfUid).toBe(stranger.uid);
+            expect(result.body.token).toBeUndefined();
+            expect(result.body.expiresAt).toBeUndefined();
+
+            const acl: any = await aclRepo.findOne({ uid: created.body.meeting.uid });
+            const record = acl.records.find((r: any) => r.userOrRoleId === stranger.uid);
+            expect(record?.actions).toEqual(expect.arrayContaining([ACLAction.READ, ACLAction.CREATE]));
+        });
+
+        it("Treats a returning guest presenting its own prior guest JWT as still anonymous, not as an authenticated real user.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const first = await request(server.getApplication()).get(`${baseUrl}/join/${created.body.meeting.publicSlug}`);
+            expect(first.body.selfUid.startsWith(GUEST_UID_PREFIX)).toBe(true);
+
+            const second = await authed(first.body.token).get(`${baseUrl}/join/${created.body.meeting.publicSlug}`);
+            expect(second.status).toBe(200);
+            expect(second.body.authenticated).toBe(false);
+            expect(second.body.selfUid.startsWith(GUEST_UID_PREFIX)).toBe(true);
+            expect(second.body.token).toBeTruthy();
+            expect(second.body.selfUid).not.toBe(first.body.selfUid);
         });
 
         it("Falls back to no host display name when the mailbox no longer exists.", async () => {
@@ -414,25 +447,25 @@ describe("Route:VideoMeetingMongo Tests", () => {
                 const result = await request(server.getApplication()).get(`${baseUrl}/join/${created.body.meeting.publicSlug}`);
                 expect(result.status).toBe(200);
                 const decoded: any = await JWTUtils.decodeToken({ secret: original.secret }, result.body.token);
-                expect(decoded.profile.uid).toBe(result.body.guestUid);
+                expect(decoded.profile.uid).toBe(result.body.selfUid);
             } finally {
                 route.authConfig = original;
             }
         });
     });
 
-    describe("ensureGuestChannelGrant (ACL grant race handling)", () => {
-        it("Is idempotent: granting the same guest twice does not re-save the ACL or duplicate the record.", async () => {
+    describe("ensureChannelGrant (ACL grant race handling)", () => {
+        it("Is idempotent: granting the same uid twice does not re-save the ACL or duplicate the record.", async () => {
             const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
             const meetingUid = created.body.meeting.uid;
             const route: any = objectFactory.getInstance("routes.VideoMeetingRoute");
             const guestUid = "guest:test-idempotent";
 
-            await route.ensureGuestChannelGrant(meetingUid, guestUid);
+            await route.ensureChannelGrant(meetingUid, guestUid);
             const aclUtils: any = objectFactory.getInstance(ACLUtils);
             const saveSpy = vi.spyOn(aclUtils, "saveACL");
             try {
-                await route.ensureGuestChannelGrant(meetingUid, guestUid);
+                await route.ensureChannelGrant(meetingUid, guestUid);
                 expect(saveSpy).not.toHaveBeenCalled();
             } finally {
                 saveSpy.mockRestore();
@@ -456,7 +489,7 @@ describe("Route:VideoMeetingMongo Tests", () => {
                 return original(acl);
             });
             try {
-                await route.ensureGuestChannelGrant(meetingUid, "guest:retry-success");
+                await route.ensureChannelGrant(meetingUid, "guest:retry-success");
                 expect(calls).toBe(2);
             } finally {
                 spy.mockRestore();
@@ -470,7 +503,7 @@ describe("Route:VideoMeetingMongo Tests", () => {
             const aclUtils: any = objectFactory.getInstance(ACLUtils);
             const spy = vi.spyOn(aclUtils, "saveACL").mockRejectedValue(new Error("must be of the same version"));
             try {
-                await expect(route.ensureGuestChannelGrant(meetingUid, "guest:persistent-conflict")).rejects.toThrow(/must be of the same version/);
+                await expect(route.ensureChannelGrant(meetingUid, "guest:persistent-conflict")).rejects.toThrow(/must be of the same version/);
                 expect(spy).toHaveBeenCalledTimes(5);
             } finally {
                 spy.mockRestore();
@@ -484,7 +517,7 @@ describe("Route:VideoMeetingMongo Tests", () => {
             const aclUtils: any = objectFactory.getInstance(ACLUtils);
             const spy = vi.spyOn(aclUtils, "saveACL").mockRejectedValue(new Error("boom"));
             try {
-                await expect(route.ensureGuestChannelGrant(meetingUid, "guest:other-error")).rejects.toThrow("boom");
+                await expect(route.ensureChannelGrant(meetingUid, "guest:other-error")).rejects.toThrow("boom");
                 expect(spy).toHaveBeenCalledTimes(1);
             } finally {
                 spy.mockRestore();
@@ -498,7 +531,7 @@ describe("Route:VideoMeetingMongo Tests", () => {
             const aclUtils: any = objectFactory.getInstance(ACLUtils);
             const spy = vi.spyOn(aclUtils, "saveACL").mockRejectedValue("boom");
             try {
-                await expect(route.ensureGuestChannelGrant(meetingUid, "guest:non-error-rejection")).rejects.toBe("boom");
+                await expect(route.ensureChannelGrant(meetingUid, "guest:non-error-rejection")).rejects.toBe("boom");
                 expect(spy).toHaveBeenCalledTimes(1);
             } finally {
                 spy.mockRestore();
@@ -512,6 +545,7 @@ describe("Route:VideoMeetingMongo Tests", () => {
         mailboxUid: () => mailbox.uid,
         ownerToken: () => ownerToken,
         strangerToken: () => strangerToken,
+        strangerUid: () => stranger.uid,
         adminToken: () => adminToken,
         delegateToken: () => delegateToken,
         delegateUid: () => delegate.uid,
@@ -594,13 +628,30 @@ describe("Route:VideoMeetingMongo Tests", () => {
             const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
             const meetingUid = created.body.meeting.uid;
             const joined = await request(server.getApplication()).get(`${baseUrl}/join/${created.body.meeting.publicSlug}`);
-            const guest: any = { uid: joined.body.guestUid, roles: [], scopes: [], elevated: -1 };
+            const guest: any = { uid: joined.body.selfUid, roles: [], scopes: [], elevated: -1 };
 
             const { granted } = await connectPush(guest);
             expect(await granted([meetingUid, mailbox.uid, uuid.v4()])).toEqual([meetingUid]);
 
             const { route } = await connectPush(guest);
             await route.send(meetingUid, { type: "answer" }, guest);
+            expect(route.redisPub.publish).toHaveBeenCalledTimes(1);
+        });
+
+        it("Grants an already-authenticated real caller (not a guest) READ and CREATE on the meeting's channel under their own uid - the browser-session-collision fix.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const meetingUid = created.body.meeting.uid;
+            const joined = await authed(strangerToken).get(`${baseUrl}/join/${created.body.meeting.publicSlug}`);
+            expect(joined.body.authenticated).toBe(true);
+            expect(joined.body.selfUid).toBe(stranger.uid);
+
+            // The real stranger identity - exactly what its own real `jwt` session cookie already authenticates
+            // the WebSocket as (see BaseVideoMeetingRoute.join()'s doc comment on the fix): no guest uid involved.
+            const { granted } = await connectPush(stranger);
+            expect(await granted([meetingUid, mailbox.uid, uuid.v4()])).toEqual([meetingUid]);
+
+            const { route } = await connectPush(stranger);
+            await route.send(meetingUid, { type: "answer" }, stranger);
             expect(route.redisPub.publish).toHaveBeenCalledTimes(1);
         });
 
@@ -629,10 +680,10 @@ describe("Route:VideoMeetingMongo Tests", () => {
             const joinedA = await request(server.getApplication()).get(`${baseUrl}/join/${slug}`);
             const joinedB = await request(server.getApplication()).get(`${baseUrl}/join/${slug}`);
 
-            expect(joinedA.body.guestUid).not.toBe(joinedB.body.guestUid);
+            expect(joinedA.body.selfUid).not.toBe(joinedB.body.selfUid);
 
-            const guestA: any = { uid: joinedA.body.guestUid, roles: [], scopes: [], elevated: -1 };
-            const guestB: any = { uid: joinedB.body.guestUid, roles: [], scopes: [], elevated: -1 };
+            const guestA: any = { uid: joinedA.body.selfUid, roles: [], scopes: [], elevated: -1 };
+            const guestB: any = { uid: joinedB.body.selfUid, roles: [], scopes: [], elevated: -1 };
             expect(await (await connectPush(guestA)).granted([created.body.meeting.uid])).toEqual([created.body.meeting.uid]);
             expect(await (await connectPush(guestB)).granted([created.body.meeting.uid])).toEqual([created.body.meeting.uid]);
         });

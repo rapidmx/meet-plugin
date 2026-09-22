@@ -1,7 +1,22 @@
-// Placeholder only - the join/lobby/in-call UI (mesh WebRTC, gallery/speaker/presentation) is Phase 2 work,
-// explicitly out of scope for the Phase 1 backend change this file exists to satisfy: `tsc -p tsconfig.apps.json`
-// (see package.json's `build` script) requires at least one file under `apps/`, since this manifest already
-// declares this directory as a UI app (`rapidmx.plugin.ui.apps[0].dir`).
-export default function MeetPage() {
-    return <p>Video meetings: coming soon.</p>;
+///////////////////////////////////////////////////////////////////////////////
+// Copyright (C) 2026 Jean-Philippe Steinmetz. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+///////////////////////////////////////////////////////////////////////////////
+/** Reached only by a bare `/meet` visit with no token (e.g. a mistyped/incomplete link) - the real join/lobby flow
+ * lives at `apps/meet/[token].tsx`, `GET /meet/:token`. Mirrors `booking-plugin`'s identical `apps/book/index.tsx`.
+ * Replaces this plugin's Phase 1 one-line placeholder page (see `.claude/NOTES.md`). */
+import React from "react";
+import useBranding from "@rapidmx/react-shared/branding/useBranding.js";
+import Alert from "@rapidmx/react-shared/components/feedback/Alert.js";
+import { MeetCard, MeetPageShell } from "./_MeetChrome.js";
+
+export default function NoMeetingTokenPage() {
+    const { branding } = useBranding();
+    return (
+        <MeetPageShell branding={branding}>
+            <MeetCard>
+                <Alert>No meeting link specified.</Alert>
+            </MeetCard>
+        </MeetPageShell>
+    );
 }

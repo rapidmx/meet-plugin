@@ -14,6 +14,10 @@ export interface VideoMeetingSecuritySuiteContext {
     mailboxUid: () => string;
     ownerToken: () => string;
     strangerToken: () => string;
+    /** The uid `strangerToken()` authenticates as - a real, non-guest RapidMX identity with no grant on the
+     * fixture mailbox, used to prove `join()` grants an already-authenticated real caller their own uid rather
+     * than minting a guest identity for them. */
+    strangerUid: () => string;
     /** A trusted (`admin` role), elevated token with NO explicit grant on the fixture mailbox - proves the
      * framework's "trusted users always have permission" shortcut never applies to a video meeting. */
     adminToken: () => string;
@@ -129,14 +133,46 @@ export function videoMeetingSecuritySuite(ctx: VideoMeetingSecuritySuiteContext)
             const { joinToken } = await ctx.createPrivateMeeting();
             const result = await request(ctx.app()).get(`${ctx.baseUrl}/join/${joinToken}`);
             expect(result.status).toBe(200);
+            expect(result.body.authenticated).toBe(false);
             expect(result.body.token).toBeTruthy();
-            expect(result.body.guestUid).toMatch(/^guest:/);
+            expect(result.body.selfUid).toMatch(/^guest:/);
+        });
+
+        it("Joins as the caller's own real uid (no guest token) when already authenticated on a private invitee token.", async () => {
+            const { joinToken } = await ctx.createPrivateMeeting();
+            const result = await request(ctx.app()).get(`${ctx.baseUrl}/join/${joinToken}`).set("Authorization", "jwt " + ctx.strangerToken());
+            expect(result.status).toBe(200);
+            expect(result.body.authenticated).toBe(true);
+            expect(result.body.selfUid).toBe(ctx.strangerUid());
+            expect(result.body.token).toBeUndefined();
+            expect(result.body.expiresAt).toBeUndefined();
         });
 
         it("Joins successfully with a valid public slug.", async () => {
             const { publicSlug } = await ctx.createPublicMeeting();
             const result = await request(ctx.app()).get(`${ctx.baseUrl}/join/${publicSlug}`);
             expect(result.status).toBe(200);
+        });
+
+        it("Joins as the caller's own real uid (no guest token) when already authenticated on a public slug.", async () => {
+            const { publicSlug } = await ctx.createPublicMeeting();
+            const result = await request(ctx.app()).get(`${ctx.baseUrl}/join/${publicSlug}`).set("Authorization", "jwt " + ctx.strangerToken());
+            expect(result.status).toBe(200);
+            expect(result.body.authenticated).toBe(true);
+            expect(result.body.selfUid).toBe(ctx.strangerUid());
+            expect(result.body.token).toBeUndefined();
+        });
+
+        it("Still takes the guest path for a returning guest presenting a prior join()'s own guest JWT, never the authenticated one.", async () => {
+            const { publicSlug } = await ctx.createPublicMeeting();
+            const first = await request(ctx.app()).get(`${ctx.baseUrl}/join/${publicSlug}`);
+            const second = await request(ctx.app()).get(`${ctx.baseUrl}/join/${publicSlug}`).set("Authorization", "jwt " + first.body.token);
+            expect(second.status).toBe(200);
+            expect(second.body.authenticated).toBe(false);
+            expect(second.body.selfUid).toMatch(/^guest:/);
+            expect(second.body.token).toBeTruthy();
+            // A fresh guest identity is minted each time - never reusing the presented guest uid.
+            expect(second.body.selfUid).not.toBe(first.body.selfUid);
         });
 
         it("Returns 404 once the meeting has been cancelled, for both a private token and a public slug.", async () => {

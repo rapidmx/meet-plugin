@@ -63,6 +63,7 @@ describe("plugin entry points", () => {
                 "DEFAULT_TURN_CREDENTIAL_TTL_SECONDS",
                 "turnRestCredential",
                 "GUEST_JWT_TTL_SECONDS",
+                "GUEST_UID_PREFIX",
                 "JOIN_TOKEN_PATTERN",
                 "PUBLIC_SLUG_PATTERN",
                 "mintJoinToken",

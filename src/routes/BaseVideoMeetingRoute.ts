@@ -49,7 +49,13 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@.]+\.[^\s@]+$/;
  * Phase 1, so a guest who is still on the call past this needs to re-open the join link. */
 export const GUEST_JWT_TTL_SECONDS: number = 4 * 60 * 60;
 
-/** How many times `ensureGuestChannelGrant()` retries an optimistic-lock conflict on the meeting's own ACL before
+/** The fixed prefix every guest uid `mintGuestToken()` mints starts with - also how `join()` tells a genuine,
+ * already-authenticated RapidMX identity apart from a returning guest presenting a JWT from an earlier `join()`
+ * call (see `join()`'s doc comment): a guest uid is never a real mailbox-owning identity, so this prefix is a safe,
+ * cheap discriminator with no separate "is this a guest" flag needed anywhere. */
+export const GUEST_UID_PREFIX = "guest:";
+
+/** How many times `ensureChannelGrant()` retries an optimistic-lock conflict on the meeting's own ACL before
  * giving up - see that method's doc comment. */
 const GUEST_GRANT_MAX_ATTEMPTS = 5;
 
@@ -99,18 +105,38 @@ export interface PublicVideoMeeting {
     hostDisplayName?: string;
 }
 
-/** `join()`'s response. */
+/**
+ * `join()`'s response.
+ *
+ * **`authenticated`/`selfUid`/`token` - reading this shape correctly.** A caller who already presented a valid
+ * session for a real, non-guest RapidMX identity (see `join()`'s doc comment for exactly how that's told apart
+ * from a returning guest) gets `authenticated: true` and no `token`/`expiresAt` at all - there is no guest JWT to
+ * hand over, because the caller's own already-existing session cookie/header already authenticates `/push` for
+ * them, with zero new client-side auth handling. The frontend must not write any cookie in that case (doing so
+ * would be pointless at best, and at worst overwrite the caller's real cookie with... the value it already has).
+ * The common anonymous case (`authenticated: false`) is unchanged from Phase 1: `token`/`expiresAt` are present
+ * and the frontend applies `token` as the `jwt` cookie before connecting - see
+ * `apps/shared/push/GuestSignalingClient.ts`.
+ */
 export interface VideoMeetingJoinResult {
     meeting: PublicVideoMeeting;
     iceServers: IceServerConfig[];
-    /** A short-lived guest JWT, immediately usable against `/push` to subscribe to and publish on
-     * `meeting.uid` - and nothing else. See this class's doc comment. */
-    token: string;
-    /** The synthetic identity `token` authenticates as (`guest:<random>`) - included mainly for diagnostics /
-     * tests; a caller has no independent use for it beyond what `token` already grants. */
-    guestUid: string;
-    /** ISO 8601 instant `token` expires at. */
-    expiresAt: string;
+    /** `true` when the caller already presented a valid session for a real RapidMX identity when calling `join()`;
+     * `false` for the common anonymous case, where a fresh guest identity was just minted instead. */
+    authenticated: boolean;
+    /** The identity now holding `READ`/`CREATE` on the meeting's own push channel, and the uid the frontend's mesh
+     * connection manager (`apps/shared/webrtc/MeshConnectionManager.ts`) must identify itself as: the caller's own
+     * real uid when `authenticated` is `true`, otherwise the freshly minted synthetic `guest:<random>` uid `token`
+     * authenticates as. Always present - this replaces Phase 1's guest-only `guestUid` field now that the same
+     * grant-and-identify step also runs for a real, already-authenticated caller. */
+    selfUid: string;
+    /** A short-lived guest JWT, immediately usable against `/push` to subscribe to and publish on `meeting.uid` -
+     * and nothing else. Present only when `authenticated` is `false`; omitted entirely for an already-authenticated
+     * real caller, who has no guest token minted for them at all (see `join()`). See this class's doc comment. */
+    token?: string;
+    /** ISO 8601 instant `token` expires at. Present only when `authenticated` is `false`, exactly when `token`
+     * itself is. */
+    expiresAt?: string;
 }
 
 /**
@@ -155,13 +181,13 @@ export interface VideoMeetingJoinResult {
  * `RepoUtils.create()`'s automatic per-record ACL claim already does (it grants the creator full rights on the
  * fresh ACL - see `RepoUtils.claimRecordACL()`).
  *
- * ## The guest-JWT-to-push-channel-ACL-grant mechanism
+ * ## The channel-ACL-grant mechanism
  *
  * An anonymous guest holds no `AccessControlList` grant of their own and has no `JWTUser` to authenticate `/push`
  * with in the first place - `join()` therefore does two things together: it mints a short-lived, scope-limited
  * guest JWT (`mintGuestToken()`: a synthetic `guest:<random>` uid, no roles, `GUEST_JWT_TTL_SECONDS` expiry, real and
  * verifiable since it's signed with the same `auth` config every other token is), and it adds an explicit
- * `ACLRecord` for that exact uid onto the meeting's own `AccessControlList` (`ensureGuestChannelGrant()`), granting
+ * `ACLRecord` for that exact uid onto the meeting's own `AccessControlList` (`ensureChannelGrant()`), granting
  * `READ` (so `BasePushRoute`'s SUBSCRIBE succeeds) and `CREATE` (so a publish does - see `MailPushRoute`'s doc
  * comment: "publishing to a channel needs CREATE on it as an ordinary user would"). The grant is scoped to exactly
  * that one meeting's uid, nothing else - the same "possession of a link is the credential" pattern
@@ -169,13 +195,37 @@ export interface VideoMeetingJoinResult {
  * elsewhere in this codebase, extended one step further because signaling needs a channel *subscription*, not just
  * a stateless REST call.
  *
- * **Known limitation, documented rather than silently assumed away**: because each `join()` call mints a *fresh*
- * random guest uid (so simultaneous participants of one shared link are distinguishable from each other in the
- * signaling channel), each join adds one more `ACLRecord` to the meeting's own ACL document, and nothing in Phase 1
- * ever removes one. A meeting joined many times over its lifetime accumulates unused records; there is no GC job,
- * matching this codebase's own precedent for `Booking.manageToken` (documented as never expiring, no GC job either).
- * Since the guest JWTs themselves expire, an accumulated record is inert (unusable) well before it becomes a real
- * concern - a cleanup pass is a reasonable thing for a later phase to add, not a Phase 1 requirement.
+ * **Known limitation, documented rather than silently assumed away**: because each `join()` call for an anonymous
+ * caller mints a *fresh* random guest uid (so simultaneous participants of one shared link are distinguishable from
+ * each other in the signaling channel), each such join adds one more `ACLRecord` to the meeting's own ACL document,
+ * and nothing in Phase 1 ever removes one. A meeting joined many times over its lifetime accumulates unused records;
+ * there is no GC job, matching this codebase's own precedent for `Booking.manageToken` (documented as never
+ * expiring, no GC job either). Since the guest JWTs themselves expire, an accumulated record is inert (unusable)
+ * well before it becomes a real concern - a cleanup pass is a reasonable thing for a later phase to add, not a
+ * Phase 1 requirement. An already-authenticated real caller (see below) is granted their own stable uid instead, so
+ * repeated joins by the same real identity never add more than the one record `ensureChannelGrant()`'s own
+ * idempotency check already collapses them to.
+ *
+ * ## Real, already-authenticated callers (the browser-session-collision fix)
+ *
+ * `join()` also accepts an optional `@AuthUser`: whatever `req.user` the framework's own `JWTStrategy` already
+ * populated from the caller's existing `Authorization` header or `jwt` cookie, exactly like every other
+ * authenticated-optional endpoint in this codebase's family (e.g. `BaseScopedChildRoute.resolveEffectiveUser()`'s
+ * "prefer the real authenticated user, fall back to the anonymous token" precedent). This matters because a
+ * logged-in RapidMX user's browser already carries a real, `HttpOnly` `jwt` session cookie for this origin - a
+ * cookie `apps/shared/push/GuestSignalingClient.ts` cannot overwrite with a guest token even if `join()` minted one
+ * (browsers refuse to let a script override an `HttpOnly` cookie of the same name), so a guest-only `join()` would
+ * leave that browser's `/push` WebSocket authenticating as the real session while the meeting's ACL only names a
+ * synthetic guest uid - the subscribe is simply, safely refused, and the real user could never actually join.
+ *
+ * The fix: when `user` is present and is a *real* identity - not a guest uid from a previous `join()` call, told
+ * apart by the `GUEST_UID_PREFIX` a guest uid always starts with and a real, mailbox-owning identity never can -
+ * `join()` grants `user.uid` itself (not a synthetic one) `READ`/`CREATE` on the meeting's channel via
+ * `ensureChannelGrant()`, mints no guest JWT at all, and returns `authenticated: true` with `selfUid: user.uid`. The
+ * caller's own already-existing session cookie now already authenticates `/push` for them with zero new
+ * client-side auth handling - the frontend must not write a cookie of its own in this case (see
+ * `VideoMeetingJoinResult`'s doc comment). When `user` is absent (the common, true-anonymous case - no existing
+ * session at all), behavior is exactly Phase 1's: a fresh guest identity is minted and granted instead.
  *
  * ## Other known limitations
  *
@@ -564,13 +614,16 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     }
 
     /**
-     * Adds an `ACLRecord` granting `guestUid` `READ`/`CREATE` on `meetingUid`'s own `AccessControlList`, unless one
-     * already exists (idempotent - a retried/duplicate call for the same guest is a no-op). Retries a handful of
-     * times on an optimistic-lock conflict (`saveACL()`'s version check): a public meeting can be joined by several
-     * guests at once, each racing to add their own record to the very same ACL document, and a lost race must be
-     * retried against the freshly re-read version rather than surfaced to the guest as an error.
+     * Adds an `ACLRecord` granting `uid` `READ`/`CREATE` on `meetingUid`'s own `AccessControlList`, unless one
+     * already exists (idempotent - a retried/duplicate call for the same uid, guest or real, is a no-op). Retries a
+     * handful of times on an optimistic-lock conflict (`saveACL()`'s version check): a public meeting can be joined
+     * by several callers at once, each racing to add their own record to the very same ACL document, and a lost
+     * race must be retried against the freshly re-read version rather than surfaced to the caller as an error.
+     * Named generically (not `ensureGuestChannelGrant()`, its Phase 1 name) since `join()` now calls this for a
+     * real, already-authenticated caller's own uid too - see this class's doc comment on "Real, already-
+     * authenticated callers".
      */
-    private async ensureGuestChannelGrant(meetingUid: string, guestUid: string): Promise<void> {
+    private async ensureChannelGrant(meetingUid: string, uid: string): Promise<void> {
         for (let attempt = 0; attempt < GUEST_GRANT_MAX_ATTEMPTS; attempt++) {
             const acl: AccessControlList | undefined = await this.aclUtils!.findACL(meetingUid, [], { skipCache: true, skipParents: true });
             /* v8 ignore if -- unreachable via real usage: the meeting's own per-record ACL is claimed at creation
@@ -579,10 +632,10 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             if (!acl) {
                 throw new ApiError(ApiErrors.INTERNAL_ERROR, 500, ApiErrorMessages.INTERNAL_ERROR);
             }
-            if (acl.records.some((record) => record.userOrRoleId === guestUid)) {
+            if (acl.records.some((record) => record.userOrRoleId === uid)) {
                 return;
             }
-            acl.records.push({ userOrRoleId: guestUid, actions: [ACLAction.READ, ACLAction.CREATE] });
+            acl.records.push({ userOrRoleId: uid, actions: [ACLAction.READ, ACLAction.CREATE] });
             try {
                 await this.aclUtils!.saveACL(acl);
                 return;
@@ -597,17 +650,18 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     }
 
     /**
-     * Mints a short-lived, scope-limited guest identity - see this class's doc comment on the guest-JWT-to-
-     * push-channel-ACL-grant mechanism. The deployment's real `auth` config normally carries its own
-     * `options.expiresIn` (every other token's session length), which `jsonwebtoken` refuses to combine with an
-     * explicit `exp` claim in the payload ("Bad 'options.expiresIn' option the payload already has an 'exp'
-     * property") - so this signs with a shallow copy of `authConfig` that omits `options.expiresIn`, letting the
-     * payload's own `exp` (this guest token's own, shorter `GUEST_JWT_TTL_SECONDS` lifetime) govern instead.
-     * Everything else about `authConfig` - the secret, the algorithm, `audience`/`issuer` - is unchanged, so this
-     * guest token verifies through the exact same `JWTStrategy` every other token does.
+     * Mints a short-lived, scope-limited guest identity - see this class's doc comment on the channel-ACL-grant
+     * mechanism. Only called for the true-anonymous case (`join()`'s `user` is absent, or presents a prior guest
+     * uid rather than a real one). The deployment's real `auth` config normally carries its own `options.expiresIn`
+     * (every other token's session length), which `jsonwebtoken` refuses to combine with an explicit `exp` claim in
+     * the payload ("Bad 'options.expiresIn' option the payload already has an 'exp' property") - so this signs with
+     * a shallow copy of `authConfig` that omits `options.expiresIn`, letting the payload's own `exp` (this guest
+     * token's own, shorter `GUEST_JWT_TTL_SECONDS` lifetime) govern instead. Everything else about `authConfig` -
+     * the secret, the algorithm, `audience`/`issuer` - is unchanged, so this guest token verifies through the exact
+     * same `JWTStrategy` every other token does.
      */
     private mintGuestToken(): { guestUid: string; token: string; expiresAt: Date } {
-        const guestUid: string = `guest:${crypto.randomBytes(16).toString("base64url")}`;
+        const guestUid: string = `${GUEST_UID_PREFIX}${crypto.randomBytes(16).toString("base64url")}`;
         const expiresAt: Date = new Date(Date.now() + GUEST_JWT_TTL_SECONDS * 1000);
         const { expiresIn: _expiresIn, ...guestOptions } = this.authConfig?.options ?? {};
         const guestAuthConfig: any = { ...this.authConfig, options: guestOptions };
@@ -626,36 +680,52 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         return mailbox?.displayName || undefined;
     }
 
-    @Summary("Joins a video meeting anonymously.")
+    @Summary("Joins a video meeting.")
     @Description(
-        "Resolves an invitee's join token or a public meeting's slug, and mints a short-lived guest JWT (see " +
-            "GUEST_JWT_TTL_SECONDS) already granted READ/CREATE on the meeting's own push channel, ready to use " +
-            "against /push to exchange WebRTC signaling messages. Requires no authentication beyond the token " +
-            "itself; a stale/unknown token answers 404.",
+        "Resolves an invitee's join token or a public meeting's slug. If the caller already presents a valid " +
+            "session for a real RapidMX identity (not a returning guest), that identity is granted READ/CREATE " +
+            "on the meeting's own push channel directly and the response carries 'authenticated: true' with no " +
+            "guest token at all - the caller's own existing session cookie/header already authenticates /push " +
+            "for them. Otherwise (the common anonymous case) mints a short-lived guest JWT (see " +
+            "GUEST_JWT_TTL_SECONDS) already granted READ/CREATE on the same channel, ready to use against /push " +
+            "to exchange WebRTC signaling messages. Requires no authentication beyond the token itself; a " +
+            "stale/unknown token answers 404.",
     )
     @RateLimit()
     @Get("/join/:token")
-    public async join(@Param("token") token: string): Promise<VideoMeetingJoinResult> {
+    public async join(@Param("token") token: string, @AuthUser user?: JWTUser): Promise<VideoMeetingJoinResult> {
         await this.init();
         const meeting: VM = await this.requireMeetingByToken(token);
+        const publicMeeting: PublicVideoMeeting = {
+            uid: meeting.uid,
+            title: meeting.title,
+            visibility: meeting.visibility,
+            status: meeting.status,
+            hostDisplayName: await this.hostDisplayName(meeting.mailboxUid),
+        };
+        const iceServers: IceServerConfig[] = buildIceServers({
+            url: this.turnUrl,
+            username: this.turnUsername,
+            credential: this.turnCredential,
+            sharedSecret: this.turnSharedSecret,
+        });
+
+        // A real, already-authenticated RapidMX identity - never a guest uid from an earlier join() call
+        // presenting its own guest JWT back (a guest uid is never a valid mailbox-owning identity anyway, so this
+        // prefix check is a safe, cheap discriminator - see this class's doc comment and GUEST_UID_PREFIX).
+        if (user && !user.uid.startsWith(GUEST_UID_PREFIX)) {
+            await this.ensureChannelGrant(meeting.uid, user.uid);
+            return { meeting: publicMeeting, iceServers, authenticated: true, selfUid: user.uid };
+        }
+
         const { guestUid, token: guestToken, expiresAt } = this.mintGuestToken();
-        await this.ensureGuestChannelGrant(meeting.uid, guestUid);
+        await this.ensureChannelGrant(meeting.uid, guestUid);
         return {
-            meeting: {
-                uid: meeting.uid,
-                title: meeting.title,
-                visibility: meeting.visibility,
-                status: meeting.status,
-                hostDisplayName: await this.hostDisplayName(meeting.mailboxUid),
-            },
-            iceServers: buildIceServers({
-                url: this.turnUrl,
-                username: this.turnUsername,
-                credential: this.turnCredential,
-                sharedSecret: this.turnSharedSecret,
-            }),
+            meeting: publicMeeting,
+            iceServers,
+            authenticated: false,
+            selfUid: guestUid,
             token: guestToken,
-            guestUid,
             expiresAt: expiresAt.toISOString(),
         };
     }
