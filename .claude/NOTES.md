@@ -312,3 +312,82 @@ backends.
 
 Files: `src/models/mongo/VideoMeetingMongo.ts`, `src/models/sql/VideoMeetingSQL.ts`, `src/models/types.ts`,
 `test/routes/videoMeetingSecuritySuite.ts`.
+
+## 2026-09-22: Phase 4 (personal settings page) implemented
+
+Frontend-only inside this repo, entirely under `apps/settings-video-conferencing/` (the Phase 1 placeholder page
+this manifest already declared, per `.claude/NOTES.md`'s Phase 1 entry) - `apps/meet/`, `src/routes/`,
+`src/models/` untouched except the one small, additive backend change documented below. `yarn lint`/`tsc --noEmit`
+(root and `-p tsconfig.apps.json`)/`yarn build`/`yarn test:prod` all clean; 408 tests, 100% statement/function/line
+coverage, 97.52% branch (floor 95%).
+
+- **The "personal room" convention - no new field or route.** The spec asks for "a single URL shared across all
+  attendees, unique per mailbox" (Phase 1's own design note on why `visibility: "public"` exists at all) surfaced
+  as "my personal meeting room." Checked `BaseVideoMeetingRoute`'s existing routes first, per the task brief: a
+  mailbox is not restricted to one public meeting (nothing stops `create()` from being called twice with
+  `visibility: "public"`), and there is no field distinguishing "the" personal room from any other public meeting
+  a mailbox happens to have. Rather than add one, this page treats a mailbox's **oldest still-active
+  (non-cancelled) `PUBLIC` `VideoMeeting`** as its personal room by convention (`findPersonalRoom()` in
+  `index.tsx`) - oldest-first keeps the identification stable across reloads regardless of when a later public
+  meeting (created some other way, e.g. directly through the API) lands in the list; skipping a cancelled one
+  means cancelling today's room and creating a new one always finds the fresh one on the next load. If none
+  exists, the page offers to create one (`PersonalRoomCard`'s "Create my personal room" button, an ordinary
+  `createVideoMeeting({ visibility: "public" })` call with no new parameters). This is exactly the "smallest
+  sensible convention" the task brief anticipated as the fallback, and it was sufficient - no new
+  field/route/flag was needed to make "get and manage my one public link" work.
+- **The one small, additive backend change: `find()`/`findById()` now also return `publicJoinUrl`.**
+  `create()`'s response already computed `organizerJoinUrl`/`publicJoinUrl` inline from a slug it had just minted,
+  but that response is only ever sent once, at creation - `findById()` (`GET /:id`) only ever recomputed
+  `organizerJoinUrl` (mirroring the exact gap `organizerSlug` itself was invented to close, see the entry above),
+  and `find()` (`GET /`, the list endpoint) recomputed neither. This settings page needs a public meeting's
+  shareable link on every later page load, not only the one response `create()` ever sent - without this, a user
+  reopening Settings after creating their room would see the room but have no way to get its link back (the
+  `publicSlug` value itself was never exposed to the client anywhere `find()`/`findById()` return it, since these
+  routes return the raw persisted entity). Genuinely tried to make this work without touching `src/` first (per
+  the task brief's instruction), and could not: the join URL requires `mail:videoconf:public_url` (a
+  server-only config value never exposed to the client) plus `buildBaseUrl()`'s own safety validation, both of
+  which only exist inside `BaseVideoMeetingRoute`. The fix, `BaseVideoMeetingRoute.withJoinUrls()`: a new private
+  helper factoring out exactly what `create()` and the old `findById()` ternary already computed, now applied
+  uniformly to every meeting `find()`/`findById()` return (`organizerJoinUrl` when `organizerSlug` is set,
+  `publicJoinUrl` when `publicSlug` is set - a meeting only ever carries one of the two, never both). Purely
+  additive: every existing `VM`/`VM[]` field is still present, unchanged; only the two new optional fields are
+  added. Tests: `videoMeetingSecuritySuite.ts`'s "the organizer join link (create/findById)" describe block
+  (renamed "the organizer/public join link (create/find/findById)") gained a `publicJoinUrl` assertion on its
+  existing re-read test and a new list-endpoint test, backend-agnostic on both Mongo and SQL.
+- **`react-shared` addition (a different repo, its own gates verified separately - see below): `listVideoMeetings()`.**
+  Checked `@rapidmx/react-shared`'s `videoconf/videoMeetingsApi.ts` (Phase 3's addition) first, per the task
+  brief: it covered create/update/get, but had no list call at all (`BaseVideoMeetingRoute.find()` already
+  supported exactly the query this page needs - `mailboxUid` only, no `calendarEventUid` filter - it just had no
+  typed wrapper). Added `listVideoMeetings(mailboxUid, params?)` (`GET /mail/video-meetings?...`, matching
+  `bookingApi.ts`'s own `listBookingTypes()` shape/paging convention exactly), a `dateCreated: string` field on
+  `VideoMeeting` (every `BaseEntity` already carries one; this page both displays it and uses it for the personal
+  room's oldest-first ordering, so it earned being typed - see that interface's own "only the fields a client
+  actually reads" convention), and `publicJoinUrl?: string` alongside the already-existing `organizerJoinUrl?` on
+  `VideoMeetingDetail` (now shared by `getVideoMeeting()`'s and `listVideoMeetings()`'s response shape, matching
+  `withJoinUrls()`'s own uniform computation above). No other Phase 3 shape changed. Verified separately in that
+  repo: `tsc --noEmit`, `yarn lint`, `yarn build` clean; full suite 96 files / 1264 tests, 100%
+  statement/function/line coverage, 99.48% branch (gates unchanged). Consumed here via the same
+  build-and-copy-`dist` overlay this project's sibling repos use for an unpublished cross-repo change (see e.g.
+  `react-shared`'s own NOTES on `web-client`'s node_modules overlay) - `videoconf-plugin/node_modules/@rapidmx/
+  react-shared/dist` was refreshed from a `yarn build` there; nothing in either repo's `package.json`/`yarn.lock`
+  was touched, and no version was bumped.
+- **Page structure** (`_layout.tsx`, `index.tsx`, `_PersonalRoomCard.tsx`): matches `booking-plugin`'s
+  `apps/settings-booking-types/` conventions exactly, per the task brief's structural reference - `_layout.tsx` is
+  a byte-for-byte copy of that file's own copy of `web-client`'s `apps/www/_layout.tsx` (every plugin app
+  directory needs its own); `index.tsx` uses `SettingsShell`/`useSettingsShell()` the same non-null-`mailboxUid`
+  way every other settings page does, with `active="video-conferencing"` (the `id` this plugin's manifest already
+  declares under `ui.settingsSections` - manifest untouched, as instructed); the meetings table reuses
+  `BookingTypesContent`'s exact table/copy-link shape (`INPUT_CLASS`, the same header row, the same
+  copy-then-revert-after-2s button pattern). `PersonalRoomCard` is a small local (not `apps/shared/`) component,
+  since - unlike `booking-plugin`'s `BookingProfileEditor` - nothing else in this plugin needs it.
+- **What the meetings table shows**: every public meeting other than the identified personal room, plus any
+  private meeting with a linked `calendarEventUid` (the calendar compose hook's own meetings, Phase 3) - a
+  private, calendar-less meeting is left out as an artifact of this plugin's own API used directly (e.g. testing),
+  per `BaseVideoMeetingRoute`'s own Phase 1 doc comment on why that's possible at all. Actions are exactly the
+  task brief's two: "Copy link" for a public entry with a `publicJoinUrl` (omitted when the deployment has no
+  `mail:videoconf:public_url` configured), and "Cancel" for a `"scheduled"` entry (`updateVideoMeeting(uid, {
+  status: "cancelled" })` - this route's own `PUT` was already this minimal in Phase 1, nothing new needed here
+  either). The personal room card additionally allows renaming (`updateVideoMeeting(uid, { title })`) - a small,
+  natural extension of "manage" the task brief's own wording invited, using the exact same existing endpoint.
+- **Nothing else touched**: no admin/TURN UI (already fully covered by the generic plugin-settings dialog, per
+  the task brief - not built here), no `web-client`/`restapi`/`server` changes, no version bump, no commit.

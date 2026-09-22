@@ -249,7 +249,7 @@ export function videoMeetingSecuritySuite(ctx: VideoMeetingSecuritySuiteContext)
         });
     });
 
-    describe("the organizer join link (create/findById)", () => {
+    describe("the organizer/public join link (create/find/findById)", () => {
         it("Returns a working organizer join URL when creating a private meeting, alongside the invitee links.", async () => {
             const created = await authed(ctx.ownerToken()).post(ctx.baseUrl).send(createBody());
 
@@ -274,17 +274,33 @@ export function videoMeetingSecuritySuite(ctx: VideoMeetingSecuritySuiteContext)
             expect(created.body.organizerJoinUrl).toBeUndefined();
         });
 
-        it("Includes the organizer join URL when re-reading a private meeting later, and omits it for a public one.", async () => {
+        it("Includes the organizer join URL when re-reading a private meeting later, and the public join URL when re-reading a public one - never both on the same meeting.", async () => {
             const priv = await authed(ctx.ownerToken()).post(ctx.baseUrl).send(createBody());
             const readPriv = await authed(ctx.ownerToken()).get(`${ctx.baseUrl}/${priv.body.meeting.uid}`);
             expect(readPriv.status).toBe(200);
             expect(readPriv.body.uid).toBe(priv.body.meeting.uid);
             expect(readPriv.body.organizerJoinUrl).toBe(priv.body.organizerJoinUrl);
+            expect(readPriv.body.publicJoinUrl).toBeUndefined();
 
             const pub = await authed(ctx.ownerToken()).post(ctx.baseUrl).send({ mailboxUid: ctx.mailboxUid(), title: "Town Hall", visibility: "public" });
             const readPub = await authed(ctx.ownerToken()).get(`${ctx.baseUrl}/${pub.body.meeting.uid}`);
             expect(readPub.status).toBe(200);
             expect(readPub.body.organizerJoinUrl).toBeUndefined();
+            expect(readPub.body.publicJoinUrl).toBe(pub.body.publicJoinUrl);
+        });
+
+        it("Includes the same organizerJoinUrl/publicJoinUrl on each listed meeting as create()/findById() return for it.", async () => {
+            const priv = await authed(ctx.ownerToken()).post(ctx.baseUrl).send(createBody());
+            const pub = await authed(ctx.ownerToken()).post(ctx.baseUrl).send({ mailboxUid: ctx.mailboxUid(), title: "Town Hall", visibility: "public" });
+
+            const listed = await authed(ctx.ownerToken()).get(`${ctx.baseUrl}?mailboxUid=${ctx.mailboxUid()}`);
+            expect(listed.status).toBe(200);
+            const listedPriv = listed.body.find((m: any) => m.uid === priv.body.meeting.uid);
+            const listedPub = listed.body.find((m: any) => m.uid === pub.body.meeting.uid);
+            expect(listedPriv.organizerJoinUrl).toBe(priv.body.organizerJoinUrl);
+            expect(listedPriv.publicJoinUrl).toBeUndefined();
+            expect(listedPub.publicJoinUrl).toBe(pub.body.publicJoinUrl);
+            expect(listedPub.organizerJoinUrl).toBeUndefined();
         });
     });
 }

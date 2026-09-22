@@ -261,6 +261,17 @@ export interface VideoMeetingJoinResult {
  * organizer-slug-shaped probe must be indistinguishable from a slug naming nothing at all. A caller who satisfies
  * both proceeds through exactly the authenticated branch described above, with no new response field.
  *
+ * ## Recovering a join link on a later read (`find()`/`findById()`, Phase 4)
+ *
+ * `create()`'s response computes `organizerJoinUrl`/`publicJoinUrl` inline, once, from the slug it just minted -
+ * fine for the moment of creation, but Phase 4's settings page (`apps/settings-video-conferencing`) needs a
+ * meeting's own persistent link on every later page load too, not only the one response `create()` ever sent (a
+ * user's "personal room", by this codebase's Phase 4 convention, is simply their oldest non-cancelled `PUBLIC`
+ * meeting - see `.claude/NOTES.md`'s Phase 4 entry for why no new field/route was needed to name it as such). Since
+ * a plain `RepoUtils.find()`/`findOne()` returns only the persisted slug columns, `find()` and `findById()` both
+ * now run every loaded meeting through `withJoinUrls()` - the exact same computation `create()` already did,
+ * applied uniformly on read instead of only once on write.
+ *
  * ## Other known limitations
  *
  * **`VideoMeetingInvitee.joinToken` never expires** and has no GC job - identical tradeoff to `Booking.manageToken`.
@@ -527,15 +538,39 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         return result;
     }
 
+    /**
+     * Adds `organizerJoinUrl`/`publicJoinUrl` (see `joinUrl()`) to a persisted meeting for a caller re-reading it
+     * later. `create()`'s own response computes the same links inline from values it just minted, but `find()`/
+     * `findById()` load the plain persisted entity, which carries only the slugs themselves - so a caller who
+     * didn't keep `create()`'s one-time response (e.g. this plugin's own settings page, reloaded after the meeting
+     * that IS a user's "personal room" - see `.claude/NOTES.md`'s Phase 4 entry - was created in an earlier visit)
+     * would otherwise have no way to recover a public meeting's shareable link, or a private meeting's organizer
+     * link, at all. Spreads rather than mutates: the loaded instance is the repo's own entity, and both fields are
+     * response-only.
+     */
+    private withJoinUrls<T extends VM>(meeting: T): T & { organizerJoinUrl?: string; publicJoinUrl?: string } {
+        const result: T & { organizerJoinUrl?: string; publicJoinUrl?: string } = { ...meeting };
+        if (meeting.organizerSlug) {
+            result.organizerJoinUrl = this.joinUrl(meeting.organizerSlug);
+        }
+        if (meeting.publicSlug) {
+            result.publicJoinUrl = this.joinUrl(meeting.publicSlug);
+        }
+        return result;
+    }
+
     @Summary("Lists the owner's video meetings.")
-    @Description("Returns the meetings owned by the given mailbox. Requires LIST on that mailbox.")
+    @Description(
+        "Returns the meetings owned by the given mailbox, each carrying 'organizerJoinUrl'/'publicJoinUrl' " +
+            "exactly as findById() would for that meeting (see withJoinUrls()). Requires LIST on that mailbox.",
+    )
     @Get()
     public async find(
         @Query("mailboxUid") mailboxUid: string | undefined,
         @Query("limit") limit: string | undefined,
         @Query("page") page: string | undefined,
         @AuthUser user?: JWTUser,
-    ): Promise<VM[]> {
+    ): Promise<(VM & { organizerJoinUrl?: string; publicJoinUrl?: string })[]> {
         await this.init();
         if (typeof mailboxUid !== "string" || !mailboxUid) {
             throw new ApiError(ApiErrors.INVALID_REQUEST, 400, ApiErrorMessages.INVALID_REQUEST);
@@ -546,25 +581,25 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         // `limit`/`page` are passed both in the criteria (which the SQL query builder reads them from) and in
         // `options` (which the Mongo backend, and the ACL-filtered result trimming, read them from) - matching
         // every other paged `RepoUtils.find()` call in this codebase (e.g. `BaseBookingRoute.findAllEvents()`).
-        return await this.meetingRepo!.find(
+        const meetings: VM[] = await this.meetingRepo!.find(
             { mailboxUid: ModelUtils.literal(mailboxUid), limit: parsedLimit, page: parsedPage } as any,
             { ignoreACL: true, limit: parsedLimit, page: parsedPage },
         );
+        return meetings.map((meeting) => this.withJoinUrls(meeting));
     }
 
     @Summary("Retrieves one of the owner's video meetings.")
     @Description(
         "Returns the meeting, plus 'organizerJoinUrl' when it has an organizerSlug (every private meeting this " +
-            "route created) - so a caller loading an existing meeting later still gets a working organizer join " +
-            "link, not only the one create() returned once. Requires READ on the meeting's owning mailbox.",
+            "route created) and/or 'publicJoinUrl' when it has a publicSlug - so a caller loading an existing " +
+            "meeting later still gets a working link, not only the one create() returned once. Requires READ on " +
+            "the meeting's owning mailbox.",
     )
     @Get("/:id")
-    public async findById(@Param("id") id: string, @AuthUser user?: JWTUser): Promise<VM & { organizerJoinUrl?: string }> {
+    public async findById(@Param("id") id: string, @AuthUser user?: JWTUser): Promise<VM & { organizerJoinUrl?: string; publicJoinUrl?: string }> {
         await this.init();
         const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.READ);
-        // Spread rather than mutate: the loaded instance is the repo's own entity, and `organizerJoinUrl` is a
-        // response-only field that has no business being written back onto it.
-        return meeting.organizerSlug ? { ...meeting, organizerJoinUrl: this.joinUrl(meeting.organizerSlug) } : meeting;
+        return this.withJoinUrls(meeting);
     }
 
     @Summary("Updates a video meeting's title, or cancels it.")

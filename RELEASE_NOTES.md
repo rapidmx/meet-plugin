@@ -81,4 +81,15 @@ notes. What changed in this package to support it:
   and active, never as a hard dependency) so a booking's video location option can get a real, working link
   automatically when the host hasn't set one.
 
-Not in this phase: the admin/settings page (Phase 4).
+### Phase 4: the personal settings page
+
+- **`/settings/video-conferencing`**: a signed-in user's own video conferencing settings. A **personal room** - a
+  standing, shareable public link, by convention the mailbox's oldest still-active public meeting rather than a
+  new tracked concept - can be created, renamed and copied from a card at the top; a table below lists the
+  mailbox's other meetings (title, visibility, status, created date) with a cancel action and a copy-link action
+  for a public one. No admin-level settings page was added - TURN/STUN configuration is already covered by the
+  admin console's generic per-plugin settings dialog, which this plugin's manifest already declares fields for.
+- **Fix: a public meeting's link was only ever returned once, at creation.** `find()`/`findById()` now run every
+  meeting through the same `organizerJoinUrl`/`publicJoinUrl` computation `create()` always did, so reopening
+  Settings (or listing meetings any other way) shows a working link again instead of one only the original
+  creation response ever carried.
