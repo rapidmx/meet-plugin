@@ -9,10 +9,14 @@
  * over the server's existing `/push` channel (see `BaseVideoMeetingRoute`'s class doc comment).
  *
  * This module exports only the backend-agnostic surface: the entity interfaces, the pure ICE-server/public-URL/
- * token utilities, and the abstract route. The concrete Mongo/SQL classes a server loads (models and the route
- * mounted at `/api/mail/video-meetings`) come from this package's `./mongo` and `./sql` entry points.
+ * token utilities, the abstract route, and `createSingleInviteeVideoMeeting()` - the small integration function
+ * another plugin (`booking-plugin`, today) calls in-process to mint a private meeting without either package
+ * taking a hard dependency on the other (see `util/BookingIntegrationUtils.ts`'s doc comment). The concrete
+ * Mongo/SQL classes a server loads (models and the route mounted at `/api/mail/video-meetings`) come from this
+ * package's `./mongo` and `./sql` entry points.
  */
 export * from "./models/types.js";
+export * from "./util/BookingIntegrationUtils.js";
 export * from "./util/IceServerUtils.js";
 export * from "./util/PublicUrlUtils.js";
 export * from "./util/RouteAccessUtils.js";

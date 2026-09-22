@@ -66,16 +66,46 @@ export interface VideoMeeting extends BaseEntity {
      * name-derived (unlike `booking-plugin`'s human-chosen `BookingType.slug`) - see `util/TokenUtils.ts`'s
      * `mintPublicSlug()` doc comment for the exact shape/entropy and why.
      *
-     * The concrete `VideoMeetingMongo`/`VideoMeetingSQL` classes enforce this unique only *within* the owning
-     * mailbox (mirroring `BookingType.slug`'s own uniqueness scope, by explicit design decision - see this
-     * package's `.claude/NOTES.md`), but `BaseVideoMeetingRoute.join()`'s public URL carries no mailbox segment
-     * (`/join/:token`, not `/join/:mailboxUid/:token`), so the lookup a join actually performs is NOT scoped to a
-     * mailbox - it is a plain, global match on this field. The per-mailbox database constraint is a defense
-     * against an unlucky RNG collision inside one mailbox (matching the `BookingType` precedent for consistency);
-     * with ~48 bits of entropy per slug, a *cross*-mailbox collision is astronomically unlikely but is not
-     * actually prevented by any database constraint. This is a deliberate, documented tradeoff, not an oversight.
+     * The concrete `VideoMeetingMongo`/`VideoMeetingSQL` classes index this unique **globally**, matching exactly
+     * what `BaseVideoMeetingRoute.join()`'s public URL actually looks up (`/join/:token`, not
+     * `/join/:mailboxUid/:token` - the lookup carries no mailbox segment at all). An initial design considered
+     * scoping the database constraint to the owning mailbox instead (mirroring `BookingType.slug`'s own scope,
+     * for consistency with `booking-plugin`'s precedent - see this package's `.claude/NOTES.md`'s Phase 1 entry),
+     * but a per-mailbox *compound* sparse index doesn't actually work: it still indexes a document carrying at
+     * least one of its keys, and every row has `mailboxUid`, so two *private* meetings in one mailbox (both
+     * missing `publicSlug`) would collide on `(mailboxUid, null)` and the second could never be created - a real
+     * bug, not just a weaker-than-intended constraint, found and fixed before release. A single-field sparse
+     * index skips a document missing the field entirely, which both fixes that bug and happens to match the
+     * lookup's real (global) scope exactly - see `organizerSlug` below, which hit the identical pitfall.
      */
     publicSlug?: string;
+
+    /**
+     * The organizer's own join link identifier, minted only for a `PRIVATE` meeting, at creation. It exists solely
+     * so the meeting's organizer has *some* token `BaseVideoMeetingRoute.requireMeetingByToken()` can resolve to
+     * their own meeting: a private meeting's only other resolvable credentials are its invitees' `joinToken`s, and
+     * the calendar integration that mints a meeting per event deliberately builds `invitees` from the event's
+     * attendees *excluding* the organizer (the organizer manages the meeting through ownership, not as a guest), so
+     * without this the organizer of their own private meeting would have no link that resolves at all.
+     *
+     * **Unlike `publicSlug`, holding this value is not by itself a credential.** Resolving a token through this
+     * field never grants anonymous or guest access: `BaseVideoMeetingRoute.join()` additionally requires a real,
+     * already-authenticated (non-guest) caller who holds `READ` on the meeting's own `mailboxUid`, and answers the
+     * same bare `404` as an entirely unknown token for anyone else - see that method's doc comment. The value is
+     * unguessable all the same (the same `mintPublicSlug()` shape/entropy as `publicSlug`, stored in its own
+     * column), but that unguessability is defense in depth here, not the authorization itself.
+     *
+     * A meeting's `visibility` never changes after creation, and neither does this field. It is never set for a
+     * `PUBLIC` meeting. It is, however, genuinely optional even for a private one: a private meeting minted through
+     * `createSingleInviteeVideoMeeting()` (`util/BookingIntegrationUtils.ts` - `booking-plugin`'s in-process
+     * integration, whose meetings are managed from the booking flow and have no organizer to hand a link to) has
+     * none, so code must check for its presence rather than infer it from `visibility` alone.
+     *
+     * The concrete `VideoMeetingMongo`/`VideoMeetingSQL` classes index this unique globally, single-field sparse -
+     * the same shape `publicSlug`'s own index was corrected to (see above); this field never had the per-mailbox
+     * version to begin with, having been added after that pitfall was already found.
+     */
+    organizerSlug?: string;
 
     status: VideoMeetingStatus;
 

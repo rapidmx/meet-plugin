@@ -13,6 +13,9 @@ export interface VideoMeetingSecuritySuiteContext {
     baseUrl: string;
     mailboxUid: () => string;
     ownerToken: () => string;
+    /** The uid `ownerToken()` authenticates as - the fixture mailbox's owner, used to prove a private meeting's
+     * `organizerSlug` resolves for them (and only for a caller holding real permission on that mailbox). */
+    ownerUid: () => string;
     strangerToken: () => string;
     /** The uid `strangerToken()` authenticates as - a real, non-guest RapidMX identity with no grant on the
      * fixture mailbox, used to prove `join()` grants an already-authenticated real caller their own uid rather
@@ -28,8 +31,8 @@ export interface VideoMeetingSecuritySuiteContext {
     /** Grants `userOrRoleId` `actions` on the fixture mailbox's own ACL, on top of whatever it already has. */
     grantMailboxAccess: (userOrRoleId: string, actions: string[]) => Promise<void>;
     /** Creates a private meeting directly through the route (as `owner`) with one invitee, returning the created
-     * meeting and that invitee's join token. */
-    createPrivateMeeting: () => Promise<{ uid: string; joinToken: string }>;
+     * meeting, that invitee's join token, and the meeting's own organizer slug. */
+    createPrivateMeeting: () => Promise<{ uid: string; joinToken: string; organizerSlug: string }>;
     /** Creates a public meeting directly through the route (as `owner`), returning the created meeting and its
      * public slug. */
     createPublicMeeting: () => Promise<{ uid: string; publicSlug: string }>;
@@ -101,6 +104,14 @@ export function videoMeetingSecuritySuite(ctx: VideoMeetingSecuritySuiteContext)
             expect((await authed(ctx.delegateToken()).post(ctx.baseUrl).send(createBody())).status).toBe(403);
             expect((await authed(ctx.delegateToken()).put(`${ctx.baseUrl}/${uid}`).send({ title: "x" })).status).toBe(403);
             expect((await authed(ctx.delegateToken()).delete(`${ctx.baseUrl}/${uid}`)).status).toBe(403);
+        });
+
+        it("Lets an owner create a second private meeting in the same mailbox (regression: a compound sparse index on mailboxUid+publicSlug once made the second one collide, since both meetings have no publicSlug at all).", async () => {
+            const first = await authed(ctx.ownerToken()).post(ctx.baseUrl).send(createBody());
+            expect(first.status).toBe(200);
+            const second = await authed(ctx.ownerToken()).post(ctx.baseUrl).send(createBody());
+            expect(second.status).toBe(200);
+            expect(second.body.meeting.uid).not.toBe(first.body.meeting.uid);
         });
     });
 
@@ -183,6 +194,97 @@ export function videoMeetingSecuritySuite(ctx: VideoMeetingSecuritySuiteContext)
             const pub = await ctx.createPublicMeeting();
             await ctx.cancelMeeting(pub.uid);
             expect((await request(ctx.app()).get(`${ctx.baseUrl}/join/${pub.publicSlug}`)).status).toBe(404);
+        });
+    });
+
+    // A private meeting's `organizerSlug` exists only so its owner - deliberately never one of its own invitees -
+    // has something that resolves to it at all. Unlike an invitee token or a public slug, holding it is NOT the
+    // credential: `join()` additionally demands a real, already-authenticated caller holding READ on the meeting's
+    // own mailbox, and answers the same bare 404 as a slug naming nothing for everyone else. These cases are the
+    // whole security argument for the field, so they live here, backend-agnostic, next to the rest of the posture.
+    describe("join() via the organizer's own slug", () => {
+        it("Joins as the mailbox owner's own real identity, never a guest one.", async () => {
+            const { uid, organizerSlug } = await ctx.createPrivateMeeting();
+            const result = await request(ctx.app()).get(`${ctx.baseUrl}/join/${organizerSlug}`).set("Authorization", "jwt " + ctx.ownerToken());
+
+            expect(result.status).toBe(200);
+            expect(result.body.meeting.uid).toBe(uid);
+            expect(result.body.authenticated).toBe(true);
+            expect(result.body.selfUid).toBe(ctx.ownerUid());
+            expect(result.body.token).toBeUndefined();
+            expect(result.body.expiresAt).toBeUndefined();
+        });
+
+        it("Returns 404 for a true anonymous caller - an organizer slug is never an anonymous surface.", async () => {
+            const { organizerSlug } = await ctx.createPrivateMeeting();
+            expect((await request(ctx.app()).get(`${ctx.baseUrl}/join/${organizerSlug}`)).status).toBe(404);
+        });
+
+        it("Returns 404 for a returning guest presenting a prior join()'s own guest JWT.", async () => {
+            const { joinToken, organizerSlug } = await ctx.createPrivateMeeting();
+            const guest = await request(ctx.app()).get(`${ctx.baseUrl}/join/${joinToken}`);
+            expect(guest.body.selfUid).toMatch(/^guest:/);
+
+            const result = await request(ctx.app()).get(`${ctx.baseUrl}/join/${organizerSlug}`).set("Authorization", "jwt " + guest.body.token);
+            expect(result.status).toBe(404);
+        });
+
+        it("Returns 404 for a real, logged-in stranger holding no grant on the meeting's mailbox.", async () => {
+            const { organizerSlug } = await ctx.createPrivateMeeting();
+            const result = await request(ctx.app()).get(`${ctx.baseUrl}/join/${organizerSlug}`).set("Authorization", "jwt " + ctx.strangerToken());
+            expect(result.status).toBe(404);
+        });
+
+        it("Returns 404 for a trusted+elevated administrator with no explicit grant - the superuser shortcut never applies here either.", async () => {
+            const { organizerSlug } = await ctx.createPrivateMeeting();
+            const result = await request(ctx.app()).get(`${ctx.baseUrl}/join/${organizerSlug}`).set("Authorization", "jwt " + ctx.adminToken());
+            expect(result.status).toBe(404);
+        });
+
+        it("Returns 404 once the meeting has been cancelled, even for the owner.", async () => {
+            const { uid, organizerSlug } = await ctx.createPrivateMeeting();
+            await ctx.cancelMeeting(uid);
+            const result = await request(ctx.app()).get(`${ctx.baseUrl}/join/${organizerSlug}`).set("Authorization", "jwt " + ctx.ownerToken());
+            expect(result.status).toBe(404);
+        });
+    });
+
+    describe("the organizer join link (create/findById)", () => {
+        it("Returns a working organizer join URL when creating a private meeting, alongside the invitee links.", async () => {
+            const created = await authed(ctx.ownerToken()).post(ctx.baseUrl).send(createBody());
+
+            expect(created.status).toBe(200);
+            expect(created.body.meeting.organizerSlug).toMatch(/^[A-Za-z0-9_-]{11}$/);
+            expect(created.body.invitees).toHaveLength(1);
+            expect(created.body.organizerJoinUrl.endsWith(`/${created.body.meeting.organizerSlug}`)).toBe(true);
+
+            // "Working": the returned link's own final segment really does resolve for the owner.
+            const joined = await request(ctx.app())
+                .get(`${ctx.baseUrl}/join/${created.body.organizerJoinUrl.split("/").pop()}`)
+                .set("Authorization", "jwt " + ctx.ownerToken());
+            expect(joined.status).toBe(200);
+            expect(joined.body.meeting.uid).toBe(created.body.meeting.uid);
+        });
+
+        it("Mints no organizer slug and returns no organizer join URL for a public meeting.", async () => {
+            const created = await authed(ctx.ownerToken()).post(ctx.baseUrl).send({ mailboxUid: ctx.mailboxUid(), title: "Town Hall", visibility: "public" });
+
+            expect(created.status).toBe(200);
+            expect(created.body.meeting.organizerSlug).toBeUndefined();
+            expect(created.body.organizerJoinUrl).toBeUndefined();
+        });
+
+        it("Includes the organizer join URL when re-reading a private meeting later, and omits it for a public one.", async () => {
+            const priv = await authed(ctx.ownerToken()).post(ctx.baseUrl).send(createBody());
+            const readPriv = await authed(ctx.ownerToken()).get(`${ctx.baseUrl}/${priv.body.meeting.uid}`);
+            expect(readPriv.status).toBe(200);
+            expect(readPriv.body.uid).toBe(priv.body.meeting.uid);
+            expect(readPriv.body.organizerJoinUrl).toBe(priv.body.organizerJoinUrl);
+
+            const pub = await authed(ctx.ownerToken()).post(ctx.baseUrl).send({ mailboxUid: ctx.mailboxUid(), title: "Town Hall", visibility: "public" });
+            const readPub = await authed(ctx.ownerToken()).get(`${ctx.baseUrl}/${pub.body.meeting.uid}`);
+            expect(readPub.status).toBe(200);
+            expect(readPub.body.organizerJoinUrl).toBeUndefined();
         });
     });
 }

@@ -222,3 +222,93 @@ change `yarn lint`/`tsc --noEmit` (root and `-p tsconfig.apps.json`)/`yarn build
   an absent `token` to the signaling client untouched), `[token].test.tsx`/`_meetApi.test.ts` (the
   `authenticated: true` response shape end-to-end). `test/plugin.test.ts`'s exported-surface list picked up the
   new `GUEST_UID_PREFIX` export.
+
+## 2026-09-22: `VideoMeeting.organizerSlug` - the organizer of their own private meeting could not join it
+
+Backend-only, additive, entirely inside `src/models/` + `src/routes/BaseVideoMeetingRoute.ts` (nothing under
+`apps/` touched - the plugin's frontend is unchanged). `yarn lint`/`tsc --noEmit` (root and
+`-p tsconfig.apps.json`)/`yarn build`/`yarn test:prod` all clean; 368 tests, 100% statement/function/line coverage,
+97.26% branch (floor 95%); `src/routes` and `src/models` are at 100% on all four metrics.
+
+- **The gap**: the parallel calendar integration (restapi's `MeetingSchedulingJob` + web-client's compose UI) mints
+  one `visibility: "private"` `VideoMeeting` per calendar event, with `invitees` built from the event's attendees
+  **excluding the organizer** - by deliberate design on that side: the organizer manages the meeting through
+  ownership, not as a guest invitee. For such a meeting the organizer therefore held *nothing*
+  `requireMeetingByToken()` could resolve: no invitee `joinToken` (never an invitee) and no `publicSlug`
+  (`persistMeeting()` mints one only for a public meeting). Phase 2's "real, already-authenticated callers" fix
+  would happily grant them their own uid on the channel - they just had no link that reached `join()` in the first
+  place. Not fixable on the integration's side without either making the organizer a fake invitee (wrong, and would
+  put an anonymous-credential token in the organizer's hands) or making the meeting public (much worse).
+- **The addition**: `VideoMeeting.organizerSlug?`, minted by `persistMeeting()` for every `PRIVATE` meeting with the
+  same `mintPublicSlug()` shape/entropy as `publicSlug` (a separate column, so no shared collision namespace beyond
+  each field's own). `create()` returns it as `VideoMeetingCreateResult.organizerJoinUrl` *alongside* `invitees`
+  (both present together for a private meeting now, not mutually exclusive), and `findById()` now returns
+  `VM & { organizerJoinUrl?: string }` so a caller loading an existing event later still gets a working organizer
+  link, not only the one `create()` handed back once. Confirmed by grep that nothing in this repo consumed
+  `findById()`'s previously-bare `VM` shape - `apps/meet` only ever calls `join/:token`, and Phase 4's admin/settings
+  pages don't exist yet - so widening it breaks no caller.
+- **`requireMeetingByToken()` now returns `{ meeting, resolvedVia: "invitee" | "publicSlug" | "organizerSlug" }`**
+  rather than a bare meeting. `join()` (its one call site) authorizes the three differently, and returning the
+  resolution directly beats re-deriving it by string-comparing the token against the meeting's fields afterwards.
+  A slug-shaped token still hits `publicSlug` first with exactly Phase 1's outcome whenever it matches a row at all;
+  only a token matching no `publicSlug` row is then looked up against `organizerSlug` (the two columns are disjoint
+  by construction), so the change is provably additive - every pre-existing `publicSlug`/invitee-token test passes
+  unmodified.
+- **Why this does not weaken the `"private"` invariant.** An invitee `joinToken` and a `publicSlug` *are*
+  credentials - possession of the link is the whole authorization, by design. An `organizerSlug` deliberately is
+  not. For `resolvedVia === "organizerSlug"`, `join()` demands, **before computing or returning anything about the
+  meeting**, both (a) a real already-authenticated caller (the same `user && !user.uid.startsWith(GUEST_UID_PREFIX)`
+  check Phase 2's fix introduced, so a *returning guest* presenting a prior `join()`'s own guest JWT never
+  qualifies) and (b) that this identity holds `READ` on the meeting's own `mailboxUid` via the very same
+  `aclUtils.hasPermission(stripTrustedRoles(user, this.trustedRoles), ...)` call `requireMailboxAccess()` makes for
+  every owner-side route - so a trusted+elevated administrator with no explicit grant is refused here exactly as
+  they are there. Failing either answers the bare `404` `requireMeetingByToken()` already throws for a token that
+  matched nothing whatsoever - deliberately **not** `requireMailboxAccess()`'s `403`, which is why the check is
+  inlined rather than delegated to that helper: a `403` would tell an anonymous prober that the slug they guessed
+  names a real meeting, and this class's stated posture is that a probe must never learn whether a token
+  almost-matched. A caller who passes both falls through to the existing authenticated branch untouched
+  (`ensureChannelGrant()` under their own real uid, `authenticated: true`, `selfUid`) - no new response field.
+- **Index shape - the one place this does NOT mirror `publicSlug`.** `publicSlug` is unique within its mailbox
+  (`@Index([...], { unique: true, sparse: true })` on `["mailboxUid", "publicSlug"]`). Mirroring that literally for
+  `organizerSlug` **breaks creating a second public meeting in one mailbox**, caught immediately by the existing
+  "Lists only the given mailbox's meetings" test: a compound sparse index still indexes a document that carries at
+  least one of its keys, so every public meeting (no `organizerSlug`) lands in the index under `(mailboxUid, null)`
+  and the second one collides. Landed on a single-field `["organizerSlug"]` unique+sparse index instead - a
+  single-field sparse index skips a document missing the field outright, and its scope happens to match the lookup
+  `join()` actually performs (global; a join URL carries no mailbox segment), which is more than `publicSlug`'s own
+  index can say. **Noted for a future phase, not fixed here** (out of this change's scope, and fixing it would alter
+  existing `publicSlug` behavior): the exact same pitfall means today's `["mailboxUid", "publicSlug"]` index would
+  reject a *second private* meeting in one mailbox. No existing test creates two private meetings in one mailbox, so
+  it has never fired - but a real mailbox owner creating two private meetings would hit it.
+- **Tests**: the shared `videoMeetingSecuritySuite.ts` gained `ownerUid` in its context, `organizerSlug` on
+  `createPrivateMeeting()`'s return, and two backend-agnostic describes - `join() via the organizer's own slug`
+  (owner succeeds as their own real identity; anonymous, returning-guest, real-but-unrelated stranger, trusted
+  administrator and cancelled-meeting cases all `404`) and `the organizer join link (create/findById)` (a private
+  meeting's `organizerJoinUrl` is present, correctly shaped and actually resolves; a public meeting has neither
+  `organizerSlug` nor `organizerJoinUrl`; `findById()` returns the same link on a re-read and omits it for a public
+  meeting). Both `VideoMeetingRoute.test.ts` files additionally prove the real ACL channel grant the same way the
+  Phase 2 tests prove theirs, using the *delegate* (READ/LIST on the mailbox, and - unlike the creator - no
+  pre-existing record of their own on the meeting's ACL) so the grant asserted is unambiguously the one `join()`
+  just made. Model and `plugin.test.ts` index/field expectations updated alongside.
+
+### 2026-09-22 (later still) - Fixed the same sparse-index pitfall on `publicSlug` itself
+
+The agent adding `organizerSlug` above found and fixed a real bug in its own new index, then flagged (without fixing,
+since it was out of that task's scope) that `publicSlug`'s *original* Phase 1 index had the identical flaw: a
+compound sparse index (`["mailboxUid", "publicSlug"]`) still indexes a document carrying at least one of its keys,
+and every row has `mailboxUid`, so two *private* meetings in one mailbox (both missing `publicSlug`) collided on
+`(mailboxUid, null)` - the second could never be created. This was a real, live bug (a host trying to schedule a
+second video-conferenced meeting would have failed outright), not just the documented "cross-mailbox collision isn't
+prevented, only made unlikely" entropy tradeoff Phase 1's own NOTES already called out.
+
+Fixed the same way `organizerSlug` was: a single-field sparse unique index (`videomeeting_public_slug`, on
+`publicSlug` alone), which skips a document missing the field entirely and happens to match `join()`'s real (global,
+no mailbox segment) lookup scope exactly - arguably more correct than the original per-mailbox intent, not just a
+workaround. Doc comments on `VideoMeeting.publicSlug`/`organizerSlug` in `models/types.ts` rewritten to describe the
+actual (global, single-field) index both fields now share, rather than the abandoned per-mailbox design. New
+regression test in `videoMeetingSecuritySuite.ts`: an owner creating two private meetings in the same mailbox back
+to back, both succeeding with distinct uids - this reproduced the bug before the fix and is now green on both
+backends.
+
+Files: `src/models/mongo/VideoMeetingMongo.ts`, `src/models/sql/VideoMeetingSQL.ts`, `src/models/types.ts`,
+`test/routes/videoMeetingSecuritySuite.ts`.

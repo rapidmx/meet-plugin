@@ -38,7 +38,7 @@ describe("plugin entry points", () => {
     });
 
     it("keeps the collection names, index names and ACL uids of the models core used to define", () => {
-        const meetingIndexes: string[] = ["videomeeting_mailbox", "videomeeting_mailbox_slug"];
+        const meetingIndexes: string[] = ["videomeeting_mailbox", "videomeeting_public_slug", "videomeeting_organizer_slug"];
         const inviteeIndexes: string[] = ["videomeetinginvitee_join_token", "videomeetinginvitee_meeting", "videomeetinginvitee_mailbox"];
         for (const [clazz, acl, recordACL, indexes] of [
             [MongoEntry.VideoMeetingMongo, "VideoMeeting", true, meetingIndexes],
@@ -59,6 +59,7 @@ describe("plugin entry points", () => {
                 "BaseVideoMeetingRoute",
                 "buildBaseUrl",
                 "buildIceServers",
+                "createSingleInviteeVideoMeeting",
                 "DEFAULT_STUN_SERVERS",
                 "DEFAULT_TURN_CREDENTIAL_TTL_SECONDS",
                 "turnRestCredential",

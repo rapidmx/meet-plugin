@@ -17,6 +17,7 @@ describe("Mongo model default construction", () => {
         expect(obj.title).toBe("");
         expect(obj.visibility).toBe(VideoMeetingVisibility.PRIVATE);
         expect(obj.publicSlug).toBeUndefined();
+        expect(obj.organizerSlug).toBeUndefined();
         expect(obj.status).toBe(VideoMeetingStatus.SCHEDULED);
         expect(obj.startTime).toBeUndefined();
         expect(obj.endTime).toBeUndefined();
@@ -31,6 +32,7 @@ describe("Mongo model default construction", () => {
             title: "Weekly Sync",
             visibility: VideoMeetingVisibility.PUBLIC,
             publicSlug: "abc12345xyz",
+            organizerSlug: "zyx54321cba",
             status: VideoMeetingStatus.ACTIVE,
             startTime,
             endTime,
@@ -41,6 +43,7 @@ describe("Mongo model default construction", () => {
         expect(obj.title).toBe("Weekly Sync");
         expect(obj.visibility).toBe(VideoMeetingVisibility.PUBLIC);
         expect(obj.publicSlug).toBe("abc12345xyz");
+        expect(obj.organizerSlug).toBe("zyx54321cba");
         expect(obj.status).toBe(VideoMeetingStatus.ACTIVE);
         expect(obj.startTime).toBe(startTime);
         expect(obj.endTime).toBe(endTime);
@@ -54,6 +57,7 @@ describe("Mongo model default construction", () => {
         expect(obj.visibility).toBe(VideoMeetingVisibility.PRIVATE);
         expect(obj.calendarEventUid).toBeUndefined();
         expect(obj.publicSlug).toBeUndefined();
+        expect(obj.organizerSlug).toBeUndefined();
     });
 
     it("VideoMeetingMongo keeps every class default when constructed with an empty partial object.", () => {

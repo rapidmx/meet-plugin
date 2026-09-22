@@ -92,7 +92,17 @@ export interface VideoMeetingCreateResult<T extends VideoMeeting = VideoMeeting>
     /** Present exactly when `meeting.visibility` is `"public"`; `undefined` within that case only when
      * `mail:videoconf:public_url` isn't configured. */
     publicJoinUrl?: string;
+    /** The organizer's own join link, present exactly when `meeting.organizerSlug` is set - i.e. for every private
+     * meeting this route creates, *alongside* `invitees` rather than instead of it (`undefined` within that case
+     * only when `mail:videoconf:public_url` isn't configured). The organizer of a private meeting is deliberately
+     * never one of its own `invitees`, so this is the only link that resolves to the meeting for them - see
+     * `VideoMeeting.organizerSlug` and `join()`'s doc comment for why holding it is not by itself a credential. */
+    organizerJoinUrl?: string;
 }
+
+/** Which field of which row `requireMeetingByToken()` matched the caller's token against - `join()` authorizes each
+ * differently, so the resolution is returned explicitly rather than re-derived by comparing strings afterwards. */
+export type VideoMeetingTokenResolution = "invitee" | "publicSlug" | "organizerSlug";
 
 /** The public projection of a `VideoMeeting`, as returned to an anonymous joiner - deliberately narrow: a guest
  * never sees `mailboxUid`, `calendarEventUid` or any other internal identifier. */
@@ -227,6 +237,30 @@ export interface VideoMeetingJoinResult {
  * `VideoMeetingJoinResult`'s doc comment). When `user` is absent (the common, true-anonymous case - no existing
  * session at all), behavior is exactly Phase 1's: a fresh guest identity is minted and granted instead.
  *
+ * ## The organizer's own slug (`VideoMeeting.organizerSlug`)
+ *
+ * The fix above lets a real, already-authenticated caller join *if they already hold something that resolves to the
+ * meeting*. The organizer of their own private meeting does not: the calendar integration that mints a meeting per
+ * event builds `invitees` from the event's attendees **excluding the organizer** (who manages the meeting through
+ * ownership, not as a guest), and `publicSlug` is minted only for a public meeting - so the one person who owns the
+ * meeting had no token `requireMeetingByToken()` could resolve for them at all. `persistMeeting()` therefore also
+ * mints an `organizerSlug` for every private meeting, `create()` returns it as `organizerJoinUrl` alongside the
+ * per-invitee links, and `findById()` returns the same link for a meeting loaded later.
+ *
+ * **This does not widen the `"private"` invariant by one caller.** The other two resolutions are credentials in
+ * themselves - possession of an invitee `joinToken` or a `publicSlug` is exactly what authorizes the join, by
+ * design. An `organizerSlug` is not: `requireMeetingByToken()` reports *which* field resolved the match, and for
+ * `"organizerSlug"` `join()` requires, before computing or returning anything about the meeting, both that the
+ * caller is a real already-authenticated identity (the same non-guest `GUEST_UID_PREFIX` check as above, so a
+ * returning guest presenting a prior `join()`'s own guest JWT never qualifies) and that this identity holds `READ`
+ * on the meeting's own `mailboxUid` - the very same `ACLUtils.hasPermission()` call, trusted roles stripped, that
+ * `requireMailboxAccess()` makes for every owner-side route, so a trusted administrator with no explicit grant is
+ * refused here exactly as they are there. Every caller who fails either condition - a true anonymous stranger, a
+ * returning guest, or a real but unrelated logged-in user - gets the identical bare `404` an entirely unknown token
+ * gets, never a `403`: this class never leaks whether a token almost-matched something, and an
+ * organizer-slug-shaped probe must be indistinguishable from a slug naming nothing at all. A caller who satisfies
+ * both proceeds through exactly the authenticated branch described above, with no new response field.
+ *
  * ## Other known limitations
  *
  * **`VideoMeetingInvitee.joinToken` never expires** and has no GC job - identical tradeoff to `Booking.manageToken`.
@@ -234,7 +268,10 @@ export interface VideoMeetingJoinResult {
  * **`VideoMeeting.publicSlug` is only uniqueness-checked within its own mailbox** by the database, while `join()`'s
  * lookup is global (the public join URL carries no mailbox segment) - see the `VideoMeeting.publicSlug` doc comment
  * for the full reasoning; a cross-mailbox collision is not actually prevented, only made astronomically unlikely by
- * the slug's own entropy.
+ * the slug's own entropy. `VideoMeeting.organizerSlug` has the same shape and entropy but is indexed unique
+ * *globally*, which is exactly the scope its own lookup uses - see its doc comment for why a per-mailbox compound
+ * index cannot work for a field only half the rows carry. Less rides on it either way: resolving through it grants
+ * nothing by itself, so an unlucky collision there would cost a caller a `404`, never access.
  *
  * @author Jean-Philippe Steinmetz
  */
@@ -396,6 +433,11 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     ): Promise<{ meeting: VM; invitees: VMI[] }> {
         const strippedUser: JWTUser | undefined = stripTrustedRoles(user, this.trustedRoles);
         const publicSlug: string | undefined = visibility === VideoMeetingVisibility.PUBLIC ? mintPublicSlug() : undefined;
+        // The organizer is deliberately never one of their own private meeting's `invitees` (see
+        // `VideoMeeting.organizerSlug`), so a private meeting also mints the one slug that resolves to it for them.
+        // Same mint function - and so the same shape/entropy - as `publicSlug`: the two live in separate columns, so
+        // the only collision namespace either shares is its own, exactly as in Phase 1.
+        const organizerSlug: string | undefined = visibility === VideoMeetingVisibility.PRIVATE ? mintPublicSlug() : undefined;
 
         // Constructed before `create()` is called (rather than inline) because its own, already-generated `uid`
         // (every `BaseEntity` mints one on construction) is what `acl.uid` below claims the meeting's own
@@ -410,6 +452,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             startTime,
             endTime,
             publicSlug,
+            organizerSlug,
         });
         const meeting: VM = await this.meetingRepo!.create(instance, {
             user: strippedUser,
@@ -478,6 +521,9 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             // `persistMeeting()` always mints `publicSlug` for a public meeting.
             result.publicJoinUrl = this.joinUrl(meeting.publicSlug!);
         }
+        if (meeting.organizerSlug) {
+            result.organizerJoinUrl = this.joinUrl(meeting.organizerSlug);
+        }
         return result;
     }
 
@@ -507,11 +553,18 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     }
 
     @Summary("Retrieves one of the owner's video meetings.")
-    @Description("Requires READ on the meeting's owning mailbox.")
+    @Description(
+        "Returns the meeting, plus 'organizerJoinUrl' when it has an organizerSlug (every private meeting this " +
+            "route created) - so a caller loading an existing meeting later still gets a working organizer join " +
+            "link, not only the one create() returned once. Requires READ on the meeting's owning mailbox.",
+    )
     @Get("/:id")
-    public async findById(@Param("id") id: string, @AuthUser user?: JWTUser): Promise<VM> {
+    public async findById(@Param("id") id: string, @AuthUser user?: JWTUser): Promise<VM & { organizerJoinUrl?: string }> {
         await this.init();
-        return await this.requireOwnedMeeting(id, user, ACLAction.READ);
+        const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.READ);
+        // Spread rather than mutate: the loaded instance is the repo's own entity, and `organizerJoinUrl` is a
+        // response-only field that has no business being written back onto it.
+        return meeting.organizerSlug ? { ...meeting, organizerJoinUrl: this.joinUrl(meeting.organizerSlug) } : meeting;
     }
 
     @Summary("Updates a video meeting's title, or cancels it.")
@@ -566,17 +619,27 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     }
 
     /**
-     * Resolves `token` to the meeting it names: an invitee's `joinToken` (43 base64url characters -
-     * `JOIN_TOKEN_PATTERN`) or a public meeting's `publicSlug` (11 base64url characters - `PUBLIC_SLUG_PATTERN`).
-     * The two lengths never overlap (see `util/TokenUtils.ts`), so exactly one lookup is ever attempted - unlike
-     * trying both in sequence, this can't accidentally treat an invitee token as a slug (or vice versa) just
-     * because the other lookup happened to also miss. A stale/unknown/malformed/wrongly-shaped token, a cancelled
-     * meeting, or a meeting whose visibility no longer matches how the token was resolved (defense in depth - a
-     * meeting's `visibility` cannot actually change after creation in Phase 1) all answer identically: a plain
-     * `404`, matching `BaseBookingRoute.requireBookingByToken()`'s exact posture of never leaking whether a token
-     * almost-matched something.
+     * Resolves `token` to the meeting it names, and to *how* it named it: an invitee's `joinToken` (43 base64url
+     * characters - `JOIN_TOKEN_PATTERN`), or one of the two 11-character slugs (`PUBLIC_SLUG_PATTERN`) - a public
+     * meeting's `publicSlug` or a private meeting's `organizerSlug`. The token and slug lengths never overlap (see
+     * `util/TokenUtils.ts`), so an invitee token is never tried as a slug or vice versa - unlike trying both in
+     * sequence, this can't accidentally treat one as the other just because the lookup that should have matched
+     * happened to miss. A stale/unknown/malformed/wrongly-shaped token, a cancelled meeting, or a meeting whose
+     * visibility no longer matches how the token was resolved (defense in depth - a meeting's `visibility` cannot
+     * actually change after creation) all answer identically: a plain `404`, matching
+     * `BaseBookingRoute.requireBookingByToken()`'s exact posture of never leaking whether a token almost-matched
+     * something.
+     *
+     * The two slug columns are disjoint by construction (`persistMeeting()` mints `publicSlug` only for a public
+     * meeting and `organizerSlug` only for a private one), so a slug-shaped token is looked up against `publicSlug`
+     * first - exactly Phase 1's lookup, with exactly Phase 1's outcome whenever it matches a row at all - and only
+     * a token that matches no `publicSlug` row is then looked up against `organizerSlug`.
+     *
+     * The resolution is returned alongside the meeting because `join()` authorizes the three cases differently: an
+     * invitee token and a `publicSlug` are each a self-contained credential ("possession of the link"), while an
+     * `organizerSlug` is not - see `join()`'s doc comment and `VideoMeeting.organizerSlug`.
      */
-    private async requireMeetingByToken(token: string): Promise<VM> {
+    private async requireMeetingByToken(token: string): Promise<{ meeting: VM; resolvedVia: VideoMeetingTokenResolution }> {
         /* v8 ignore if -- unreachable via real usage: `@Param("token")` always supplies a string (a URL path
            segment can't be anything else); this guards only a directly-invoked, non-HTTP call. */
         if (typeof token !== "string") {
@@ -596,19 +659,31 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             if (!meeting || meeting.visibility !== VideoMeetingVisibility.PRIVATE || meeting.status === VideoMeetingStatus.CANCELLED) {
                 throw new ApiError(ApiErrors.NOT_FOUND, 404, ApiErrorMessages.NOT_FOUND);
             }
-            return meeting;
+            return { meeting, resolvedVia: "invitee" };
         }
         if (PUBLIC_SLUG_PATTERN.test(token)) {
-            const matches: VM[] = await this.meetingRepo!.find({ publicSlug: ModelUtils.literal(token) } as any, {
+            const publicMatches: VM[] = await this.meetingRepo!.find({ publicSlug: ModelUtils.literal(token) } as any, {
                 ignoreACL: true,
                 limit: 1,
                 skipCache: true,
             });
-            const meeting: VM | undefined = matches[0];
-            if (!meeting || meeting.visibility !== VideoMeetingVisibility.PUBLIC || meeting.status === VideoMeetingStatus.CANCELLED) {
+            const publicMeeting: VM | undefined = publicMatches[0];
+            if (publicMeeting) {
+                if (publicMeeting.visibility !== VideoMeetingVisibility.PUBLIC || publicMeeting.status === VideoMeetingStatus.CANCELLED) {
+                    throw new ApiError(ApiErrors.NOT_FOUND, 404, ApiErrorMessages.NOT_FOUND);
+                }
+                return { meeting: publicMeeting, resolvedVia: "publicSlug" };
+            }
+            const organizerMatches: VM[] = await this.meetingRepo!.find({ organizerSlug: ModelUtils.literal(token) } as any, {
+                ignoreACL: true,
+                limit: 1,
+                skipCache: true,
+            });
+            const organizerMeeting: VM | undefined = organizerMatches[0];
+            if (!organizerMeeting || organizerMeeting.visibility !== VideoMeetingVisibility.PRIVATE || organizerMeeting.status === VideoMeetingStatus.CANCELLED) {
                 throw new ApiError(ApiErrors.NOT_FOUND, 404, ApiErrorMessages.NOT_FOUND);
             }
-            return meeting;
+            return { meeting: organizerMeeting, resolvedVia: "organizerSlug" };
         }
         throw new ApiError(ApiErrors.NOT_FOUND, 404, ApiErrorMessages.NOT_FOUND);
     }
@@ -689,13 +764,33 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             "for them. Otherwise (the common anonymous case) mints a short-lived guest JWT (see " +
             "GUEST_JWT_TTL_SECONDS) already granted READ/CREATE on the same channel, ready to use against /push " +
             "to exchange WebRTC signaling messages. Requires no authentication beyond the token itself; a " +
-            "stale/unknown token answers 404.",
+            "stale/unknown token answers 404. The one exception is a private meeting's organizerSlug, which is " +
+            "never an anonymous surface: it additionally requires an already-authenticated caller holding READ on " +
+            "the meeting's owning mailbox, and answers the very same 404 for anyone else.",
     )
     @RateLimit()
     @Get("/join/:token")
     public async join(@Param("token") token: string, @AuthUser user?: JWTUser): Promise<VideoMeetingJoinResult> {
         await this.init();
-        const meeting: VM = await this.requireMeetingByToken(token);
+        const { meeting, resolvedVia } = await this.requireMeetingByToken(token);
+
+        // An `organizerSlug` is not a credential of its own (unlike an invitee `joinToken` or a `publicSlug`): it
+        // only exists so the owner of a private meeting has something that resolves to it at all, since they are
+        // deliberately never one of its invitees. So it is gated here on BOTH conditions, before anything about
+        // the meeting is computed or returned: a real, already-authenticated identity (the same non-guest check
+        // the authenticated branch below uses - a returning guest presenting a prior join()'s guest JWT is not
+        // one), AND that identity actually holding READ on this meeting's own mailbox, with its trusted roles
+        // stripped first exactly as `requireMailboxAccess()` does. A failure answers the bare 404
+        // `requireMeetingByToken()` already throws for a token that matched nothing whatsoever - deliberately NOT
+        // `requireMailboxAccess()`'s 403, which would tell an anonymous prober that this slug named a real meeting.
+        // Nothing here changes how an invitee token or a publicSlug resolves.
+        if (resolvedVia === "organizerSlug") {
+            const isRealCaller: boolean = !!user && !user.uid.startsWith(GUEST_UID_PREFIX);
+            if (!isRealCaller || !(await this.aclUtils!.hasPermission(stripTrustedRoles(user, this.trustedRoles), meeting.mailboxUid, ACLAction.READ))) {
+                throw new ApiError(ApiErrors.NOT_FOUND, 404, ApiErrorMessages.NOT_FOUND);
+            }
+        }
+
         const publicMeeting: PublicVideoMeeting = {
             uid: meeting.uid,
             title: meeting.title,

@@ -119,6 +119,8 @@ describe("Route:VideoMeetingMongo Tests", () => {
             expect(result.body.meeting.visibility).toBe(VideoMeetingVisibility.PRIVATE);
             expect(result.body.meeting.status).toBe(VideoMeetingStatus.SCHEDULED);
             expect(result.body.meeting.publicSlug).toBeUndefined();
+            expect(result.body.meeting.organizerSlug).toMatch(/^[A-Za-z0-9_-]{11}$/);
+            expect(result.body.organizerJoinUrl).toBe(`https://videoconf.rapidmx-test.example.com/meet/${result.body.meeting.organizerSlug}`);
             expect(result.body.invitees).toHaveLength(1);
             expect(result.body.invitees[0].email).toBe("grace@example.com");
             expect(result.body.invitees[0].displayName).toBe("Grace Hopper");
@@ -137,8 +139,10 @@ describe("Route:VideoMeetingMongo Tests", () => {
             expect(result.status).toBe(200);
             expect(result.body.meeting.visibility).toBe(VideoMeetingVisibility.PUBLIC);
             expect(result.body.meeting.publicSlug).toMatch(/^[A-Za-z0-9_-]{11}$/);
+            expect(result.body.meeting.organizerSlug).toBeUndefined();
             expect(result.body.invitees).toBeUndefined();
             expect(result.body.publicJoinUrl).toBe(`https://videoconf.rapidmx-test.example.com/meet/${result.body.meeting.publicSlug}`);
+            expect(result.body.organizerJoinUrl).toBeUndefined();
         });
 
         it("Persists optional calendarEventUid, startTime and endTime.", async () => {
@@ -163,6 +167,7 @@ describe("Route:VideoMeetingMongo Tests", () => {
                     .post(baseUrl)
                     .send({ mailboxUid: mailbox.uid, title: "No URL", visibility: "private", invitees: [{ email: "a@example.com" }] });
                 expect(priv.body.invitees[0].joinUrl).toBeUndefined();
+                expect(priv.body.organizerJoinUrl).toBeUndefined();
 
                 const pub = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "No URL Public", visibility: "public" });
                 expect(pub.body.publicJoinUrl).toBeUndefined();
@@ -363,6 +368,34 @@ describe("Route:VideoMeetingMongo Tests", () => {
             expect(record?.actions).toEqual(expect.arrayContaining([ACLAction.READ, ACLAction.CREATE]));
         });
 
+        it("Mints a real channel grant for the caller's own uid when joining a private meeting via its organizer slug.", async () => {
+            // A delegate holding only READ/LIST on the mailbox - a caller with real permission but, unlike the
+            // creator, no pre-existing record of their own on the meeting's ACL, so the grant this proves is the
+            // one join() just made and nothing else.
+            const mailboxAcl: any = await aclRepo.findOne({ uid: mailbox.uid });
+            mailboxAcl.records.push({ userOrRoleId: delegate.uid, actions: [ACLAction.READ, ACLAction.LIST] });
+            await aclRepo.save(mailboxAcl);
+            await objectFactory.getInstance(ACLUtils)?.invalidateACLs([mailbox.uid]);
+
+            const created = await authed(ownerToken)
+                .post(baseUrl)
+                .send({ mailboxUid: mailbox.uid, title: "Organizer Slug Meeting", visibility: "private", invitees: [{ email: "a@example.com" }] });
+            const meetingUid = created.body.meeting.uid;
+            expect((await aclRepo.findOne({ uid: meetingUid })).records.find((r: any) => r.userOrRoleId === delegate.uid)).toBeUndefined();
+
+            const result = await authed(delegateToken).get(`${baseUrl}/join/${created.body.meeting.organizerSlug}`);
+
+            expect(result.status).toBe(200);
+            expect(result.body.authenticated).toBe(true);
+            expect(result.body.selfUid).toBe(delegate.uid);
+            expect(result.body.token).toBeUndefined();
+            expect(result.body.meeting.visibility).toBe(VideoMeetingVisibility.PRIVATE);
+
+            const acl: any = await aclRepo.findOne({ uid: meetingUid });
+            const record = acl.records.find((r: any) => r.userOrRoleId === delegate.uid);
+            expect(record?.actions).toEqual(expect.arrayContaining([ACLAction.READ, ACLAction.CREATE]));
+        });
+
         it("Treats a returning guest presenting its own prior guest JWT as still anonymous, not as an authenticated real user.", async () => {
             const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
             const first = await request(server.getApplication()).get(`${baseUrl}/join/${created.body.meeting.publicSlug}`);
@@ -544,6 +577,7 @@ describe("Route:VideoMeetingMongo Tests", () => {
         baseUrl,
         mailboxUid: () => mailbox.uid,
         ownerToken: () => ownerToken,
+        ownerUid: () => owner.uid,
         strangerToken: () => strangerToken,
         strangerUid: () => stranger.uid,
         adminToken: () => adminToken,
@@ -561,7 +595,7 @@ describe("Route:VideoMeetingMongo Tests", () => {
                 .post(baseUrl)
                 .send({ mailboxUid: mailbox.uid, title: "Private", visibility: "private", invitees: [{ email: "a@example.com" }] });
             const invitee = (await inviteeRepo.find({ meetingUid: created.body.meeting.uid }).toArray())[0];
-            return { uid: created.body.meeting.uid, joinToken: invitee.joinToken };
+            return { uid: created.body.meeting.uid, joinToken: invitee.joinToken, organizerSlug: created.body.meeting.organizerSlug };
         },
         createPublicMeeting: async () => {
             const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "Public", visibility: "public" });

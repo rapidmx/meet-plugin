@@ -56,5 +56,29 @@ have something to compile).
   with. `VideoMeetingJoinResult` gained `authenticated`/`selfUid`; `token`/`expiresAt` are now only present for the
   true-anonymous case.
 
-Not in this phase: the calendar compose hook (Phase 3, now also carrying an integration with `@rapidmx/booking-plugin`
-so a video location option can mint its own link automatically) and the admin/settings page (Phase 4).
+### Phase 3: an organizer join link and a `@rapidmx/booking-plugin` integration
+
+The calendar compose hook itself (an "Add video conferencing" toggle, and personalizing each attendee's invite with
+their own link) lives in `@rapidmx/web-client`/`@rapidmx/react-shared`/`@rapidmx/restapi` - see their own release
+notes. What changed in this package to support it:
+
+- **`VideoMeeting.organizerSlug`**: a private meeting's organizer is deliberately excluded from its `invitees` (they
+  manage the meeting through ownership, not as a guest), which meant they had no token or slug of their own
+  `join()` could ever resolve - a real gap found while wiring the calendar compose hook. `create()`/`findById()`
+  now also return `organizerJoinUrl`, resolvable only by the real, already-authenticated mailbox owner or a
+  delegate with `READ` - never anonymously, never by a guest, and refused with the same bare `404` an unknown
+  token gets rather than a `403` that would confirm a guessed slug names a real meeting.
+- **Fix: two private meetings in one mailbox could never both exist.** `publicSlug`'s original index
+  (`["mailboxUid", "publicSlug"]`, unique, sparse) had the same pitfall `organizerSlug`'s own index was almost
+  built with and was caught first: a compound sparse index still indexes a document carrying at least one of its
+  keys, and every meeting has `mailboxUid`, so two private meetings (both missing `publicSlug`) collided on
+  `(mailboxUid, null)` and the second could never be created. Both fields now use a single-field sparse unique
+  index instead, which skips a document missing the field entirely and matches `join()`'s real (global) lookup
+  scope more accurately than the original per-mailbox intent did.
+- **`createSingleInviteeVideoMeeting()`**: a small, backend-agnostic integration function exported from this
+  package's root, for another plugin already running in the same server process to mint a private meeting with
+  one invitee without an HTTP round trip. `@rapidmx/booking-plugin` calls it (only when this plugin is installed
+  and active, never as a hard dependency) so a booking's video location option can get a real, working link
+  automatically when the host hasn't set one.
+
+Not in this phase: the admin/settings page (Phase 4).

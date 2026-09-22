@@ -25,7 +25,13 @@ const { Nullable } = ObjectDecorators;
 @MailboxScopedData()
 @Description("A WebRTC video meeting, joinable directly or from a calendar invite.")
 @Index("videomeeting_mailbox", ["mailboxUid"])
-@Index("videomeeting_mailbox_slug", ["mailboxUid", "publicSlug"], { unique: true, sparse: true })
+// Single-field, not `["mailboxUid", "publicSlug"]` - kept identical to the Mongo twin's fix: a compound sparse index
+// still indexes a document carrying at least one of its keys (every row has `mailboxUid`), so two private meetings
+// in one mailbox (both missing `publicSlug`) would collide on `(mailboxUid, null)`. A single-field sparse index
+// skips a document missing the field entirely, matching `join()`'s actual global (not per-mailbox) lookup - see
+// `VideoMeeting.publicSlug`'s own doc comment. `organizerSlug` below hit the identical pitfall, fixed the same way.
+@Index("videomeeting_public_slug", ["publicSlug"], { unique: true, sparse: true })
+@Index("videomeeting_organizer_slug", ["organizerSlug"], { unique: true, sparse: true })
 @Protect(
     {
         uid: "VideoMeeting",
@@ -61,6 +67,11 @@ export class VideoMeetingSQL extends BaseEntity implements VideoMeeting {
     @Nullable
     public publicSlug?: string;
 
+    @Column({ nullable: true })
+    @Description("The organizer's own join link identifier, set only when visibility is PRIVATE.")
+    @Nullable
+    public organizerSlug?: string;
+
     @Column({ type: "varchar" })
     @Description("The current lifecycle state of this meeting.")
     public status: VideoMeetingStatus = VideoMeetingStatus.SCHEDULED;
@@ -84,6 +95,7 @@ export class VideoMeetingSQL extends BaseEntity implements VideoMeeting {
             this.title = other.title !== undefined ? other.title : this.title;
             this.visibility = other.visibility !== undefined ? other.visibility : this.visibility;
             this.publicSlug = "publicSlug" in other ? other.publicSlug : this.publicSlug;
+            this.organizerSlug = "organizerSlug" in other ? other.organizerSlug : this.organizerSlug;
             this.status = other.status !== undefined ? other.status : this.status;
             this.startTime = "startTime" in other ? other.startTime : this.startTime;
             this.endTime = "endTime" in other ? other.endTime : this.endTime;
