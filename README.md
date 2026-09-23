@@ -1,8 +1,8 @@
 # RapidMX: Video Conferencing
 
-[![CI](https://github.com/RapidMX/videoconf/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/RapidMX/videoconf/actions/workflows/build.yml)
-[![Coverage Status](https://coveralls.io/repos/github/RapidMX/videoconf/badge.svg?branch=main)](https://coveralls.io/github/RapidMX/videoconf?branch=main)
-[![npm version](https://img.shields.io/npm/v/@rapidmx/videoconf-plugin)](https://www.npmjs.com/package/@rapidmx/videoconf-plugin)
+[![CI](https://github.com/RapidMX/meet-plugin/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/RapidMX/meet-plugin/actions/workflows/build.yml)
+[![Coverage Status](https://coveralls.io/repos/github/RapidMX/meet-plugin/badge.svg?branch=main)](https://coveralls.io/github/RapidMX/meet-plugin?branch=main)
+[![npm version](https://img.shields.io/npm/v/@rapidmx/meet-plugin)](https://www.npmjs.com/package/@rapidmx/meet-plugin)
 
 Private and public WebRTC video meetings for a [RapidMX server](https://github.com/RapidMX/server). A mailbox owner
 turns on video conferencing for a calendar event; a private meeting mints one link per invitee (inserted into the

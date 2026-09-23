@@ -37,7 +37,7 @@ class PublicUrlConfigHolder {
 }
 
 /**
- * **The integration surface other plugins call.** This is the one thing `@rapidmx/videoconf-plugin` exposes for
+ * **The integration surface other plugins call.** This is the one thing `@rapidmx/meet-plugin` exposes for
  * another, independently-installed plugin to use in-process: mints a private `VideoMeeting` for exactly one
  * invitee and returns just that invitee's join URL. `booking-plugin` is today's only caller - a video-location
  * booking with no host-preset URL mints one of these automatically (the booker as the sole invitee, matching this

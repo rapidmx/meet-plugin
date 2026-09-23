@@ -1,6 +1,6 @@
 # NOTES
 
-Repo-local engineering notes for `@rapidmx/videoconf-plugin`, in the same running-journal convention as this
+Repo-local engineering notes for `@rapidmx/meet-plugin`, in the same running-journal convention as this
 project's other repos (`booking-plugin`, `restapi`, `server`, `react-shared`, `web-client`, `mapi`, `autodiscover`):
 one dated section per unit of work, newest at the bottom, never rewritten - see those repos' own `.claude/NOTES.md`
 for the exact style to match.
@@ -391,3 +391,60 @@ coverage, 97.52% branch (floor 95%).
   natural extension of "manage" the task brief's own wording invited, using the exact same existing endpoint.
 - **Nothing else touched**: no admin/TURN UI (already fully covered by the generic plugin-settings dialog, per
   the task brief - not built here), no `web-client`/`restapi`/`server` changes, no version bump, no commit.
+
+## 2026-09-22: Hardening pass - cross-repo dependency-review fixes, plus a fresh adversarial review
+
+A lighter-touch pass (this repo's own activity is lighter than the ecosystem's core repos) combining three
+already-confirmed fixes from a prior cross-repo dependency review with a fresh, read-first adversarial review of
+this repo alone. `yarn lint`/`yarn build`/`vitest run --coverage` all clean after every change; 410 tests
+(2 new), 100% statement/function/line coverage, 97.52% branch (floor 95%) - unchanged from before this pass except
+for the 2 new regression tests.
+
+- **Fixed: `peerDependencies["@rapidmx/react-shared"]` floor was `>=0.6.0`, below the version this plugin actually
+  requires.** `apps/settings-video-conferencing/*.tsx` import `@rapidmx/react-shared/videoconf/videoMeetingsApi.js`,
+  which that package's own `CHANGELOG.md` shows was added in `0.13.0` (react-shared's current latest at the time of
+  this pass). Installing this plugin against anything in its own claimed-supported range below `0.13.0` would hit a
+  hard module-resolution failure at import time, not a compile-time type error (a plugin's `apps/` always compiles
+  against this repo's own `devDependencies` pin, never the peer range's floor - so `tsc`/`yarn build` passing proves
+  nothing about the floor's own correctness). Raised the floor to `>=0.13.0 <1`. Verified this is a real
+  compatibility check, not just a manifest edit: after the bump, `yarn install` (react-shared correctly resolved to
+  `0.13.0`), `yarn build`, and the full `vitest run --coverage` suite were all re-run clean - nothing else in this
+  plugin assumed an older react-shared API shape.
+- **Fixed: `resolutions["@rapidmx/react-shared"]` was pinned to `^0.11.0`, inconsistent with `booking-plugin`'s own
+  convention of pinning a `resolutions` entry to exactly match its `peerDependencies` floor.** Updated to `^0.13.0`
+  to match the corrected floor above. Checked `restapi`/`web-client`'s own `resolutions` entries against their peer
+  floors while here (per the review brief) - both already matched (`^0.17.0`/`^0.11.0` against `>=0.17.0`/`>=0.11.0`
+  floors respectively), so `booking-plugin`'s convention was already being followed correctly for those two; only
+  `react-shared` had drifted.
+- **Fixed: stale `@rapidmx/videoconf-plugin` prose left over from the rename to `@rapidmx/meet-plugin`.** Swept
+  `README.md` (the npm-version badge/link, plus the CI/Coverage badges - both still pointed at the pre-rename
+  `RapidMX/videoconf` repo, the same class of staleness even though not explicitly named in the review brief;
+  `package.json`'s own `repository` field already confirms the current name), this file's opening line, and
+  `RELEASE_NOTES.md`'s Phase 1 entry, and `src/util/BookingIntegrationUtils.ts`'s doc comment. Deliberately left
+  alone: the historical `videoconf-plugin/node_modules/...` path mentioned inside this file's own dated Phase 4
+  entry above (this file's own convention is a running journal, never rewritten), and every `mail:videoconf:*`
+  config setting key and `VIDEOCONF_PLUGIN_NAME`/`PluginRegistry` functional-rename reference (already correct
+  everywhere, per the review brief - the rename was already done correctly at the code level, only prose lagged).
+- **Fresh adversarial review findings: nothing new at CONFIRMED/PLAUSIBLE severity worth a code change.** Read
+  through `BaseVideoMeetingRoute.ts` (owner-route authz, `join()`'s token/slug disambiguation and the
+  organizer-slug/guest/authenticated-caller branches, the ACL channel-grant retry loop), `util/PublicUrlUtils.ts`
+  (the one function that actually produces `organizerJoinUrl`/`publicJoinUrl`/invitee `joinUrl` - validates
+  scheme/loopback/credentials/query/fragment before ever embedding a token in a link, so this repo does constrain
+  what it hands other consumers, as the review brief asked to double check), `util/TokenUtils.ts`/`IceServerUtils.ts`
+  (verified against an independent HMAC-SHA1 test vector, not just self-consistency),
+  `apps/shared/webrtc/MeshConnectionManager.ts` and `apps/shared/push/GuestSignalingClient.ts` (signaling message
+  handling, reconnect/backoff, the `HttpOnly`-cookie-collision fix already documented above), and every `apps/`
+  page for injection surfaces (no `dangerouslySetInnerHTML`/`innerHTML`/`eval` anywhere in `apps/` - a participant's
+  freeform display name is only ever rendered through ordinary JSX text interpolation, which React escapes). All of
+  this was already unusually thorough for the repo's own stated "lighter-touch" activity level - the known,
+  already-fixed browser-session-collision bug and the `publicSlug`/`organizerSlug` sparse-index pitfalls (both
+  documented in this file's earlier entries) were the kind of thing a fresh pass would otherwise have flagged, but
+  they were already found and fixed by the agents that did that work. No new correctness, security or performance
+  issue was found worth changing code for.
+- **New regression test** (`test/plugin.test.ts`, new "package.json dependency consistency" describe block): (1)
+  walks every `apps/**/*.tsx` file for a `@rapidmx/react-shared/videoconf/...` import and asserts the declared
+  `peerDependencies` floor is at least `0.13.0` - written to walk the actual imports rather than hardcode today's
+  one call site, so a future addition to that surface can't silently regress the floor again; (2) asserts every
+  `resolutions` entry equals `^<its own peerDependencies floor>` for `react-shared`/`restapi`/`web-client`, so a
+  future drift like the `react-shared` one just fixed fails CI immediately instead of waiting for another cross-repo
+  review to catch it.

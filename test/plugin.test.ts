@@ -7,6 +7,7 @@
 // UI apps point at directories this package actually ships.
 import "reflect-metadata";
 import fs from "fs";
+import { fileURLToPath } from "url";
 import { PersistenceDecorators } from "@rapidrest/service-core";
 import { isMailboxScopedData, parsePluginManifest } from "@rapidmx/restapi";
 import * as RootEntry from "../src/index.js";
@@ -116,3 +117,63 @@ describe("plugin manifest", () => {
         }
     });
 });
+
+describe("package.json dependency consistency", () => {
+    // Regression test for a real cross-repo bug: `apps/settings-video-conferencing/*.tsx` import
+    // `@rapidmx/react-shared/videoconf/videoMeetingsApi.js`, a module react-shared's own CHANGELOG.md shows was
+    // only added in 0.13.0. A `peerDependencies` floor below that version is a lie - anyone installing this plugin
+    // against the bottom of its own claimed-supported range gets a hard module-resolution failure at import time,
+    // not a type error caught at compile time (a plugin's `apps/` compile against this repo's own `devDependencies`
+    // version, never the peer range's floor). Every source file under `apps/` that imports from
+    // `@rapidmx/react-shared/videoconf/` is walked here, rather than hardcoding the one module currently known to
+    // need it, so a future addition to that surface can't silently regress this floor again.
+    it("declares a react-shared peer floor high enough for every '@rapidmx/react-shared/videoconf/*' import apps/ makes", () => {
+        const REQUIRED_REACT_SHARED_FLOOR = "0.13.0";
+        const appsDir = new URL("../apps/", import.meta.url);
+        const importPattern = /@rapidmx\/react-shared\/videoconf\//;
+        function walk(dirUrl: URL): string[] {
+            const dir = fileURLToPath(dirUrl);
+            let matches: string[] = [];
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                const entryUrl = new URL(`${entry.name}${entry.isDirectory() ? "/" : ""}`, dirUrl);
+                if (entry.isDirectory()) {
+                    matches = matches.concat(walk(entryUrl));
+                } else if (/\.tsx?$/.test(entry.name)) {
+                    if (importPattern.test(fs.readFileSync(fileURLToPath(entryUrl), "utf8"))) {
+                        matches.push(fileURLToPath(entryUrl));
+                    }
+                }
+            }
+            return matches;
+        }
+        const filesNeedingTheFloor: string[] = walk(appsDir);
+        // Sanity check on the test itself: if this ever finds nothing, the regex/walk broke silently rather than
+        // the import having been removed - `videoMeetingsApi.js` is imported by Phase 4's settings page today.
+        expect(filesNeedingTheFloor.length).toBeGreaterThan(0);
+
+        const peerRange: string = pkg.peerDependencies["@rapidmx/react-shared"];
+        const floorMatch: RegExpMatchArray | null = peerRange.match(/>=(\d+\.\d+\.\d+)/);
+        expect(floorMatch).not.toBeNull();
+        const declaredFloor: string = floorMatch![1];
+        expect(semverGte(declaredFloor, REQUIRED_REACT_SHARED_FLOOR)).toBe(true);
+    });
+
+    it("pins every 'resolutions' entry to exactly its own 'peerDependencies' floor, matching booking-plugin's convention", () => {
+        for (const name of ["@rapidmx/react-shared", "@rapidmx/restapi", "@rapidmx/web-client"]) {
+            const peerFloor: string = pkg.peerDependencies[name].match(/>=(\d+\.\d+\.\d+)/)[1];
+            expect(pkg.resolutions[name]).toBe(`^${peerFloor}`);
+        }
+    });
+});
+
+/** Bare `major.minor.patch` comparison - sufficient for the plain `x.y.z` peer floors this manifest declares. */
+function semverGte(a: string, b: string): boolean {
+    const pa = a.split(".").map(Number);
+    const pb = b.split(".").map(Number);
+    for (let i = 0; i < 3; i++) {
+        if (pa[i] !== pb[i]) {
+            return pa[i] > pb[i];
+        }
+    }
+    return true;
+}

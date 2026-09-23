@@ -982,7 +982,7 @@ __metadata:
     vitest: "npm:^5.0.0"
     winston: "npm:^3.19.0"
   peerDependencies:
-    "@rapidmx/react-shared": ">=0.6.0 <1"
+    "@rapidmx/react-shared": ">=0.13.0 <1"
     "@rapidmx/restapi": ">=0.17.0 <1"
     "@rapidmx/web-client": ">=0.11.0 <1"
     "@rapidrest/core": 5.x
@@ -992,9 +992,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@rapidmx/react-shared@npm:^0.11.0":
-  version: 0.11.0
-  resolution: "@rapidmx/react-shared@npm:0.11.0"
+"@rapidmx/react-shared@npm:^0.13.0":
+  version: 0.13.0
+  resolution: "@rapidmx/react-shared@npm:0.13.0"
   dependencies:
     "@emoji-mart/data": "npm:^1.2.1"
     "@peculiar/x509": "npm:^2.1.0"
@@ -1009,7 +1009,7 @@ __metadata:
   peerDependencies:
     react: 19.x
     react-dom: 19.x
-  checksum: 10c0/793b450d51939499f491874bf56a5883308e89a9aae9fe7a01aa91279710003ce0a1f3cf4ad212f954746e4b1e5df8093cbc0d7ce2d4af7e4ca1069f3257679a
+  checksum: 10c0/56c20823a268cf73197c93fb89febc723d8df7c77b77ee3ed0d18a471c84cb1c9f300a724cd668b448df37b031b20cbca578b196dc66dbccb07712bcb5424fd2
   languageName: node
   linkType: hard
 

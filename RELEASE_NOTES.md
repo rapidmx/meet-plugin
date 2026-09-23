@@ -4,7 +4,7 @@
 
 ### Phase 1: data model, routes and signaling
 
-- **`VideoMeeting`/`VideoMeetingInvitee` models** (`@rapidmx/videoconf-plugin`/`./mongo`/`./sql`): a mailbox-owned
+- **`VideoMeeting`/`VideoMeetingInvitee` models** (`@rapidmx/meet-plugin`/`./mongo`/`./sql`): a mailbox-owned
   video meeting, `private` (one `VideoMeetingInvitee` per invited email, each with its own unguessable `joinToken`)
   or `public` (a single, randomly generated `publicSlug` link). `calendarEventUid`, `startTime`/`endTime` are
   optional in this phase - a meeting can exist standalone; a later phase wires the calendar compose "Add video
@@ -93,3 +93,14 @@ notes. What changed in this package to support it:
   meeting through the same `organizerJoinUrl`/`publicJoinUrl` computation `create()` always did, so reopening
   Settings (or listing meetings any other way) shows a working link again instead of one only the original
   creation response ever carried.
+
+### Hardening pass: dependency-manifest fixes
+
+- **Fix: the `@rapidmx/react-shared` peer floor (`>=0.6.0 <1`) was below the version this plugin actually requires.**
+  `apps/settings-video-conferencing/*.tsx` import `@rapidmx/react-shared/videoconf/videoMeetingsApi.js`, added to
+  react-shared only in `0.13.0` - installing this plugin against anything below that in its own claimed-supported
+  range would hit a hard module-resolution failure. Raised to `>=0.13.0 <1`, and the matching `resolutions` pin
+  (previously `^0.11.0`, now `^0.13.0`) to match, per this project's convention of pinning `resolutions` to exactly
+  a package's own peer floor.
+- **Fix: stale `@rapidmx/videoconf-plugin` prose left over from the rename to `@rapidmx/meet-plugin`** in
+  `README.md`'s npm-version and CI/coverage badges and this file's own Phase 1 entry above.
