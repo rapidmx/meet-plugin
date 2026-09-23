@@ -31,9 +31,9 @@
         "react-dom": "19.x"
     },
     "devDependencies": {
-        "@rapidmx/react-shared": "^0.11.0",
-        "@rapidmx/restapi": "^0.17.0",
-        "@rapidmx/web-client": "^0.11.0",
+        "@rapidmx/react-shared": "^0.13.0",
+        "@rapidmx/restapi": "^0.19.0",
+        "@rapidmx/web-client": "^0.13.0",
         "@rapidrest/core": "^5.2.2",
         "@rapidrest/service-core": "^2.1.1",
         "@swc/core": "^1.16.2",
