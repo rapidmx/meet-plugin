@@ -448,3 +448,55 @@ for the 2 new regression tests.
   `resolutions` entry equals `^<its own peerDependencies floor>` for `react-shared`/`restapi`/`web-client`, so a
   future drift like the `react-shared` one just fixed fails CI immediately instead of waiting for another cross-repo
   review to catch it.
+
+## 2026-09-23: Round-3 adversarial review - signaling-message spoofing found here, fixed in `restapi` instead; `react-shared` bumped to 0.14.0
+
+A round-3 cross-repo adversarial review flagged two things for this repo. Only the second was actually this
+repo's to fix; the first is documented here for cross-reference only.
+
+- **[HIGH, found here, fixed elsewhere] Signaling messages were self-attested - no binding between the
+  authenticated push-channel publisher and the `from`/`to` fields a client claims inside the message body.**
+  `apps/shared/webrtc/MeshConnectionManager.ts`'s `handleMessage()` (and everything downstream of it -
+  `handleBye()`, `handlePresenterClaim()`, `handleOffer()`/`handleAnswer()`) trusts `message.from` completely,
+  checking only "not my own uid" and "addressed to me or broadcast." The transport underneath it - the server's
+  shared `/push/:id` endpoint (`@rapidrest/service-core`'s `BasePushRoute.send()`, subclassed by `@rapidmx/
+  restapi`'s `MailPushRoute`) - only checks whether the authenticated caller holds `CREATE` on the channel (i.e.
+  "may publish *something*"), then republishes the message body verbatim with zero inspection of its contents.
+  Since every participant in a mesh call - owner, delegate, or an anonymous guest who joined via the public link
+  - holds `CREATE` on the meeting's channel for as long as their guest JWT remains valid (up to the full
+  `GUEST_JWT_TTL_SECONDS`, 4 hours, per this file's Phase 1 entry above - the ACL grant itself is never revoked
+  on leaving), any participant who has ever been in the call can forge a `bye`/`presenter-claim`/`offer`/
+  `answer` claiming another real participant's `from` uid, up to 4 hours after leaving. Investigated first
+  whether this plugin owns any interception point to fix it in: it does not - `apps/shared/push/
+  GuestSignalingClient.ts` posts directly to the server's generic, shared `/push/:id` route, which this plugin
+  never subclasses or wraps (confirmed by grep: nothing under `src/` references `BasePushRoute` at all). Fixing
+  it here would mean either forking the shared push route (wrong layer, and this plugin has no route of its own
+  at that path to begin with) or trusting a client-supplied signature scheme invented just for this plugin, both
+  worse than fixing the actual gap. **Correctly scoped as a `restapi`-owned fix instead**: `MailPushRoute.send()`
+  is the one general chokepoint every consumer of the push system (this plugin's signaling included) already
+  flows through, so the fix belongs there - a published `msg.from`, when the message body carries one at all,
+  must be stamped or verified against the authenticated caller's own uid before publishing, generically, not as
+  a meet-plugin-specific carve-out. Not fixed in this repo; no code here changed for this finding. See
+  `restapi`'s own `.claude/NOTES.md` for the actual fix once landed there.
+  - Also flagged, same review, not actioned (medium severity, informational): the TURN REST credential TTL
+    (`DEFAULT_TURN_CREDENTIAL_TTL_SECONDS`, 1 hour, `util/IceServerUtils.ts`) is shorter than the guest JWT's own
+    4-hour signaling-session TTL, and neither `MeshConnectionManager` nor `GuestSignalingClient` re-fetches ICE
+    servers or restarts ICE mid-call - a call relying on the TURN relay (symmetric NAT/restrictive firewall) past
+    the 1-hour mark could silently lose media. No mechanism exists today to refresh ICE servers or restart ICE for
+    a long-running call; flagged as a known limitation for a future phase, not fixed in this pass.
+- **`@rapidmx/react-shared` bumped to `0.14.0`** (`devDependencies`/`resolutions` `^0.13.0` → `^0.14.0`,
+  `peerDependencies` floor `>=0.13.0 <1` → `>=0.14.0 <1`) - `0.14.0` shipped two real security fixes (session
+  signing/encryption keys now imported non-extractable; `sanitizeMessageBodyHtml()` now forbids `svg`/`math`
+  tags). The prior peer range (`>=0.13.0 <1`) already technically permitted `0.14.0`, but `devDependencies`/
+  `resolutions` still hard-pinned `^0.13.0`, so `yarn install` alone would never have picked it up. Raised the
+  peer floor too, not just the pins: this repo's own convention (established landing the prior hardening pass,
+  see `test/plugin.test.ts`'s "pins every 'resolutions' entry to exactly its own 'peerDependencies' floor"
+  regression test above) requires `resolutions` to exactly equal `^<peer floor>`, and for a security-motivated
+  bump, forcing the floor up so installs can't silently stay on the vulnerable `0.13.0` line is the more
+  defensible reading of "bump react-shared" than reusing the old floor and pinning `resolutions` ahead of it
+  (which would have both broken that regression test and let a fresh install still land on `0.13.0`). Confirmed
+  low-risk before and after: grep for the changed modules (`crypto/keySession.ts`, `mail/
+  messageBodySanitizer.ts`, `mail/mailDetailHooks.js`, `components/overlays/PopoverPortal.js`) across `apps/`/
+  `src/`/`test/` finds none imported here. `yarn install` (resolved to `0.14.0`), `yarn build`, and
+  `vitest run --coverage` all re-run clean after the bump: 410 tests (unchanged), 100% statement/function/line
+  coverage, 97.52% branch (floor 95%, unchanged).

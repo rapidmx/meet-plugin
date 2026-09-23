@@ -104,3 +104,15 @@ notes. What changed in this package to support it:
   a package's own peer floor.
 - **Fix: stale `@rapidmx/videoconf-plugin` prose left over from the rename to `@rapidmx/meet-plugin`** in
   `README.md`'s npm-version and CI/coverage badges and this file's own Phase 1 entry above.
+
+### react-shared 0.14.0: dependency bump for two security fixes
+
+- **Raised the `@rapidmx/react-shared` peer floor to `>=0.14.0 <1`** (from `>=0.13.0 <1`) and the matching
+  `devDependencies`/`resolutions` pins to `^0.14.0` (from `^0.13.0`), so `yarn install` actually picks up
+  `0.14.0` - the prior floor's range technically already permitted it, but nothing forced the upgrade. `0.14.0`
+  carries two real security fixes (session signing/encryption keys are now imported non-extractable;
+  `sanitizeMessageBodyHtml()` now forbids `svg`/`math` tags, closing a sanitizer gap `sanitizeQuotedHtml()` had
+  already closed) in modules this plugin doesn't import (confirmed by grep for the changed files - `crypto/
+  keySession.ts`, `mail/messageBodySanitizer.ts`, `mail/mailDetailHooks.js`, `components/overlays/
+  PopoverPortal.js` - across `apps/`/`src/`/`test/`), so the bump is low-risk and purely defensive. `yarn install`/
+  `yarn build`/the full test suite were re-run clean after the bump (410 tests, 100%/97.52% coverage, unchanged).
