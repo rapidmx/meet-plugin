@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.3.0
+
 ### Added
 
 - **The in-call controls are rebuilt.** The microphone and the camera are each a button that mutes / turns off, beside a menu that picks the device; while the microphone is unmuted its button shows a live level, so a participant can see their audio is being sent, and the camera button shows a green dot while a camera is sending. A new reactions button sends one of eight emoji, which float up the screen with the sender's name ("You" for your own). A new raise-hand button shows a raised hand on the participant's tile and in the header, and plays a short chime (and is announced to screen readers) for everyone else. Whether each participant's microphone is muted, their camera is off and their hand is up travels with the call, so a tile shows an avatar for a camera that is off and a muted-microphone badge.
