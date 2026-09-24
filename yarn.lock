@@ -937,11 +937,11 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@rapidmx/meet-plugin@workspace:."
   dependencies:
-    "@rapidmx/react-shared": "npm:^0.14.0"
-    "@rapidmx/restapi": "npm:^0.19.0"
-    "@rapidmx/web-client": "npm:^0.13.0"
-    "@rapidrest/core": "npm:^5.2.2"
-    "@rapidrest/service-core": "npm:^2.1.1"
+    "@rapidmx/react-shared": "npm:^0.15.0"
+    "@rapidmx/restapi": "npm:^0.20.1"
+    "@rapidmx/web-client": "npm:^0.14.1"
+    "@rapidrest/core": "npm:^6.0.0"
+    "@rapidrest/service-core": "npm:^2.3.0"
     "@swc/core": "npm:^1.16.2"
     "@testing-library/dom": "npm:^10.4.1"
     "@testing-library/jest-dom": "npm:^7.0.1"
@@ -1085,9 +1085,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@rapidrest/core@npm:^5.2.2":
-  version: 5.2.2
-  resolution: "@rapidrest/core@npm:5.2.2"
+"@rapidrest/core@npm:^6.0.0":
+  version: 6.0.0
+  resolution: "@rapidrest/core@npm:6.0.0"
   dependencies:
     form-data: "npm:^4.0.6"
     handlebars: "npm:^4.7.9"
@@ -1104,13 +1104,13 @@ __metadata:
     reflect-metadata: 0.2.x
     winston: 3.x
     winston-transport: 4.x
-  checksum: 10c0/474853632650bfa9cd74d35f48f68306570cfcb4e07ad79e4cd7b9948135046d3fc1160843a80560e60b449225cf0f0196ab2f36af578435aefe305b78a07756
+  checksum: 10c0/a3751eec5b646264e4bb619e1a365b4fc3350949b009ae25702fa9896e3f24c2257cbe4bf7e6cea59a7b884d48472cf133c59e91b1044212cdb49ede454e9f9c
   languageName: node
   linkType: hard
 
-"@rapidrest/service-core@npm:^2.1.1":
-  version: 2.1.1
-  resolution: "@rapidrest/service-core@npm:2.1.1"
+"@rapidrest/service-core@npm:^2.3.0":
+  version: 2.3.0
+  resolution: "@rapidrest/service-core@npm:2.3.0"
   dependencies:
     axios: "npm:^1.20.0"
     dayjs: "npm:^1.11.23"
@@ -1140,7 +1140,7 @@ __metadata:
       optional: true
     uWebSockets.js:
       optional: true
-  checksum: 10c0/474c9f0c19be4fab0e95d2a814abed158ae31e78caa37a97716ba34b028db98f668b8e3ae3f0d1f7d8073c3d1057532ffb68064fa9feceb05cfb56844a0641c0
+  checksum: 10c0/08bbefc6e9cf75aae18aa7d5f7dd936c18c6845c341f34b6d77f90c145606ecc84b483e35805bf5aac45e3f644806df4c5d424ba70f26ef014f4f02b94196e18
   languageName: node
   linkType: hard
 
