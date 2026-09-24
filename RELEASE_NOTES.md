@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.2.0
+
 ### Phase 1: data model, routes and signaling
 
 - **`VideoMeeting`/`VideoMeetingInvitee` models** (`@rapidmx/meet-plugin`/`./mongo`/`./sql`): a mailbox-owned

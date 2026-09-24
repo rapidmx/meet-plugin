@@ -1,6 +1,6 @@
 {
     "name": "@rapidmx/meet-plugin",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "RapidMX plugin that provides WebRTC video conferencing, joinable from a calendar invite or a shared link.",
     "repository": "https://github.com/RapidMX/meet-plugin.git",
     "author": "RapidREST <rapidrests@gmail.com>",
