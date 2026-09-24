@@ -17,7 +17,7 @@ export type VideoMeetingStatus = "scheduled" | "active" | "ended" | "cancelled";
 /** Mirrors `BaseVideoMeetingRoute.ts`'s `IceServerConfig` - already the exact shape `RTCPeerConnection`'s
  * `iceServers` constructor option expects, passed straight through with no reshaping. */
 export interface IceServerConfig {
-    urls: string;
+    urls: string | string[];
     username?: string;
     credential?: string;
 }

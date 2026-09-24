@@ -7,17 +7,25 @@ import * as crypto from "crypto";
 /** A single ICE server entry, matching the shape the browser `RTCPeerConnection` `iceServers` constructor option
  * expects (`RTCIceServer`), so the join response can be handed to it directly with no reshaping. */
 export interface IceServerConfig {
-    urls: string;
+    /** One URL, or several that share one credential (a TURN server's UDP and TLS addresses, say). */
+    urls: string | string[];
     username?: string;
     credential?: string;
 }
 
-/** The `mail:videoconf:turn:*` settings, exactly as configured (empty strings for anything unset). */
+/** The `mail:videoconf:turn:*` settings, exactly as configured (empty strings for anything unset). `url` may name several
+ * URLs, separated by commas and/or whitespace - see `parseTurnUrls()`. */
 export interface TurnSettings {
     url: string;
     username: string;
     credential: string;
     sharedSecret: string;
+}
+
+/** The URLs in a `mail:videoconf:turn:url` value: one, or several separated by commas and/or whitespace (for a TURN server
+ * listening on both UDP and TLS, `turn:host:3478,turns:host:5349`). Blank entries are dropped. */
+export function parseTurnUrls(value: string): string[] {
+    return value.split(/[\s,]+/).filter(Boolean);
 }
 
 /** Always-available, free public STUN servers - discovery only, no media relay. Two independent providers, so a
@@ -76,10 +84,12 @@ export function buildIceServers(
     options?: { ttlSeconds?: number; now?: Date; randomUserPart?: () => string },
 ): IceServerConfig[] {
     const servers: IceServerConfig[] = [...DEFAULT_STUN_SERVERS];
-    const url: string = settings.url.trim();
-    if (!url) {
+    const turnUrls: string[] = parseTurnUrls(settings.url);
+    if (turnUrls.length === 0) {
         return servers;
     }
+    // A single URL stays a string, exactly as before, so a deployment that never sets more than one sees no change.
+    const url: string | string[] = turnUrls.length === 1 ? turnUrls[0] : turnUrls;
     if (settings.sharedSecret.trim()) {
         const userPart: string = settings.username.trim() || (options?.randomUserPart ?? (() => crypto.randomBytes(8).toString("hex")))();
         const { username, credential } = turnRestCredential(settings.sharedSecret.trim(), userPart, options?.ttlSeconds, options?.now);

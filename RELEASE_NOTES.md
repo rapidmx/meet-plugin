@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- **The TURN server URL setting can hold several addresses**, separated by commas or whitespace - `turn:turn.example.com:3478,turns:turn.example.com:5349`, say, for a TURN server that listens on both UDP and TLS. They are given to the browser as one ICE server, sharing one credential (which, with a shared secret set, is minted per join as before); a single address is handed over exactly as it was. The RapidMX Helm chart's bundled coturn uses this for TURN over TLS. **A server that sets two addresses needs this version**: an older plugin passes the whole string as one address, which the browser rejects, and no call connects.
+
 ## v0.3.1
 
 ## v0.3.0

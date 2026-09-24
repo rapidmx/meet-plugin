@@ -128,7 +128,7 @@
                     "label": "TURN server URL",
                     "type": "string",
                     "default": "",
-                    "help": "A turn: or turns: URL (e.g. turns:turn.example.com:5349) relaying media for a participant behind a restrictive NAT or firewall, for whom a direct peer-to-peer connection fails. Public STUN servers are used for everyone else and need no configuration. Leave empty to serve calls with STUN only - most calls will still connect, but some participants may not."
+                    "help": "A turn: or turns: URL (e.g. turns:turn.example.com:5349), or several separated by commas (turn:turn.example.com:3478,turns:turn.example.com:5349), relaying media for a participant behind a restrictive NAT or firewall, for whom a direct peer-to-peer connection fails. Public STUN servers are used for everyone else and need no configuration. Leave empty to serve calls with STUN only - most calls will still connect, but some participants may not."
                 },
                 {
                     "key": "mail:videoconf:turn:username",

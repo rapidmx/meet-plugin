@@ -63,6 +63,7 @@ describe("plugin entry points", () => {
                 "createSingleInviteeVideoMeeting",
                 "DEFAULT_STUN_SERVERS",
                 "DEFAULT_TURN_CREDENTIAL_TTL_SECONDS",
+                "parseTurnUrls",
                 "turnRestCredential",
                 "GUEST_JWT_TTL_SECONDS",
                 "GUEST_UID_PREFIX",

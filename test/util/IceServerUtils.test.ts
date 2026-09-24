@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
-import { buildIceServers, DEFAULT_STUN_SERVERS, DEFAULT_TURN_CREDENTIAL_TTL_SECONDS, turnRestCredential } from "../../src/util/IceServerUtils.js";
+import { buildIceServers, DEFAULT_STUN_SERVERS, DEFAULT_TURN_CREDENTIAL_TTL_SECONDS, parseTurnUrls, turnRestCredential } from "../../src/util/IceServerUtils.js";
 
 const EMPTY_TURN = { url: "", username: "", credential: "", sharedSecret: "" };
 
@@ -103,5 +103,35 @@ describe("buildIceServers", () => {
         const result = buildIceServers({ url: "  turn:turn.example.com:3478  ", username: " static-user ", credential: " static-pass ", sharedSecret: "" });
 
         expect(result[2]).toEqual({ urls: "turn:turn.example.com:3478", username: "static-user", credential: "static-pass" });
+    });
+
+    it("Gives a TURN server listening on several addresses one entry with all its URLs, sharing one credential.", () => {
+        const now = new Date("2023-11-14T22:13:20.000Z");
+        const result = buildIceServers(
+            { url: "turn:turn.example.com:3478,turns:turn.example.com:5349", username: "", credential: "", sharedSecret: "sharedsecret123" },
+            { now, ttlSeconds: 0, randomUserPart: () => "generated" },
+        );
+
+        expect(result).toHaveLength(DEFAULT_STUN_SERVERS.length + 1);
+        expect(result[2]).toEqual({
+            urls: ["turn:turn.example.com:3478", "turns:turn.example.com:5349"],
+            username: "1700000000:generated",
+            credential: turnRestCredential("sharedsecret123", "generated", 0, now).credential,
+        });
+    });
+
+    it("Uses the same static credential for every one of several URLs.", () => {
+        const result = buildIceServers({ url: "turn:a.example.com:3478 turns:a.example.com:5349", username: "u", credential: "p", sharedSecret: "" });
+
+        expect(result[2]).toEqual({ urls: ["turn:a.example.com:3478", "turns:a.example.com:5349"], username: "u", credential: "p" });
+    });
+});
+
+describe("parseTurnUrls", () => {
+    it("Splits on commas and any whitespace, dropping blanks.", () => {
+        expect(parseTurnUrls("turn:a:3478")).toEqual(["turn:a:3478"]);
+        expect(parseTurnUrls(" turn:a:3478 ,, turns:a:5349\n turn:b:3478?transport=tcp ")).toEqual(["turn:a:3478", "turns:a:5349", "turn:b:3478?transport=tcp"]);
+        expect(parseTurnUrls("")).toEqual([]);
+        expect(parseTurnUrls(" , ")).toEqual([]);
     });
 });
