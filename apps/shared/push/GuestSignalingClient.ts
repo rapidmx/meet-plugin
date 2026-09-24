@@ -192,6 +192,8 @@ export class GuestSignalingClient implements SignalingChannel {
             method: "POST",
             headers,
             body: JSON.stringify(message),
+            // Lets a `bye` sent as the page unloads still go out.
+            keepalive: true,
         }).catch(() => {
             // Best-effort - see this method's doc comment.
         });

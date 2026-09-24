@@ -4,9 +4,9 @@
 ///////////////////////////////////////////////////////////////////////////////
 /**
  * Thin, dependency-injectable wrappers over `navigator.mediaDevices` - `enumerateDevices()`/`getUserMedia()`/
- * `getDisplayMedia()` - used by both the join/lobby page's device preview and the in-call view's mute/camera/share
- * controls (see this plugin's Phase 2 `.claude/NOTES.md` entry). Kept under `src/` rather than `apps/meet/` because
- * it is pure logic with no JSX, reused by more than one page/component.
+ * `getDisplayMedia()` - used by `useLocalMedia()` (the camera and microphone) and the in-call view's share-screen
+ * control (see this plugin's Phase 2 `.claude/NOTES.md` entry). Kept under `apps/shared/` rather than `apps/meet/`
+ * because it is pure logic with no JSX, reused by more than one module.
  *
  * Every function accepts an optional `MediaDevicesLike` so a test can inject a fake without a real browser; the
  * real `navigator.mediaDevices` is used by default, resolved lazily inside each function (never at module scope)
@@ -128,14 +128,4 @@ export async function requestDisplayMedia(devices: MediaDevicesLike | undefined 
  * `null` so a caller never needs its own guard. */
 export function stopStream(stream: MediaStream | undefined | null): void {
     stream?.getTracks().forEach((track) => track.stop());
-}
-
-/** Enables/disables every track of `stream` matching `kind`, for the mute/camera-off toggles - tracks are kept
- * (not stopped/removed), matching every mainstream video-call app's "mute" behavior: instant, reversible, and
- * without re-requesting `getUserMedia()` or renegotiating the `RTCPeerConnection`. */
-export function setTracksEnabled(stream: MediaStream | undefined | null, kind: "audio" | "video", enabled: boolean): void {
-    const tracks: MediaStreamTrack[] = kind === "audio" ? (stream?.getAudioTracks() ?? []) : (stream?.getVideoTracks() ?? []);
-    for (const track of tracks) {
-        track.enabled = enabled;
-    }
 }

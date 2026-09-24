@@ -353,6 +353,8 @@ describe("GuestSignalingClient.send", () => {
                 method: "POST",
                 headers: { "Content-Type": "application/json", Authorization: "Bearer guest-token" },
                 body: JSON.stringify(message),
+                // So a `bye` sent as the page unloads still goes out.
+                keepalive: true,
             }),
         );
     });

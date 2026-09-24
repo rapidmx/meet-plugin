@@ -12,8 +12,21 @@ import type { RTCPeerConnectionFactory, RTCPeerConnectionLike } from "./types.js
 export const createBrowserPeerConnection: RTCPeerConnectionFactory = (config) => {
     const pc = new RTCPeerConnection(config);
     const like: RTCPeerConnectionLike = {
-        addTrack: (track, stream) => pc.addTrack(track, stream),
-        getSenders: () => pc.getSenders(),
+        addTransceiver: (kind, track) => {
+            const { sender } = pc.addTransceiver(track ?? kind, { direction: "sendrecv" });
+            return { sender };
+        },
+        claimTransceivers: () => {
+            const senders: Partial<Record<"audio" | "video", RTCRtpSender>> = {};
+            for (const transceiver of pc.getTransceivers()) {
+                const kind = transceiver.receiver.track.kind as "audio" | "video";
+                if (!senders[kind]) {
+                    transceiver.direction = "sendrecv";
+                    senders[kind] = transceiver.sender;
+                }
+            }
+            return senders;
+        },
         createOffer: () => pc.createOffer(),
         createAnswer: () => pc.createAnswer(),
         setLocalDescription: (description) => pc.setLocalDescription(description),
@@ -31,7 +44,7 @@ export const createBrowserPeerConnection: RTCPeerConnectionFactory = (config) =>
     // `like` - a level of indirection needed because `like`'s own handler properties are reassigned *after* this
     // adapter object is constructed and returned (see `MeshConnectionManager.createPeer()`).
     pc.onicecandidate = (event) => like.onicecandidate?.({ candidate: event.candidate ? event.candidate.toJSON() : null });
-    pc.ontrack = (event) => like.ontrack?.({ streams: event.streams });
+    pc.ontrack = (event) => like.ontrack?.({ track: event.track });
     pc.onconnectionstatechange = () => like.onconnectionstatechange?.();
     return like;
 };

@@ -5,21 +5,28 @@
 ///////////////////////////////////////////////////////////////////////////////
 import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { jsonResponse, mockFetch } from "../testUtils.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fakeMediaDevices, fakeMediaStream, fakeTrack, installFakeMediaStream, installMediaDevices, jsonResponse, mockFetch, removeMediaDevices } from "../testUtils.js";
+import type { CallViewProps } from "../../../apps/meet/_CallView.js";
 import MeetJoinPage from "../../../apps/meet/[token].js";
 
+const { calls } = vi.hoisted(() => ({ calls: [] as unknown[] }));
+
 vi.mock("../../../apps/meet/_CallView.js", () => ({
-    default: (props: { onLeave: () => void; selfName: string; token?: string; selfUid: string }) => (
-        <div>
-            <p>In call as {props.selfName}</p>
-            <p>Signaling token: {props.token ?? "(none - authenticated)"}</p>
-            <p>Self uid: {props.selfUid}</p>
-            <button type="button" onClick={props.onLeave}>
-                Leave (test)
-            </button>
-        </div>
-    ),
+    default: (props: CallViewProps) => {
+        calls.push(props);
+        return (
+            <div>
+                <p>In call as {props.selfName}</p>
+                <p>Meeting: {props.meetingTitle}</p>
+                <p>Signaling token: {props.token ?? "(none - authenticated)"}</p>
+                <p>Self uid: {props.selfUid}</p>
+                <button type="button" onClick={props.onLeave}>
+                    Leave (test)
+                </button>
+            </div>
+        );
+    },
 }));
 
 const joinResponse = {
@@ -38,51 +45,83 @@ const authenticatedJoinResponse = {
     selfUid: "real-user-1",
 };
 
+function mockJoin(response: unknown) {
+    mockFetch((url) => {
+        if (url === "/api/system/branding") return jsonResponse(200, { companyName: "", title: "" });
+        if (url === "/api/mail/video-meetings/join/tok1") return jsonResponse(200, response);
+        throw new Error(`unexpected ${url}`);
+    });
+}
+
+beforeEach(() => {
+    calls.length = 0;
+    installFakeMediaStream();
+});
+
 afterEach(() => {
+    removeMediaDevices();
     vi.unstubAllGlobals();
 });
 
-// jsdom has no `MediaStream` constructor at all - `_MeetLobby.tsx`'s "join with no device access" fallback needs
-// one, exercised for real by the first test below (no `navigator.mediaDevices` is stubbed in this file - that
-// path is covered in depth by `_MeetLobby.test.tsx` itself).
-class FakeMediaStream {
-    getTracks() {
-        return [];
-    }
-}
-
 describe("MeetJoinPage", () => {
-    it("loads, shows the lobby, joins and then leaves back to the ended state", async () => {
-        vi.stubGlobal("MediaStream", FakeMediaStream);
-        mockFetch((url) => {
-            if (url === "/api/system/branding") return jsonResponse(200, { companyName: "", title: "" });
-            if (url === "/api/mail/video-meetings/join/tok1") return jsonResponse(200, joinResponse);
-            throw new Error(`unexpected ${url}`);
-        });
+    it("carries the lobby's camera and microphone into the call, and releases them when the participant leaves", async () => {
+        const audio = fakeTrack("audio");
+        const video = fakeTrack("video");
+        const devices = fakeMediaDevices({ userMediaStream: fakeMediaStream([audio, video]) });
+        installMediaDevices(devices);
+        mockJoin(joinResponse);
 
         render(<MeetJoinPage params={{ token: "tok1" }} />);
         expect(screen.getByText(/Loading/)).toBeInTheDocument();
         expect(await screen.findByText("Standup")).toBeInTheDocument();
+        // The lobby is drawn inside the branded page shell.
+        expect(screen.getByRole("main")).toBeInTheDocument();
+        await waitFor(() => expect(devices.getUserMedia).toHaveBeenCalledTimes(1));
 
         fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "Guest" } });
-        // No `navigator.mediaDevices` in this test's plain jsdom setup - the lobby's own tests cover that path in
-        // depth; here it only matters that joining hands off cleanly into the (mocked) call view.
+        await waitFor(() => expect(screen.getByText("Join meeting")).toBeEnabled());
         fireEvent.click(screen.getByText("Join meeting"));
 
         expect(await screen.findByText("In call as Guest")).toBeInTheDocument();
+        expect(screen.getByText("Meeting: Standup")).toBeInTheDocument();
         expect(screen.getByText("Signaling token: guest-token")).toBeInTheDocument();
         expect(screen.getByText("Self uid: guest:1")).toBeInTheDocument();
+        // The call fills the window rather than sitting inside the page shell...
+        expect(screen.queryByRole("main")).toBeNull();
+        // ...and is handed the very tracks the lobby previewed - still running, not stopped by the lobby unmounting.
+        const props = calls[calls.length - 1] as CallViewProps;
+        expect(props.media.audioTrack).toBe(audio);
+        expect(props.media.videoTrack).toBe(video);
+        expect(props.iceServers).toEqual(joinResponse.iceServers);
+        expect(audio.stop).not.toHaveBeenCalled();
+        expect(video.stop).not.toHaveBeenCalled();
+
         fireEvent.click(screen.getByText("Leave (test)"));
         expect(await screen.findByText("You left the meeting")).toBeInTheDocument();
+        expect(audio.stop).toHaveBeenCalled();
+        expect(video.stop).toHaveBeenCalled();
+    });
+
+    it("lets a participant who left rejoin, asking for the camera and microphone again", async () => {
+        const devices = fakeMediaDevices({ userMediaStream: () => fakeMediaStream([fakeTrack("audio"), fakeTrack("video")]) });
+        installMediaDevices(devices);
+        mockJoin(joinResponse);
+
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        expect(await screen.findByText("Standup")).toBeInTheDocument();
+        fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "Guest" } });
+        fireEvent.click(screen.getByText("Join meeting"));
+        fireEvent.click(await screen.findByText("Leave (test)"));
+
+        fireEvent.click(await screen.findByText("Rejoin meeting"));
+        expect(await screen.findByText("Standup")).toBeInTheDocument();
+        // The name is kept, and the devices are asked for again.
+        expect(screen.getByLabelText("Your name")).toHaveValue("Guest");
+        await waitFor(() => expect(devices.getUserMedia).toHaveBeenCalledTimes(2));
     });
 
     it("passes no signaling token through to CallView when join() reports the caller as already authenticated", async () => {
-        vi.stubGlobal("MediaStream", FakeMediaStream);
-        mockFetch((url) => {
-            if (url === "/api/system/branding") return jsonResponse(200, { companyName: "", title: "" });
-            if (url === "/api/mail/video-meetings/join/tok1") return jsonResponse(200, authenticatedJoinResponse);
-            throw new Error(`unexpected ${url}`);
-        });
+        mockJoin(authenticatedJoinResponse);
 
         render(<MeetJoinPage params={{ token: "tok1" }} />);
         expect(await screen.findByText("Standup")).toBeInTheDocument();

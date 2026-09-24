@@ -2,9 +2,28 @@
 
 ## Unreleased
 
+### Added
+
+- **The in-call controls are rebuilt.** The microphone and the camera are each a button that mutes / turns off, beside a menu that picks the device; while the microphone is unmuted its button shows a live level, so a participant can see their audio is being sent, and the camera button shows a green dot while a camera is sending. A new reactions button sends one of eight emoji, which float up the screen with the sender's name ("You" for your own). A new raise-hand button shows a raised hand on the participant's tile and in the header, and plays a short chime (and is announced to screen readers) for everyone else. Whether each participant's microphone is muted, their camera is off and their hand is up travels with the call, so a tile shows an avatar for a camera that is off and a muted-microphone badge.
+- **Turning a camera or microphone on partway through a call works**, including for a participant who joined with none, or whose browser refused permission. The camera and microphone menus offer to ask for access again.
+- **The lobby has an "Allow camera and microphone" / "Try again" button**, and says what is wrong (blocked, no camera, unsupported browser) instead of showing an empty preview. A machine with no camera still gets its microphone. Joining without a camera or microphone is allowed and now works both ways: that participant still sees and hears everyone.
+- **A participant who left can rejoin** from the "You left the meeting" page.
+
 ### Changed
 
+- **The call fills the window.** It used to be drawn inside the branded page (header, footer and padding around it) and ran off the bottom of the screen. It is now a full-window view with a slim header, the tiles, and the control bar pinned to the bottom. The local participant is a small tile in the bottom-right corner while anyone else is in the call (above the bar on a narrow window, at the top on a phone) and fills the window while they are alone.
+- Turning the camera off now stops the camera (the camera light goes out) instead of sending black frames.
 - **The "Public join page URL" setting defaults to `https://<host>/meet`**, which the server saves with its own host when the plugin is installed, so join links in calendar invites work with no further steps. Needs `@rapidmx/restapi` with `<host>` defaults; an older server saves nothing for it, as before, and the admin console's form offers the address to save.
+
+### Fixed
+
+- **A participant's own video disappeared when they joined the call.** The lobby owned the camera and microphone and stopped them when it closed - which is exactly when the call starts using them - so everyone who joined sent dead tracks. The page now owns them for the whole visit and stops them once, when the participant leaves.
+- **Nobody could see or hear anyone else.** Three separate causes: a participant's connections carried media only if they had a camera or microphone at the moment the connection was made (none negotiated no media in either direction for the whole call); the side that answers a connection never attached its own tracks to the connection the offer created, so it sent nothing; and remote audio was played only by a video element that a hidden tile or a camera-off participant never had. Every connection now carries an audio and a video transceiver from the start (the answerer takes the ones the offer created), tracks are swapped in with `replaceTrack` without renegotiating, each remote stream is gathered per participant, and audio is played by its own hidden element. If the browser's autoplay policy refuses to start it, a banner asks for a click.
+- **Signaling messages that arrive out of order no longer break a call.** Each message is its own `POST`, so an ICE candidate can beat its offer (it was dropped) and an offer can beat its sender's hello (the participant kept the name of their internal id for the whole call). Early candidates are now held until the connection exists, and a later hello fills in the real name.
+- **One account joining from two devices, or two tabs, now works.** Both used the account's uid as their identity on the call, so each ignored the other's messages as its own. Each tab now adds a random suffix.
+- **A participant who closed the tab stayed in everyone else's call.** The goodbye is now sent when the page is closed.
+- **Access to the camera and microphone is asked for in a way more browsers honor**: once when the lobby opens and again from a button (a click is a user gesture, which some browsers require before they will prompt), with each device asked for on its own if the pair can't be satisfied together.
+- **The lobby's camera preview went blank after turning the camera off and on again.**
 
 ## v0.2.0
 

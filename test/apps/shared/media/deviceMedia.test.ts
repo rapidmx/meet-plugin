@@ -10,7 +10,6 @@ import {
     listDevices,
     requestDisplayMedia,
     requestUserMedia,
-    setTracksEnabled,
     stopStream,
 } from "../../../../apps/shared/media/deviceMedia.js";
 
@@ -148,23 +147,5 @@ describe("stopStream", () => {
     it("tolerates undefined/null", () => {
         expect(() => stopStream(undefined)).not.toThrow();
         expect(() => stopStream(null)).not.toThrow();
-    });
-});
-
-describe("setTracksEnabled", () => {
-    it("toggles only the requested track kind", () => {
-        const a = track("audio");
-        const v = track("video");
-        const s = stream([a, v]);
-        setTracksEnabled(s, "audio", false);
-        expect(a.enabled).toBe(false);
-        expect(v.enabled).toBe(true);
-        setTracksEnabled(s, "video", false);
-        expect(v.enabled).toBe(false);
-    });
-
-    it("tolerates a missing stream, for both track kinds", () => {
-        expect(() => setTracksEnabled(undefined, "audio", false)).not.toThrow();
-        expect(() => setTracksEnabled(undefined, "video", false)).not.toThrow();
     });
 });

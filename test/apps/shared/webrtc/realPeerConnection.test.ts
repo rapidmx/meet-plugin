@@ -10,15 +10,27 @@ class FakeSender {
     replaceTrack = vi.fn();
 }
 
+class FakeTransceiver {
+    direction = "recvonly";
+    sender = new FakeSender(null);
+    constructor(public receiver: { track: { kind: string } }) {}
+}
+
 class FakeRTCPeerConnection {
     static instances: FakeRTCPeerConnection[] = [];
     config: unknown;
     onicecandidate: ((event: { candidate: { toJSON(): unknown } | null }) => void) | null = null;
-    ontrack: ((event: { streams: unknown[] }) => void) | null = null;
+    ontrack: ((event: { track: unknown; streams: unknown[] }) => void) | null = null;
     onconnectionstatechange: (() => void) | null = null;
     connectionState = "new";
-    addTrack = vi.fn((track: unknown) => new FakeSender(track));
-    getSenders = vi.fn(() => ["sender-1"]);
+    addTransceiver = vi.fn((trackOrKind: unknown, init: unknown) => {
+        const transceiver = new FakeTransceiver({ track: { kind: typeof trackOrKind === "string" ? trackOrKind : "video" } });
+        transceiver.sender = new FakeSender(typeof trackOrKind === "string" ? null : trackOrKind);
+        void init;
+        return transceiver;
+    });
+    transceivers: FakeTransceiver[] = [];
+    getTransceivers = vi.fn(() => this.transceivers);
     createOffer = vi.fn(async () => ({ type: "offer", sdp: "o" }));
     createAnswer = vi.fn(async () => ({ type: "answer", sdp: "a" }));
     setLocalDescription = vi.fn(async () => undefined);
@@ -44,12 +56,15 @@ describe("createBrowserPeerConnection", () => {
         expect(real.config).toEqual({ iceServers: [{ urls: "stun:example.com" }] });
 
         const track = { kind: "video" };
-        const stream = {};
-        const sender = like.addTrack(track as never, stream as never);
-        expect(real.addTrack).toHaveBeenCalledWith(track, stream);
-        expect(sender).toBeInstanceOf(FakeSender);
+        const withTrack = like.addTransceiver("video", track as never);
+        expect(real.addTransceiver).toHaveBeenCalledWith(track, { direction: "sendrecv" });
+        expect(withTrack.sender.track).toBe(track);
 
-        expect(like.getSenders()).toEqual(["sender-1"]);
+        // Nothing to send yet: the transceiver is made by kind, and its sender sends nothing until replaceTrack().
+        const withoutTrack = like.addTransceiver("audio", null);
+        expect(real.addTransceiver).toHaveBeenCalledWith("audio", { direction: "sendrecv" });
+        expect(withoutTrack.sender.track).toBeNull();
+
         await expect(like.createOffer()).resolves.toEqual({ type: "offer", sdp: "o" });
         await expect(like.createAnswer()).resolves.toEqual({ type: "answer", sdp: "a" });
         await like.setLocalDescription({ type: "offer", sdp: "o" });
@@ -81,9 +96,9 @@ describe("createBrowserPeerConnection", () => {
 
         const onTrack = vi.fn();
         like.ontrack = onTrack;
-        const stream = {};
-        real.ontrack!({ streams: [stream] });
-        expect(onTrack).toHaveBeenCalledWith({ streams: [stream] });
+        const track = { kind: "audio" };
+        real.ontrack!({ track, streams: [{}] });
+        expect(onTrack).toHaveBeenCalledWith({ track });
 
         const onStateChange = vi.fn();
         like.onconnectionstatechange = onStateChange;
@@ -91,12 +106,30 @@ describe("createBrowserPeerConnection", () => {
         expect(onStateChange).toHaveBeenCalledTimes(1);
     });
 
+    it("claims the transceivers a remote offer created, one send-and-receive sender per kind", () => {
+        vi.stubGlobal("RTCPeerConnection", FakeRTCPeerConnection);
+        const like = createBrowserPeerConnection({ iceServers: [] });
+        const real = FakeRTCPeerConnection.instances[0];
+        const audio = new FakeTransceiver({ track: { kind: "audio" } });
+        const video = new FakeTransceiver({ track: { kind: "video" } });
+        const secondVideo = new FakeTransceiver({ track: { kind: "video" } });
+        real.transceivers = [audio, video, secondVideo];
+
+        const senders = like.claimTransceivers();
+        expect(senders.audio).toBe(audio.sender);
+        expect(senders.video).toBe(video.sender);
+        expect(audio.direction).toBe("sendrecv");
+        expect(video.direction).toBe("sendrecv");
+        // A second m-line of a kind already claimed is left alone.
+        expect(secondVideo.direction).toBe("recvonly");
+    });
+
     it("does nothing when no handler has been assigned yet", () => {
         vi.stubGlobal("RTCPeerConnection", FakeRTCPeerConnection);
         createBrowserPeerConnection({ iceServers: [] });
         const real = FakeRTCPeerConnection.instances[0];
         expect(() => real.onicecandidate!({ candidate: null })).not.toThrow();
-        expect(() => real.ontrack!({ streams: [] })).not.toThrow();
+        expect(() => real.ontrack!({ track: {}, streams: [] })).not.toThrow();
         expect(() => real.onconnectionstatechange!()).not.toThrow();
     });
 });

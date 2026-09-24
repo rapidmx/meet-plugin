@@ -2,10 +2,10 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
-import { describe, expect, it, vi } from "vitest";
-import { MeshConnectionManager, isOfferer } from "../../../../apps/shared/webrtc/MeshConnectionManager.js";
-import type { MeshEvent, RTCPeerConnectionFactory, SignalMessage, SignalingChannel } from "../../../../apps/shared/webrtc/types.js";
-import { fakeMediaStream, fakeRTCPeerConnection, fakeTrack } from "../../testUtils.js";
+import { describe, expect, it } from "vitest";
+import { MeshConnectionManager, type MeshConnectionManagerOptions, isOfferer } from "../../../../apps/shared/webrtc/MeshConnectionManager.js";
+import { type MeshEvent, REACTION_EMOJIS, type SignalMessage, type SignalingChannel } from "../../../../apps/shared/webrtc/types.js";
+import { type FakeRTCPeerConnection, fakeMediaStream, fakeRTCPeerConnection, fakeTrack } from "../../testUtils.js";
 
 /** A directly-controllable fake channel for single-manager tests: `emit()` injects an incoming message, `sent`
  * records everything the manager under test published. */
@@ -30,35 +30,17 @@ function manualChannel(): SignalingChannel & { emit: (message: SignalMessage) =>
  * `MeshConnectionManager`'s own doc comment on why it filters its own uid at the top of `handleMessage()`). */
 function bus() {
     const allHandlers = new Set<(message: SignalMessage) => void>();
-    const channel: SignalingChannel = {
-        send: (message) => {
-            for (const handler of [...allHandlers]) handler(message);
-        },
-        onMessage: (handler) => {
-            allHandlers.add(handler);
-            return () => allHandlers.delete(handler);
-        },
-    };
-    // Every participant gets its own channel *view* of the same bus, so a manager's `unsubscribe` only removes
-    // its own handler - built once per call to `channel()` below.
     return {
         channel(): SignalingChannel {
             return {
-                send: channel.send,
-                onMessage: channel.onMessage,
+                send: (message) => {
+                    for (const handler of [...allHandlers]) handler(message);
+                },
+                onMessage: (handler) => {
+                    allHandlers.add(handler);
+                    return () => allHandlers.delete(handler);
+                },
             };
-        },
-    };
-}
-
-function trackingFactory(): { factory: RTCPeerConnectionFactory; created: ReturnType<typeof fakeRTCPeerConnection>[] } {
-    const created: ReturnType<typeof fakeRTCPeerConnection>[] = [];
-    return {
-        created,
-        factory: () => {
-            const pc = fakeRTCPeerConnection();
-            created.push(pc);
-            return pc;
         },
     };
 }
@@ -69,9 +51,48 @@ async function flush(): Promise<void> {
     }
 }
 
-function localStream() {
-    return fakeMediaStream([fakeTrack("audio"), fakeTrack("video")]);
+/** A manager for `selfUid` (default "a") on a manual channel, with a fake peer connection factory recording every
+ * connection it makes and every event it emits. */
+function setup(overrides: Partial<MeshConnectionManagerOptions> = {}) {
+    const channel = manualChannel();
+    const created: FakeRTCPeerConnection[] = [];
+    const events: MeshEvent[] = [];
+    const audio = fakeTrack("audio", "local-audio");
+    const video = fakeTrack("video", "local-video");
+    const manager = new MeshConnectionManager({
+        selfUid: "a",
+        selfName: "Alice",
+        iceServers: [],
+        channel,
+        createPeerConnection: () => {
+            const pc = fakeRTCPeerConnection();
+            created.push(pc);
+            return pc;
+        },
+        createMediaStream: () => fakeMediaStream(),
+        localAudioTrack: audio,
+        localVideoTrack: video,
+        ...overrides,
+    });
+    manager.onEvent((e) => events.push(e));
+    return { manager, channel, created, events, audio, video };
 }
+
+const hello = (from: string, name?: string, state?: SignalMessage["state"]): SignalMessage => ({
+    type: "video-meeting-signal",
+    kind: "hello",
+    from,
+    ...(name ? { name } : {}),
+    ...(state ? { state } : {}),
+});
+const signal = (kind: SignalMessage["kind"], from: string, rest: Partial<SignalMessage> = {}): SignalMessage => ({
+    type: "video-meeting-signal",
+    kind,
+    from,
+    ...rest,
+});
+const offer = (from: string, to: string): SignalMessage => signal("offer", from, { to, sdp: { type: "offer", sdp: "remote-offer" } });
+const STATE = { audioOn: true, videoOn: true, handRaised: false };
 
 describe("isOfferer", () => {
     it("is true for the lexicographically smaller uid", () => {
@@ -82,371 +103,357 @@ describe("isOfferer", () => {
 });
 
 describe("MeshConnectionManager - hello/roster", () => {
-    it("sends its own hello on start(), and is idempotent", () => {
-        const channel = manualChannel();
-        const { factory } = trackingFactory();
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
+    it("announces its name and state on start(), and is idempotent", () => {
+        const { manager, channel } = setup();
         manager.start();
         manager.start();
-        expect(channel.sent).toEqual([{ type: "video-meeting-signal", kind: "hello", from: "a", name: "Alice" }]);
+        expect(channel.sent).toEqual([{ type: "video-meeting-signal", kind: "hello", from: "a", name: "Alice", state: STATE }]);
+    });
+
+    it("announces no audio or video when it has no tracks, unless told otherwise", () => {
+        const none = setup({ localAudioTrack: null, localVideoTrack: undefined });
+        none.manager.start();
+        expect(none.channel.sent[0].state).toEqual({ audioOn: false, videoOn: false, handRaised: false });
+
+        const muted = setup({ localState: { audioOn: false } });
+        muted.manager.start();
+        expect(muted.channel.sent[0].state).toEqual({ audioOn: false, videoOn: true, handRaised: false });
     });
 
     it("ignores its own broadcast messages", () => {
-        const channel = manualChannel();
-        const { factory } = trackingFactory();
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
+        const { manager, channel } = setup();
         manager.start();
-        channel.emit({ type: "video-meeting-signal", kind: "hello", from: "a", name: "Alice" });
+        channel.emit(hello("a", "Alice"));
+        expect(manager.participants).toEqual([]);
+    });
+
+    it("ignores messages that aren't video-meeting signals", () => {
+        const { manager, channel } = setup();
+        manager.start();
+        channel.emit({ ...hello("z", "Zed"), type: "something-else" } as unknown as SignalMessage);
         expect(manager.participants).toEqual([]);
     });
 
     it("ignores a targeted message not addressed to it", () => {
-        const channel = manualChannel();
-        const { factory } = trackingFactory();
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
+        const { manager, channel } = setup();
         manager.start();
-        channel.emit({ type: "video-meeting-signal", kind: "offer", from: "z", to: "someone-else", sdp: { type: "offer", sdp: "x" } });
+        channel.emit(signal("offer", "z", { to: "someone-else", sdp: { type: "offer", sdp: "x" } }));
         expect(manager.participants).toEqual([]);
     });
 
-    it("adds a new peer on hello, emits participant-joined, echoes its own hello, and offers when it is the offerer", async () => {
-        const channel = manualChannel();
-        const { factory, created } = trackingFactory();
-        const events: MeshEvent[] = [];
-        const manager = new MeshConnectionManager({
-            selfUid: "a", // "a" < "z" - self is the offerer
-            selfName: "Alice",
-            iceServers: [{ urls: "stun:example.com" }],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
-        manager.onEvent((e) => events.push(e));
+    it("adds a new peer on hello, echoes its own hello, and - as the offerer - gives the connection both transceivers and offers", async () => {
+        const { manager, channel, created, events, audio, video } = setup({ iceServers: [{ urls: "stun:example.com" }] });
         manager.start();
         channel.sent.length = 0;
-        channel.emit({ type: "video-meeting-signal", kind: "hello", from: "z", name: "Zed" });
+        channel.emit(hello("z", "Zed", { audioOn: true, videoOn: false, handRaised: false })); // "a" < "z" - self is the offerer
         await flush();
 
-        expect(manager.participants).toEqual([{ uid: "z", name: "Zed" }]);
-        expect(events).toContainEqual({ type: "participant-joined", participant: { uid: "z", name: "Zed" } });
-        expect(channel.sent).toContainEqual({ type: "video-meeting-signal", kind: "hello", from: "a", name: "Alice" });
+        const zed = { uid: "z", name: "Zed", audioOn: true, videoOn: false, handRaised: false };
+        expect(manager.participants).toEqual([zed]);
+        expect(events).toContainEqual({ type: "participant-joined", participant: zed });
+        expect(channel.sent).toContainEqual({ type: "video-meeting-signal", kind: "hello", from: "a", name: "Alice", state: STATE });
         expect(created).toHaveLength(1);
+        // Both transceivers, sending whatever the local participant has.
+        expect(created[0].addTransceiver).toHaveBeenCalledWith("audio", audio);
+        expect(created[0].addTransceiver).toHaveBeenCalledWith("video", video);
         expect(created[0].createOffer).toHaveBeenCalledTimes(1);
         expect(created[0].setLocalDescription).toHaveBeenCalledWith({ type: "offer", sdp: "fake-offer-sdp" });
-        expect(channel.sent).toContainEqual({
-            type: "video-meeting-signal",
-            kind: "offer",
-            from: "a",
-            to: "z",
-            sdp: { type: "offer", sdp: "fake-offer-sdp" },
-        });
-        // The local stream's tracks were attached to the new peer connection.
-        expect(created[0].addTrack).toHaveBeenCalledTimes(2);
+        expect(channel.sent).toContainEqual({ type: "video-meeting-signal", kind: "offer", from: "a", to: "z", sdp: { type: "offer", sdp: "fake-offer-sdp" } });
     });
 
-    it("does not offer when the peer's uid is smaller (they are the offerer)", async () => {
-        const channel = manualChannel();
-        const { factory, created } = trackingFactory();
-        const manager = new MeshConnectionManager({
-            selfUid: "z", // "z" > "a" - the peer is the offerer
-            selfName: "Zed",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
+    it("still adds both transceivers when it has nothing to send", async () => {
+        const { manager, channel, created } = setup({ localAudioTrack: null, localVideoTrack: null });
         manager.start();
-        channel.emit({ type: "video-meeting-signal", kind: "hello", from: "a", name: "Alice" });
+        channel.emit(hello("z", "Zed"));
+        await flush();
+        expect(created[0].addTransceiver).toHaveBeenCalledWith("audio", null);
+        expect(created[0].addTransceiver).toHaveBeenCalledWith("video", null);
+    });
+
+    it("does not offer, or add transceivers, when the peer's uid is smaller (they are the offerer)", async () => {
+        const { manager, channel, created } = setup({ selfUid: "z", selfName: "Zed" });
+        manager.start();
+        channel.emit(hello("a", "Alice"));
         await flush();
         expect(created[0].createOffer).not.toHaveBeenCalled();
+        expect(created[0].addTransceiver).not.toHaveBeenCalled();
     });
 
     it("ignores a duplicate hello from an already-known peer", async () => {
-        const channel = manualChannel();
-        const { factory, created } = trackingFactory();
-        const events: MeshEvent[] = [];
-        const manager = new MeshConnectionManager({
-            selfUid: "z",
-            selfName: "Zed",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
-        manager.onEvent((e) => events.push(e));
+        const { manager, channel, created, events } = setup({ selfUid: "z", selfName: "Zed" });
         manager.start();
-        channel.emit({ type: "video-meeting-signal", kind: "hello", from: "a", name: "Alice" });
+        channel.emit(hello("a", "Alice", STATE));
         await flush();
-        channel.emit({ type: "video-meeting-signal", kind: "hello", from: "a", name: "Alice" });
+        channel.emit(hello("a", "Alice", STATE));
         await flush();
         expect(created).toHaveLength(1);
         expect(events.filter((e) => e.type === "participant-joined")).toHaveLength(1);
+        expect(events.filter((e) => e.type === "participant-updated")).toEqual([]);
     });
 
     it("names an unnamed hello sender by their uid", async () => {
-        const channel = manualChannel();
-        const { factory } = trackingFactory();
-        const manager = new MeshConnectionManager({
-            selfUid: "z",
-            selfName: "Zed",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
+        const { manager, channel } = setup({ selfUid: "z", selfName: "Zed" });
         manager.start();
-        channel.emit({ type: "video-meeting-signal", kind: "hello", from: "a" });
+        channel.emit(hello("a"));
         await flush();
-        expect(manager.participants).toEqual([{ uid: "a", name: "a" }]);
+        expect(manager.participants).toEqual([{ uid: "a", name: "a", audioOn: false, videoOn: false, handRaised: false }]);
+    });
+
+    it("fills in the real name and state when a hello arrives after the offer that created the peer", async () => {
+        const { manager, channel, events } = setup({ selfUid: "b", selfName: "Bob" });
+        manager.start();
+        channel.emit(offer("a", "b"));
+        await flush();
+        expect(manager.participants[0].name).toBe("a");
+
+        channel.sent.length = 0;
+        channel.emit(hello("a", "Alice", STATE));
+        expect(manager.participants).toEqual([{ uid: "a", name: "Alice", ...STATE }]);
+        expect(events).toContainEqual({ type: "participant-updated", participant: { uid: "a", name: "Alice", ...STATE } });
+        // Not a new peer: no second echo, no second connection.
+        expect(channel.sent).toEqual([]);
+    });
+
+    it("keeps the name it has when a later hello carries none", async () => {
+        const { manager, channel } = setup({ selfUid: "b", selfName: "Bob" });
+        manager.start();
+        channel.emit(hello("a", "Alice", STATE));
+        await flush();
+        channel.emit(hello("a", undefined, { ...STATE, videoOn: false }));
+        expect(manager.participants[0]).toMatchObject({ name: "Alice", videoOn: false });
+    });
+
+    it("coerces a received state to booleans", async () => {
+        const { manager, channel } = setup({ selfUid: "b", selfName: "Bob" });
+        manager.start();
+        channel.emit(hello("a", "Alice", { audioOn: "yes", videoOn: 1, handRaised: null } as unknown as SignalMessage["state"]));
+        expect(manager.participants[0]).toMatchObject({ audioOn: false, videoOn: false, handRaised: false });
     });
 });
 
 describe("MeshConnectionManager - offer/answer/ICE", () => {
-    it("answers an incoming offer from an unknown peer, emitting participant-joined", async () => {
-        const channel = manualChannel();
-        const { factory, created } = trackingFactory();
-        const events: MeshEvent[] = [];
-        const manager = new MeshConnectionManager({
-            selfUid: "b",
-            selfName: "Bob",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
-        manager.onEvent((e) => events.push(e));
+    it("answers an incoming offer from an unknown peer, claiming the offer's transceivers and sending its tracks on them", async () => {
+        const { manager, channel, created, events, audio, video } = setup({ selfUid: "b", selfName: "Bob" });
         manager.start();
         channel.sent.length = 0;
-        channel.emit({ type: "video-meeting-signal", kind: "offer", from: "a", to: "b", sdp: { type: "offer", sdp: "remote-offer" } });
+        channel.emit(offer("a", "b"));
         await flush();
 
         expect(created[0].setRemoteDescription).toHaveBeenCalledWith({ type: "offer", sdp: "remote-offer" });
+        // The answerer added no transceivers of its own - it took the ones the offer created.
+        expect(created[0].addTransceiver).not.toHaveBeenCalled();
+        expect(created[0].claimTransceivers).toHaveBeenCalledTimes(1);
+        expect(created[0].senders.audio!.replaceTrack).toHaveBeenCalledWith(audio);
+        expect(created[0].senders.video!.replaceTrack).toHaveBeenCalledWith(video);
         expect(created[0].createAnswer).toHaveBeenCalledTimes(1);
-        expect(channel.sent).toContainEqual({
-            type: "video-meeting-signal",
-            kind: "answer",
-            from: "b",
-            to: "a",
-            sdp: { type: "answer", sdp: "fake-answer-sdp" },
+        expect(channel.sent).toContainEqual({ type: "video-meeting-signal", kind: "answer", from: "b", to: "a", sdp: { type: "answer", sdp: "fake-answer-sdp" } });
+        expect(events).toContainEqual({ type: "participant-joined", participant: { uid: "a", name: "a", audioOn: false, videoOn: false, handRaised: false } });
+        // It also introduces itself, since the offer may have beaten its own hello.
+        expect(channel.sent).toContainEqual({ type: "video-meeting-signal", kind: "hello", from: "b", name: "Bob", state: STATE });
+    });
+
+    it("claims the transceivers only once for a peer, and sends nothing for a track it doesn't have", async () => {
+        const { manager, channel, created } = setup({ selfUid: "z", selfName: "Zed", localAudioTrack: null, localVideoTrack: null });
+        manager.start();
+        channel.emit(hello("a", "Alice"));
+        await flush();
+        channel.emit(offer("a", "z"));
+        await flush();
+        channel.emit(offer("a", "z"));
+        await flush();
+        expect(created[0].claimTransceivers).toHaveBeenCalledTimes(1);
+        expect(created[0].senders.audio!.replaceTrack).not.toHaveBeenCalled();
+        expect(created[0].senders.video!.replaceTrack).not.toHaveBeenCalled();
+    });
+
+    it("copes with an offer that lacks a kind it would send", async () => {
+        let pc!: FakeRTCPeerConnection;
+        const { manager, channel } = setup({
+            selfUid: "z",
+            selfName: "Zed",
+            createPeerConnection: () => (pc = fakeRTCPeerConnection(["audio"])),
         });
-        expect(events).toContainEqual({ type: "participant-joined", participant: { uid: "a", name: "a" } });
+        manager.start();
+        channel.emit(offer("a", "z"));
+        await flush();
+        expect(pc.senders.audio!.replaceTrack).toHaveBeenCalled();
+        expect(pc.senders.video).toBeUndefined();
+        expect(channel.sent.map((m) => m.kind)).toContain("answer");
     });
 
     it("ignores an offer with no sdp", async () => {
-        const channel = manualChannel();
-        const { factory, created } = trackingFactory();
-        const manager = new MeshConnectionManager({
-            selfUid: "b",
-            selfName: "Bob",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
+        const { manager, channel, created } = setup({ selfUid: "b", selfName: "Bob" });
         manager.start();
-        channel.emit({ type: "video-meeting-signal", kind: "offer", from: "a", to: "b" });
+        channel.emit(signal("offer", "a", { to: "b" }));
         await flush();
         expect(created).toHaveLength(0);
     });
 
     it("applies an answer to the matching pending offer", async () => {
-        const channel = manualChannel();
-        const { factory, created } = trackingFactory();
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
+        const { manager, channel, created } = setup();
         manager.start();
-        channel.emit({ type: "video-meeting-signal", kind: "hello", from: "z", name: "Zed" });
+        channel.emit(hello("z", "Zed"));
         await flush();
-        channel.emit({ type: "video-meeting-signal", kind: "answer", from: "z", to: "a", sdp: { type: "answer", sdp: "remote-answer" } });
+        channel.emit(signal("answer", "z", { to: "a", sdp: { type: "answer", sdp: "remote-answer" } }));
         await flush();
         expect(created[0].setRemoteDescription).toHaveBeenCalledWith({ type: "answer", sdp: "remote-answer" });
     });
 
     it("ignores an answer with no matching peer, and one with no sdp", async () => {
-        const channel = manualChannel();
-        const { factory } = trackingFactory();
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
+        const { manager, channel, created } = setup();
         manager.start();
-        // No peer "z" tracked at all.
-        await expect(
-            (async () => {
-                channel.emit({ type: "video-meeting-signal", kind: "answer", from: "z", to: "a", sdp: { type: "answer", sdp: "x" } });
-                await flush();
-            })(),
-        ).resolves.toBeUndefined();
-
-        channel.emit({ type: "video-meeting-signal", kind: "hello", from: "z", name: "Zed" });
+        channel.emit(signal("answer", "z", { to: "a", sdp: { type: "answer", sdp: "x" } }));
         await flush();
-        channel.emit({ type: "video-meeting-signal", kind: "answer", from: "z", to: "a" });
+        channel.emit(hello("z", "Zed"));
         await flush();
-        // No throw, and the earlier offer's setRemoteDescription was never (successfully) called with an answer.
+        channel.emit(signal("answer", "z", { to: "a" }));
+        await flush();
+        expect(created[0].setRemoteDescription).not.toHaveBeenCalled();
     });
 
     it("buffers an ICE candidate until the remote description is set, then flushes it", async () => {
-        const channel = manualChannel();
-        const { factory, created } = trackingFactory();
-        const manager = new MeshConnectionManager({
-            selfUid: "b",
-            selfName: "Bob",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
+        const { manager, channel, created } = setup({ selfUid: "b", selfName: "Bob" });
         manager.start();
-        // The offer hasn't arrived yet - a candidate for "a" arriving first has no peer at all yet, and is dropped.
-        channel.emit({ type: "video-meeting-signal", kind: "ice-candidate", from: "a", to: "b", candidate: { candidate: "early" } });
+        channel.emit(offer("a", "b"));
+        // Arrives before the async setRemoteDescription() resolves: buffered, not applied yet.
+        channel.emit(signal("ice-candidate", "a", { to: "b", candidate: { candidate: "buffered" } }));
+        expect(created[0].addIceCandidate).not.toHaveBeenCalled();
         await flush();
-
-        channel.emit({ type: "video-meeting-signal", kind: "offer", from: "a", to: "b", sdp: { type: "offer", sdp: "o" } });
-        // A candidate arriving before the async setRemoteDescription() resolves is buffered, not applied yet.
-        channel.emit({ type: "video-meeting-signal", kind: "ice-candidate", from: "a", to: "b", candidate: { candidate: "buffered" } });
-        await flush();
-
         expect(created[0].addIceCandidate).toHaveBeenCalledWith({ candidate: "buffered" });
-        expect(created[0].addIceCandidate).not.toHaveBeenCalledWith({ candidate: "early" });
+    });
+
+    it("holds a candidate that beats its own offer, and applies it once the peer exists", async () => {
+        const { manager, channel, created } = setup({ selfUid: "b", selfName: "Bob" });
+        manager.start();
+        channel.emit(signal("ice-candidate", "a", { to: "b", candidate: { candidate: "early-1" } }));
+        channel.emit(signal("ice-candidate", "a", { to: "b", candidate: { candidate: "early-2" } }));
+        await flush();
+        expect(created).toHaveLength(0);
+
+        channel.emit(offer("a", "b"));
+        await flush();
+        expect(created[0].addIceCandidate).toHaveBeenCalledWith({ candidate: "early-1" });
+        expect(created[0].addIceCandidate).toHaveBeenCalledWith({ candidate: "early-2" });
+    });
+
+    it("bounds what it holds for peers that never appear", async () => {
+        const { manager, channel, created } = setup({ selfUid: "b", selfName: "Bob" });
+        manager.start();
+        for (let i = 0; i < 70; i++) {
+            channel.emit(signal("ice-candidate", "a", { to: "b", candidate: { candidate: `c${i}` } }));
+        }
+        for (let i = 0; i < 40; i++) {
+            channel.emit(signal("ice-candidate", `ghost-${i}`, { to: "b", candidate: { candidate: "x" } }));
+        }
+        await flush();
+
+        channel.emit(offer("a", "b"));
+        await flush();
+        expect(created[0].addIceCandidate).toHaveBeenCalledTimes(64);
+        expect(created[0].addIceCandidate).not.toHaveBeenCalledWith({ candidate: "c64" });
+
+        // The 33rd distinct stranger was never held (32 peers' worth, "a" plus 31 ghosts, were).
+        channel.emit(offer("ghost-39", "b"));
+        await flush();
+        expect(created[1].addIceCandidate).not.toHaveBeenCalled();
+        channel.emit(offer("ghost-0", "b"));
+        await flush();
+        expect(created[2].addIceCandidate).toHaveBeenCalledWith({ candidate: "x" });
+    });
+
+    it("forgets what it held for a peer that says goodbye", async () => {
+        const { manager, channel, created } = setup({ selfUid: "b", selfName: "Bob" });
+        manager.start();
+        channel.emit(signal("ice-candidate", "a", { to: "b", candidate: { candidate: "stale" } }));
+        channel.emit(signal("bye", "a"));
+        channel.emit(offer("a", "b"));
+        await flush();
+        expect(created[0].addIceCandidate).not.toHaveBeenCalled();
     });
 
     it("applies an ICE candidate directly once the remote description is already set", async () => {
-        const channel = manualChannel();
-        const { factory, created } = trackingFactory();
-        const manager = new MeshConnectionManager({
-            selfUid: "b",
-            selfName: "Bob",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
+        const { manager, channel, created } = setup({ selfUid: "b", selfName: "Bob" });
         manager.start();
-        channel.emit({ type: "video-meeting-signal", kind: "offer", from: "a", to: "b", sdp: { type: "offer", sdp: "o" } });
+        channel.emit(offer("a", "b"));
         await flush();
-        channel.emit({ type: "video-meeting-signal", kind: "ice-candidate", from: "a", to: "b", candidate: { candidate: "late" } });
+        channel.emit(signal("ice-candidate", "a", { to: "b", candidate: { candidate: "late" } }));
         await flush();
         expect(created[0].addIceCandidate).toHaveBeenCalledWith({ candidate: "late" });
     });
 
     it("ignores an ICE candidate with no candidate payload", async () => {
-        const channel = manualChannel();
-        const { factory, created } = trackingFactory();
-        const manager = new MeshConnectionManager({
-            selfUid: "b",
-            selfName: "Bob",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
+        const { manager, channel, created } = setup({ selfUid: "b", selfName: "Bob" });
         manager.start();
-        channel.emit({ type: "video-meeting-signal", kind: "offer", from: "a", to: "b", sdp: { type: "offer", sdp: "o" } });
+        channel.emit(offer("a", "b"));
         await flush();
-        channel.emit({ type: "video-meeting-signal", kind: "ice-candidate", from: "a", to: "b" });
+        channel.emit(signal("ice-candidate", "a", { to: "b" }));
         await flush();
         expect(created[0].addIceCandidate).not.toHaveBeenCalled();
     });
 
     it("publishes locally generated ICE candidates addressed to the right peer", async () => {
-        const channel = manualChannel();
-        const { factory, created } = trackingFactory();
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
+        const { manager, channel, created } = setup();
         manager.start();
-        channel.emit({ type: "video-meeting-signal", kind: "hello", from: "z", name: "Zed" });
+        channel.emit(hello("z", "Zed"));
         await flush();
         created[0].onicecandidate!({ candidate: { candidate: "local-candidate" } });
-        expect(channel.sent).toContainEqual({
-            type: "video-meeting-signal",
-            kind: "ice-candidate",
-            from: "a",
-            to: "z",
-            candidate: { candidate: "local-candidate" },
-        });
+        expect(channel.sent).toContainEqual({ type: "video-meeting-signal", kind: "ice-candidate", from: "a", to: "z", candidate: { candidate: "local-candidate" } });
         // The end-of-candidates signal (`candidate: null`) is never published.
         channel.sent.length = 0;
         created[0].onicecandidate!({ candidate: null });
         expect(channel.sent).toEqual([]);
     });
 
-    it("emits a remote-stream event when a track arrives, and ignores a track event with no stream", async () => {
-        const channel = manualChannel();
-        const { factory, created } = trackingFactory();
-        const events: MeshEvent[] = [];
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
-        manager.onEvent((e) => events.push(e));
+    it("gathers a peer's incoming tracks into one stream, announcing it as each track arrives", async () => {
+        const { manager, channel, created, events } = setup();
         manager.start();
-        channel.emit({ type: "video-meeting-signal", kind: "hello", from: "z", name: "Zed" });
+        channel.emit(hello("z", "Zed"));
         await flush();
-        const remoteStream = fakeMediaStream([fakeTrack("video")]);
-        created[0].ontrack!({ streams: [remoteStream] });
-        expect(events).toContainEqual({ type: "remote-stream", uid: "z", stream: remoteStream });
+        const remoteAudio = fakeTrack("audio");
+        const remoteVideo = fakeTrack("video");
+        created[0].ontrack!({ track: remoteAudio });
+        created[0].ontrack!({ track: remoteVideo });
+        // A repeat of a track already in the stream adds nothing.
+        created[0].ontrack!({ track: remoteVideo });
 
-        events.length = 0;
-        created[0].ontrack!({ streams: [] });
-        expect(events).toEqual([]);
+        const streamEvents = events.filter((e) => e.type === "remote-stream");
+        expect(streamEvents).toHaveLength(3);
+        const stream = streamEvents[0].stream;
+        expect(streamEvents[2].stream).toBe(stream);
+        expect(stream.getTracks()).toEqual([remoteAudio, remoteVideo]);
+    });
+
+    it("builds the per-peer stream with the browser's own MediaStream by default", async () => {
+        const seen: unknown[] = [];
+        class FakeStream {
+            tracks: MediaStreamTrack[] = [];
+            constructor() {
+                seen.push(this);
+            }
+            getTracks() {
+                return this.tracks;
+            }
+            addTrack(track: MediaStreamTrack) {
+                this.tracks.push(track);
+            }
+        }
+        const original = globalThis.MediaStream;
+        globalThis.MediaStream = FakeStream as unknown as typeof MediaStream;
+        try {
+            const { manager, channel } = setup({ createMediaStream: undefined });
+            manager.start();
+            channel.emit(hello("z", "Zed"));
+            await flush();
+            expect(seen).toHaveLength(1);
+        } finally {
+            globalThis.MediaStream = original;
+        }
     });
 
     it("treats a failed/closed connection state as the peer leaving", async () => {
-        const channel = manualChannel();
-        const { factory, created } = trackingFactory();
-        const events: MeshEvent[] = [];
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
-        manager.onEvent((e) => events.push(e));
+        const { manager, channel, created, events } = setup();
         manager.start();
-        channel.emit({ type: "video-meeting-signal", kind: "hello", from: "z", name: "Zed" });
+        channel.emit(hello("z", "Zed"));
         await flush();
         created[0].connectionState = "failed";
         created[0].onconnectionstatechange!();
@@ -461,25 +468,14 @@ describe("MeshConnectionManager - offer/answer/ICE", () => {
 
 describe("MeshConnectionManager - bye/stop", () => {
     it("removes the peer and clears presenter status on bye", async () => {
-        const channel = manualChannel();
-        const { factory, created } = trackingFactory();
-        const events: MeshEvent[] = [];
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
-        manager.onEvent((e) => events.push(e));
+        const { manager, channel, created, events } = setup();
         manager.start();
-        channel.emit({ type: "video-meeting-signal", kind: "hello", from: "z", name: "Zed" });
+        channel.emit(hello("z", "Zed"));
         await flush();
-        channel.emit({ type: "video-meeting-signal", kind: "presenter-claim", from: "z" });
+        channel.emit(signal("presenter-claim", "z"));
         expect(manager.presenterUid).toBe("z");
 
-        channel.emit({ type: "video-meeting-signal", kind: "bye", from: "z" });
+        channel.emit(signal("bye", "z"));
         expect(manager.participants).toEqual([]);
         expect(created[0].close).toHaveBeenCalledTimes(1);
         expect(events).toContainEqual({ type: "participant-left", uid: "z" });
@@ -488,108 +484,182 @@ describe("MeshConnectionManager - bye/stop", () => {
     });
 
     it("ignores a bye from an unknown peer", () => {
-        const channel = manualChannel();
-        const { factory } = trackingFactory();
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
+        const { manager, channel } = setup();
         manager.start();
-        expect(() => channel.emit({ type: "video-meeting-signal", kind: "bye", from: "nobody" })).not.toThrow();
+        expect(() => channel.emit(signal("bye", "nobody"))).not.toThrow();
     });
 
     it("sends bye, closes every connection, unsubscribes and clears listeners on stop() - only if started", async () => {
-        const channel = manualChannel();
-        const { factory, created } = trackingFactory();
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
+        const never = setup();
         // stop() before start() never sent.
-        manager.stop();
-        expect(channel.sent).toEqual([]);
+        never.manager.stop();
+        expect(never.channel.sent).toEqual([]);
 
-        const manager2 = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
-        manager2.start();
-        channel.emit({ type: "video-meeting-signal", kind: "hello", from: "z", name: "Zed" });
+        const { manager, channel, created } = setup();
+        manager.start();
+        channel.emit(hello("z", "Zed"));
         await flush();
         channel.sent.length = 0;
-        manager2.stop();
+        manager.stop();
         expect(channel.sent).toContainEqual({ type: "video-meeting-signal", kind: "bye", from: "a" });
         expect(created[0].close).toHaveBeenCalledTimes(1);
-        expect(manager2.participants).toEqual([]);
+        expect(manager.participants).toEqual([]);
         // Idempotent.
-        manager2.stop();
+        manager.stop();
         expect(channel.sent.filter((m) => m.kind === "bye")).toHaveLength(1);
+    });
+});
+
+describe("MeshConnectionManager - local tracks and state", () => {
+    it("swaps a track on every connection's sender, and remembers it for peers that join later", async () => {
+        const { manager, channel, created } = setup();
+        manager.start();
+        channel.emit(hello("y", "Yan")); // offerer: senders exist at once
+        await flush();
+        const screen = fakeTrack("video", "screen");
+        manager.setLocalTrack("video", screen);
+        expect(created[0].senders.video!.replaceTrack).toHaveBeenCalledWith(screen);
+
+        manager.setLocalTrack("audio", null);
+        expect(created[0].senders.audio!.replaceTrack).toHaveBeenCalledWith(null);
+
+        channel.emit(hello("z", "Zed"));
+        await flush();
+        expect(created[1].addTransceiver).toHaveBeenCalledWith("video", screen);
+        expect(created[1].addTransceiver).toHaveBeenCalledWith("audio", null);
+    });
+
+    it("has nothing to swap on an answerer's connection until its offer arrives, then sends the latest track", async () => {
+        const { manager, channel, created } = setup({ selfUid: "z", selfName: "Zed" });
+        manager.start();
+        channel.emit(hello("a", "Alice"));
+        await flush();
+        const later = fakeTrack("video", "later");
+        expect(() => manager.setLocalTrack("video", later)).not.toThrow();
+
+        channel.emit(offer("a", "z"));
+        await flush();
+        expect(created[0].senders.video!.replaceTrack).toHaveBeenCalledWith(later);
+    });
+
+    it("does nothing when there are no peers yet", () => {
+        const { manager } = setup();
+        manager.start();
+        expect(() => manager.setLocalTrack("video", null)).not.toThrow();
+    });
+
+    it("tells everyone when its state changes, and only when it does", () => {
+        const { manager, channel } = setup();
+        manager.start();
+        channel.sent.length = 0;
+        manager.setLocalState({ audioOn: false });
+        expect(channel.sent).toEqual([{ type: "video-meeting-signal", kind: "state", from: "a", state: { audioOn: false, videoOn: true, handRaised: false } }]);
+        channel.sent.length = 0;
+        manager.setLocalState({ audioOn: false });
+        manager.setLocalState({});
+        expect(channel.sent).toEqual([]);
+    });
+
+    it("only records a state change made before start() or after stop(), which hello then carries", () => {
+        const { manager, channel } = setup();
+        manager.setLocalState({ handRaised: true });
+        expect(channel.sent).toEqual([]);
+        manager.start();
+        expect(channel.sent[0].state).toEqual({ audioOn: true, videoOn: true, handRaised: true });
+        manager.stop();
+        channel.sent.length = 0;
+        manager.setLocalState({ handRaised: false });
+        expect(channel.sent).toEqual([]);
+    });
+
+    it("applies a peer's state message, announcing a raised hand once", async () => {
+        const { manager, channel, events } = setup();
+        manager.start();
+        channel.emit(hello("z", "Zed", STATE));
+        await flush();
+        events.length = 0;
+
+        channel.emit(signal("state", "z", { state: { audioOn: false, videoOn: true, handRaised: true } }));
+        expect(manager.participants[0]).toMatchObject({ audioOn: false, handRaised: true });
+        expect(events).toEqual([
+            { type: "participant-updated", participant: { uid: "z", name: "Zed", audioOn: false, videoOn: true, handRaised: true } },
+            { type: "hand-raised", uid: "z", name: "Zed" },
+        ]);
+
+        // Still up: an update for another field is not a new raise.
+        events.length = 0;
+        channel.emit(signal("state", "z", { state: { audioOn: true, videoOn: true, handRaised: true } }));
+        expect(events.map((e) => e.type)).toEqual(["participant-updated"]);
+
+        // Lowering it announces nothing extra, and an unchanged state announces nothing at all.
+        events.length = 0;
+        channel.emit(signal("state", "z", { state: { audioOn: true, videoOn: true, handRaised: false } }));
+        channel.emit(signal("state", "z", { state: { audioOn: true, videoOn: true, handRaised: false } }));
+        expect(events.map((e) => e.type)).toEqual(["participant-updated"]);
+    });
+
+    it("ignores a state message from a stranger, or with no state", async () => {
+        const { manager, channel, events } = setup();
+        manager.start();
+        channel.emit(signal("state", "stranger", { state: STATE }));
+        channel.emit(hello("z", "Zed", STATE));
+        await flush();
+        events.length = 0;
+        channel.emit(signal("state", "z"));
+        expect(events).toEqual([]);
+    });
+});
+
+describe("MeshConnectionManager - reactions", () => {
+    it("sends a reaction from the palette, and refuses anything else", () => {
+        const { manager, channel } = setup();
+        manager.start();
+        channel.sent.length = 0;
+        expect(manager.sendReaction(REACTION_EMOJIS[0])).toBe(true);
+        expect(channel.sent).toEqual([{ type: "video-meeting-signal", kind: "reaction", from: "a", emoji: REACTION_EMOJIS[0] }]);
+        channel.sent.length = 0;
+        expect(manager.sendReaction("not an emoji")).toBe(false);
+        expect(channel.sent).toEqual([]);
+    });
+
+    it("announces a peer's reaction with their name, ignoring strangers and anything outside the palette", async () => {
+        const { manager, channel, events } = setup();
+        manager.start();
+        channel.emit(hello("z", "Zed", STATE));
+        await flush();
+        events.length = 0;
+
+        channel.emit(signal("reaction", "z", { emoji: REACTION_EMOJIS[3] }));
+        expect(events).toEqual([{ type: "reaction", uid: "z", name: "Zed", emoji: REACTION_EMOJIS[3] }]);
+        events.length = 0;
+        channel.emit(signal("reaction", "z", { emoji: "<script>" }));
+        channel.emit(signal("reaction", "z"));
+        channel.emit(signal("reaction", "stranger", { emoji: REACTION_EMOJIS[0] }));
+        expect(events).toEqual([]);
     });
 });
 
 describe("MeshConnectionManager - presenter (single-writer)", () => {
     it("claims presenter status when free, and refuses when someone else already presents", () => {
-        const channel = manualChannel();
-        const { factory } = trackingFactory();
-        const events: MeshEvent[] = [];
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
-        manager.onEvent((e) => events.push(e));
+        const { manager, channel, events } = setup();
         manager.start();
         expect(manager.claimPresenter()).toBe(true);
         expect(manager.presenterUid).toBe("a");
         expect(channel.sent).toContainEqual({ type: "video-meeting-signal", kind: "presenter-claim", from: "a" });
         expect(events).toContainEqual({ type: "presenter-changed", uid: "a" });
 
-        channel.emit({ type: "video-meeting-signal", kind: "presenter-claim", from: "y" });
+        channel.emit(signal("presenter-claim", "y"));
         // "y" > "a" (self already presenting) - self keeps presenting, per the collision rule.
         expect(manager.presenterUid).toBe("a");
 
-        const manager2Channel = manualChannel();
-        const manager2 = new MeshConnectionManager({
-            selfUid: "b",
-            selfName: "Bob",
-            iceServers: [],
-            channel: manager2Channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
-        manager2.start();
-        manager2Channel.emit({ type: "video-meeting-signal", kind: "presenter-claim", from: "other" });
-        expect(manager2.claimPresenter()).toBe(false);
+        const other = setup({ selfUid: "b", selfName: "Bob" });
+        other.manager.start();
+        other.channel.emit(signal("presenter-claim", "other"));
+        expect(other.manager.claimPresenter()).toBe(false);
     });
 
     it("releases presenter status, and is a no-op when not presenting", () => {
-        const channel = manualChannel();
-        const { factory } = trackingFactory();
-        const events: MeshEvent[] = [];
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
-        manager.onEvent((e) => events.push(e));
+        const { manager, channel, events } = setup();
         manager.start();
         channel.sent.length = 0;
         manager.releasePresenter();
@@ -605,46 +675,24 @@ describe("MeshConnectionManager - presenter (single-writer)", () => {
     });
 
     it("resolves a genuine claim collision deterministically - the smaller uid wins, and the loser self-revokes", () => {
-        const channel = manualChannel();
-        const { factory } = trackingFactory();
-        const events: MeshEvent[] = [];
-        const manager = new MeshConnectionManager({
-            selfUid: "b",
-            selfName: "Bob",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
-        manager.onEvent((e) => events.push(e));
+        const { manager, channel } = setup({ selfUid: "b", selfName: "Bob" });
         manager.start();
         // Self optimistically claims first...
         manager.claimPresenter();
         expect(manager.presenterUid).toBe("b");
         channel.sent.length = 0;
         // ...but a remote claim from a smaller uid arrives (a genuine race) - self loses and must self-revoke.
-        channel.emit({ type: "video-meeting-signal", kind: "presenter-claim", from: "a" });
+        channel.emit(signal("presenter-claim", "a"));
         expect(manager.presenterUid).toBe("a");
         expect(channel.sent).toContainEqual({ type: "video-meeting-signal", kind: "presenter-release", from: "b" });
     });
 
     it("resolves a collision between two other participants as a silent bystander (no message sent)", () => {
-        const channel = manualChannel();
-        const { factory } = trackingFactory();
-        const events: MeshEvent[] = [];
-        const manager = new MeshConnectionManager({
-            selfUid: "m",
-            selfName: "Mallory",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
-        manager.onEvent((e) => events.push(e));
+        const { manager, channel, events } = setup({ selfUid: "m", selfName: "Mallory" });
         manager.start();
         channel.sent.length = 0;
-        channel.emit({ type: "video-meeting-signal", kind: "presenter-claim", from: "z" });
-        channel.emit({ type: "video-meeting-signal", kind: "presenter-claim", from: "a" });
+        channel.emit(signal("presenter-claim", "z"));
+        channel.emit(signal("presenter-claim", "a"));
         expect(manager.presenterUid).toBe("a");
         // The bystander observes the winner change but never sends anything - it was never the loser.
         expect(channel.sent).toEqual([]);
@@ -652,155 +700,81 @@ describe("MeshConnectionManager - presenter (single-writer)", () => {
     });
 
     it("ignores a duplicate claim from the already-recorded presenter", () => {
-        const channel = manualChannel();
-        const { factory } = trackingFactory();
-        const events: MeshEvent[] = [];
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
+        const { manager, channel, events } = setup();
         manager.start();
-        channel.emit({ type: "video-meeting-signal", kind: "presenter-claim", from: "z" });
-        manager.onEvent((e) => events.push(e));
-        channel.emit({ type: "video-meeting-signal", kind: "presenter-claim", from: "z" });
+        channel.emit(signal("presenter-claim", "z"));
+        events.length = 0;
+        channel.emit(signal("presenter-claim", "z"));
         expect(manager.presenterUid).toBe("z");
         expect(events).toEqual([]);
     });
 
     it("clears presenter status when the current presenter's own release message arrives", () => {
-        const channel = manualChannel();
-        const { factory } = trackingFactory();
-        const events: MeshEvent[] = [];
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
-        manager.onEvent((e) => events.push(e));
+        const { manager, channel, events } = setup();
         manager.start();
-        channel.emit({ type: "video-meeting-signal", kind: "presenter-claim", from: "z" });
-        channel.emit({ type: "video-meeting-signal", kind: "presenter-release", from: "z" });
+        channel.emit(signal("presenter-claim", "z"));
+        channel.emit(signal("presenter-release", "z"));
         expect(manager.presenterUid).toBeUndefined();
         expect(events).toContainEqual({ type: "presenter-changed", uid: undefined });
     });
 
     it("ignores a presenter-release that doesn't match the current presenter", () => {
-        const channel = manualChannel();
-        const { factory } = trackingFactory();
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
+        const { manager, channel } = setup();
         manager.start();
-        channel.emit({ type: "video-meeting-signal", kind: "presenter-claim", from: "z" });
-        channel.emit({ type: "video-meeting-signal", kind: "presenter-release", from: "someone-else" });
+        channel.emit(signal("presenter-claim", "z"));
+        channel.emit(signal("presenter-release", "someone-else"));
         expect(manager.presenterUid).toBe("z");
-    });
-});
-
-describe("MeshConnectionManager - replaceLocalVideoTrack", () => {
-    it("replaces the outgoing video track on every peer connection", async () => {
-        const channel = manualChannel();
-        const { factory, created } = trackingFactory();
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
-        manager.start();
-        channel.emit({ type: "video-meeting-signal", kind: "hello", from: "z", name: "Zed" });
-        await flush();
-        const screenTrack = fakeTrack("video", "screen");
-        manager.replaceLocalVideoTrack(screenTrack);
-        const videoSender = created[0].getSenders().find((s) => s.track?.kind === "video");
-        expect(videoSender!.replaceTrack).toHaveBeenCalledWith(screenTrack);
-    });
-
-    it("does nothing when there are no peers yet", () => {
-        const channel = manualChannel();
-        const { factory } = trackingFactory();
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
-        manager.start();
-        expect(() => manager.replaceLocalVideoTrack(null)).not.toThrow();
     });
 });
 
 describe("MeshConnectionManager - onEvent", () => {
     it("stops delivering events once unsubscribed", () => {
-        const channel = manualChannel();
-        const { factory } = trackingFactory();
-        const manager = new MeshConnectionManager({
-            selfUid: "a",
-            selfName: "Alice",
-            iceServers: [],
-            channel,
-            createPeerConnection: factory,
-            localStream: localStream(),
-        });
-        const events: MeshEvent[] = [];
-        const unsubscribe = manager.onEvent((e) => events.push(e));
+        const { manager, events } = setup();
+        const later: MeshEvent[] = [];
+        const unsubscribe = manager.onEvent((e) => later.push(e));
         manager.start();
         unsubscribe();
         manager.claimPresenter();
-        expect(events).toEqual([]);
+        expect(later).toEqual([]);
+        expect(events).toHaveLength(1);
     });
 });
 
 describe("MeshConnectionManager - two real instances converging", () => {
     it("discovers each other regardless of join order and completes the offer/answer exchange both ways", async () => {
         const b = bus();
-        const { factory: factoryA, created: createdA } = trackingFactory();
-        const { factory: factoryB, created: createdB } = trackingFactory();
-        const managerA = new MeshConnectionManager({
-            selfUid: "a", // smaller uid - offerer toward "z"
-            selfName: "Alice",
-            iceServers: [],
-            channel: b.channel(),
-            createPeerConnection: factoryA,
-            localStream: localStream(),
-        });
-        const managerZ = new MeshConnectionManager({
-            selfUid: "z",
-            selfName: "Zed",
-            iceServers: [],
-            channel: b.channel(),
-            createPeerConnection: factoryB,
-            localStream: localStream(),
-        });
+        const createdA: FakeRTCPeerConnection[] = [];
+        const createdZ: FakeRTCPeerConnection[] = [];
+        const make = (selfUid: string, selfName: string, created: FakeRTCPeerConnection[]) =>
+            new MeshConnectionManager({
+                selfUid,
+                selfName,
+                iceServers: [],
+                channel: b.channel(),
+                createPeerConnection: () => {
+                    const pc = fakeRTCPeerConnection();
+                    created.push(pc);
+                    return pc;
+                },
+                createMediaStream: () => fakeMediaStream(),
+                localAudioTrack: fakeTrack("audio"),
+                localVideoTrack: fakeTrack("video"),
+            });
+        const managerA = make("a", "Alice", createdA); // smaller uid - offerer toward "z"
+        const managerZ = make("z", "Zed", createdZ);
 
-        // "a" joins first (so "z"'s original hello, sent later, is the only one "a" ever needed to hear directly -
-        // "z" only learns of "a" via the echo "a" sends upon discovering "z", exercising the roster-discovery
-        // mechanism this module's doc comment describes).
         managerA.start();
         managerZ.start();
         await flush();
 
-        expect(managerA.participants).toEqual([{ uid: "z", name: "Zed" }]);
-        expect(managerZ.participants).toEqual([{ uid: "a", name: "Alice" }]);
+        expect(managerA.participants).toEqual([{ uid: "z", name: "Zed", ...STATE }]);
+        expect(managerZ.participants).toEqual([{ uid: "a", name: "Alice", ...STATE }]);
         expect(createdA[0].setLocalDescription).toHaveBeenCalledWith({ type: "offer", sdp: "fake-offer-sdp" });
-        expect(createdB[0].setRemoteDescription).toHaveBeenCalledWith({ type: "offer", sdp: "fake-offer-sdp" });
-        expect(createdB[0].setLocalDescription).toHaveBeenCalledWith({ type: "answer", sdp: "fake-answer-sdp" });
+        expect(createdZ[0].setRemoteDescription).toHaveBeenCalledWith({ type: "offer", sdp: "fake-offer-sdp" });
+        expect(createdZ[0].setLocalDescription).toHaveBeenCalledWith({ type: "answer", sdp: "fake-answer-sdp" });
         expect(createdA[0].setRemoteDescription).toHaveBeenCalledWith({ type: "answer", sdp: "fake-answer-sdp" });
+        // Each side ends up with a sender for each kind, the answerer's from claiming the offer's transceivers.
+        expect(createdA[0].senders.audio).toBeDefined();
+        expect(createdZ[0].senders.video).toBeDefined();
     });
 });

@@ -4,218 +4,183 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import React from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import MeetLobby, { type JoinPreferences } from "../../../apps/meet/_MeetLobby.js";
-import { fakeDeviceInfo, fakeMediaDevices, fakeMediaStream, fakeTrack } from "../testUtils.js";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import MeetLobby, { type MeetLobbyProps } from "../../../apps/meet/_MeetLobby.js";
+import type { LocalMedia } from "../../../apps/shared/media/useLocalMedia.js";
+import { fakeDeviceInfo, fakeLocalMedia } from "../testUtils.js";
 import type { PublicVideoMeeting } from "../../../apps/meet/_meetApi.js";
 
 const meeting: PublicVideoMeeting = { uid: "m1", title: "Standup", visibility: "public", status: "scheduled", hostDisplayName: "Jane" };
 
-/** jsdom implements neither `navigator.mediaDevices` nor a `MediaStream` constructor at all - both are stubbed
- * per test, matching this plugin's Phase 2 report note that there was no existing mocking convention to build on. */
-function installMediaDevices(devices: ReturnType<typeof fakeMediaDevices>) {
-    Object.defineProperty(window.navigator, "mediaDevices", { value: devices, configurable: true });
+function renderLobby(mediaOverrides: Partial<LocalMedia> = {}, props: Partial<MeetLobbyProps> = {}) {
+    const media = fakeLocalMedia(mediaOverrides);
+    const onJoin = vi.fn();
+    const result = render(<MeetLobby meeting={meeting} media={media} onJoin={onJoin} {...props} />);
+    return { ...result, media, onJoin };
 }
 
-function installFakeMediaStreamConstructor() {
-    vi.stubGlobal(
-        "MediaStream",
-        class {
-            getTracks() {
-                return [];
-            }
-            getAudioTracks() {
-                return [];
-            }
-            getVideoTracks() {
-                return [];
-            }
-        },
-    );
-}
+const NO_PICTURE = { videoStream: null, videoTrack: null, cameraOn: false };
 
-afterEach(() => {
-    Object.defineProperty(window.navigator, "mediaDevices", { value: undefined, configurable: true });
-    vi.unstubAllGlobals();
-});
-
-describe("MeetLobby", () => {
-    it("shows a plain message and still allows joining when mediaDevices isn't supported", async () => {
-        installFakeMediaStreamConstructor();
-        const onJoin = vi.fn();
-        render(<MeetLobby meeting={meeting} onJoin={onJoin} />);
-
-        expect(await screen.findByText(/doesn't support camera\/microphone/i)).toBeInTheDocument();
-        fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "Guest" } });
-        fireEvent.click(screen.getByText("Join meeting"));
-        expect(onJoin).toHaveBeenCalledWith<[JoinPreferences]>({ name: "Guest", micOn: true, cameraOn: true, stream: expect.anything() });
-    });
-
-    it("shows the host's name, requests media on mount, and renders a live preview", async () => {
-        const stream = fakeMediaStream([fakeTrack("audio"), fakeTrack("video")]);
-        installMediaDevices(fakeMediaDevices({ userMediaStream: stream }));
-        render(<MeetLobby meeting={meeting} onJoin={vi.fn()} />);
-
+describe("MeetLobby - joining", () => {
+    it("shows the meeting and its host, and asks for the camera and microphone once when it opens", () => {
+        const { media, rerender } = renderLobby();
         expect(screen.getByText("Standup")).toBeInTheDocument();
         expect(screen.getByText("Hosted by Jane")).toBeInTheDocument();
-        await waitFor(() => expect(document.querySelector("video")).not.toBeNull());
+        expect(media.requestAccess).toHaveBeenCalledTimes(1);
+
+        rerender(<MeetLobby meeting={meeting} media={media} onJoin={vi.fn()} />);
+        expect(media.requestAccess).toHaveBeenCalledTimes(1);
     });
 
-    it("toggles mic/camera by disabling the underlying tracks, not re-requesting media", async () => {
-        const audio = fakeTrack("audio");
-        const video = fakeTrack("video");
-        const stream = fakeMediaStream([audio, video]);
-        const devices = fakeMediaDevices({ userMediaStream: stream });
-        installMediaDevices(devices);
-        render(<MeetLobby meeting={meeting} onJoin={vi.fn()} />);
-        await waitFor(() => expect(document.querySelector("video")).not.toBeNull());
-
-        fireEvent.click(screen.getByText("Mute mic"));
-        expect(audio.enabled).toBe(false);
-        expect(screen.getByText("Unmute mic")).toBeInTheDocument();
-        expect(devices.getUserMedia).toHaveBeenCalledTimes(1);
-
-        fireEvent.click(screen.getByText("Turn camera off"));
-        expect(video.enabled).toBe(false);
-        expect(screen.getByText("Camera is off")).toBeInTheDocument();
+    it("omits the host line when there is none", () => {
+        renderLobby({}, { meeting: { ...meeting, hostDisplayName: undefined } });
+        expect(screen.queryByText(/Hosted by/)).toBeNull();
     });
 
-    it("shows a friendly message and still allows joining when getUserMedia is denied", async () => {
-        const err = new Error("denied");
-        err.name = "NotAllowedError";
-        installMediaDevices(fakeMediaDevices({ userMediaError: err }));
-        installFakeMediaStreamConstructor();
-        const onJoin = vi.fn();
-        render(<MeetLobby meeting={meeting} onJoin={onJoin} />);
+    it("needs a name before it lets the participant join, and joins with it trimmed", () => {
+        const { onJoin } = renderLobby();
+        const join = screen.getByText("Join meeting");
+        expect(join).toBeDisabled();
+        fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "   " } });
+        expect(join).toBeDisabled();
 
-        expect(await screen.findByText(/access was denied/i)).toBeInTheDocument();
-        fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "Guest" } });
-        fireEvent.click(screen.getByText("Join meeting"));
-        expect(onJoin).toHaveBeenCalledTimes(1);
+        fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "  Guest  " } });
+        expect(join).toBeEnabled();
+        fireEvent.click(join);
+        expect(onJoin).toHaveBeenCalledWith("Guest");
     });
 
-    it("prefills but keeps the name editable, and disables Join until it's non-empty", async () => {
-        installFakeMediaStreamConstructor();
-        installMediaDevices(fakeMediaDevices({ omitEnumerate: true, omitGetUserMedia: true, omitGetDisplayMedia: true }));
-        const onJoin = vi.fn();
-        render(<MeetLobby meeting={meeting} initialName="Jane Prefill" onJoin={onJoin} />);
-        const input = screen.getByLabelText<HTMLInputElement>("Your name");
-        expect(input.value).toBe("Jane Prefill");
-        expect(screen.getByText("Join meeting")).not.toBeDisabled();
+    it("prefills a name it is given, still editable", () => {
+        renderLobby({}, { initialName: "Ada" });
+        expect(screen.getByLabelText("Your name")).toHaveValue("Ada");
+    });
+});
 
-        fireEvent.change(input, { target: { value: "" } });
-        expect(screen.getByText("Join meeting")).toBeDisabled();
-
-        fireEvent.change(input, { target: { value: "  Renamed  " } });
-        fireEvent.click(screen.getByText("Join meeting"));
-        expect(onJoin.mock.calls[0][0].name).toBe("Renamed");
+describe("MeetLobby - preview and buttons", () => {
+    it("previews the camera in a muted video", () => {
+        const { container, media } = renderLobby();
+        const video = container.querySelector("video")!;
+        expect(video.muted).toBe(true);
+        expect(video.srcObject).toBe(media.videoStream);
     });
 
-    it("lists cameras/microphones once there is more than one, and switches devices", async () => {
-        const initialVideo = fakeTrack("video");
-        const initialStream = fakeMediaStream([fakeTrack("audio"), initialVideo]);
-        const newVideo = fakeTrack("video");
-        const newVideoStream = fakeMediaStream([newVideo]);
-        let call = 0;
-        const devices = fakeMediaDevices({
-            devices: [fakeDeviceInfo("videoinput", "cam1", "Camera 1"), fakeDeviceInfo("videoinput", "cam2", "")],
-            userMediaStream: () => (call++ === 0 ? initialStream : newVideoStream),
+    it("says what is wrong instead of a picture", () => {
+        const cases: [Partial<LocalMedia>, string][] = [
+            [{ supported: false }, "This browser can't use a camera or microphone here."],
+            [{ requesting: true }, "Waiting for camera and microphone access…"],
+            [{ status: { audio: "live", video: "off" } }, "Camera is off"],
+            [{ status: { audio: "denied", video: "denied" } }, "Camera access is blocked"],
+            [{ status: { audio: "live", video: "unavailable" } }, "No camera found"],
+            [{ status: { audio: "live", video: "error" } }, "Camera couldn't start"],
+            [{ status: { audio: "live", video: "pending" } }, "No camera preview"],
+        ];
+        for (const [overrides, message] of cases) {
+            const { container, unmount } = renderLobby({ ...NO_PICTURE, ...overrides });
+            expect(screen.getByText(message)).toBeInTheDocument();
+            expect(container.querySelector("video")).toBeNull();
+            unmount();
+        }
+    });
+
+    it("shows the microphone with its level while live, and turns it and the camera on and off", () => {
+        const { media } = renderLobby({ audioLevel: 2 });
+        expect(screen.getByTestId("mic-level")).toHaveAttribute("data-level", "2");
+        fireEvent.click(screen.getByRole("button", { name: "Mute microphone" }));
+        fireEvent.click(screen.getByRole("button", { name: "Turn off camera" }));
+        expect(media.toggleMic).toHaveBeenCalledTimes(1);
+        expect(media.toggleCamera).toHaveBeenCalledTimes(1);
+    });
+
+    it("shows a muted microphone and a camera that is off", () => {
+        renderLobby({ ...NO_PICTURE, micOn: false });
+        expect(screen.getByRole("button", { name: "Unmute microphone" })).toHaveAttribute("aria-pressed", "true");
+        expect(screen.queryByTestId("mic-level")).toBeNull();
+        expect(screen.getByRole("button", { name: "Turn on camera" })).toHaveAttribute("aria-pressed", "true");
+    });
+});
+
+describe("MeetLobby - permission", () => {
+    it("explains an unsupported browser, and that the participant can still join", () => {
+        renderLobby({ supported: false, audioTrack: null, ...NO_PICTURE, status: { audio: "pending", video: "pending" } });
+        expect(screen.getByText(/doesn't support camera\/microphone access/)).toBeInTheDocument();
+        expect(screen.getByText("You'll join without a camera or microphone.")).toBeInTheDocument();
+        // Nothing to ask for in a browser that can't.
+        expect(screen.queryByText("Allow camera and microphone")).toBeNull();
+    });
+
+    it("offers a button to ask for access when it hasn't been given", () => {
+        const { media } = renderLobby({ status: { audio: "pending", video: "pending" } });
+        fireEvent.click(screen.getByText("Allow camera and microphone"));
+        // The mount request plus the click - and the click asks for both, not one kind.
+        expect(media.requestAccess).toHaveBeenCalledTimes(2);
+        expect(media.requestAccess).toHaveBeenLastCalledWith();
+    });
+
+    it("shows why a request failed, with a way to try again", () => {
+        const { media } = renderLobby({
+            audioTrack: null,
+            ...NO_PICTURE,
+            status: { audio: "denied", video: "denied" },
+            error: { kind: "permission-denied", message: "Camera/microphone access was denied. Allow access in your browser and try again." },
         });
-        installMediaDevices(devices);
-        render(<MeetLobby meeting={meeting} onJoin={vi.fn()} />);
-
-        const select = await screen.findByLabelText("Camera");
-        const options = screen.getAllByRole("option");
-        expect(options).toHaveLength(2);
-        // The unlabeled device falls back to a plain "Camera" option label - same text as the field's own label.
-        expect(options[1]).toHaveTextContent("Camera");
-        fireEvent.change(select, { target: { value: "cam2" } });
-        await waitFor(() => expect(devices.getUserMedia).toHaveBeenCalledTimes(2));
-        expect(devices.getUserMedia).toHaveBeenLastCalledWith({ video: { deviceId: { exact: "cam2" } }, audio: false });
+        expect(screen.getByText(/access was denied/)).toBeInTheDocument();
+        expect(screen.queryByText("Allow camera and microphone")).toBeNull();
+        fireEvent.click(screen.getByText("Try again"));
+        expect(media.requestAccess).toHaveBeenCalledTimes(2);
+        expect(screen.getByText("You'll join without a camera or microphone.")).toBeInTheDocument();
     });
 
-    it("switches microphones, applying the current mute preference to the new track", async () => {
-        const initialAudio = fakeTrack("audio");
-        const initialStream = fakeMediaStream([initialAudio, fakeTrack("video")]);
-        const newAudio = fakeTrack("audio");
-        const newAudioStream = fakeMediaStream([newAudio]);
-        let call = 0;
-        const devices = fakeMediaDevices({
-            devices: [fakeDeviceInfo("audioinput", "mic1", "Mic 1"), fakeDeviceInfo("audioinput", "mic2", "")],
-            userMediaStream: () => (call++ === 0 ? initialStream : newAudioStream),
-        });
-        installMediaDevices(devices);
-        render(<MeetLobby meeting={meeting} onJoin={vi.fn()} />);
-        const select = await screen.findByLabelText("Microphone");
-        expect(screen.getAllByRole("option")[1]).toHaveTextContent("Microphone");
+    it("asks again when only the microphone is missing, but not for a camera the participant turned off", () => {
+        const missing = renderLobby({ status: { audio: "denied", video: "live" } });
+        expect(screen.getByText("Allow camera and microphone")).toBeInTheDocument();
+        missing.unmount();
 
-        fireEvent.click(screen.getByText("Mute mic"));
-        expect(initialAudio.enabled).toBe(false);
-
-        fireEvent.change(select, { target: { value: "mic2" } });
-        await waitFor(() => expect(devices.getUserMedia).toHaveBeenCalledTimes(2));
-        // The new track picks up the already-muted preference rather than defaulting back to enabled.
-        expect(newAudio.enabled).toBe(false);
-        expect(initialAudio.stop).toHaveBeenCalledTimes(1);
+        renderLobby({ status: { audio: "live", video: "off" } });
+        expect(screen.queryByText("Allow camera and microphone")).toBeNull();
     });
 
-    it("shows an error and does not swap when switching devices fails", async () => {
-        const stream = fakeMediaStream([fakeTrack("audio"), fakeTrack("video")]);
-        const err = new Error("nope");
-        err.name = "NotFoundError";
-        const devices = fakeMediaDevices({
-            devices: [fakeDeviceInfo("audioinput", "mic1", "Mic 1"), fakeDeviceInfo("audioinput", "mic2", "Mic 2")],
-            userMediaStream: stream,
-        });
-        installMediaDevices(devices);
-        render(<MeetLobby meeting={meeting} onJoin={vi.fn()} />);
-        const select = await screen.findByLabelText("Microphone");
-        devices.getUserMedia!.mockImplementationOnce(async () => Promise.reject(err));
-        fireEvent.change(select, { target: { value: "mic2" } });
-        expect(await screen.findByText(/no camera or microphone was found/i)).toBeInTheDocument();
+    it("doesn't offer to ask again while a request is in flight, or when everything is working", () => {
+        const waiting = renderLobby({ requesting: true, status: { audio: "pending", video: "pending" } });
+        expect(screen.queryByText("Allow camera and microphone")).toBeNull();
+        waiting.unmount();
+
+        renderLobby();
+        expect(screen.queryByText("Allow camera and microphone")).toBeNull();
+        expect(screen.queryByText(/You'll join without/)).toBeNull();
+    });
+});
+
+describe("MeetLobby - devices", () => {
+    const cameras = [fakeDeviceInfo("videoinput", "cam-1", "Front"), fakeDeviceInfo("videoinput", "cam-2", "")];
+    const microphones = [fakeDeviceInfo("audioinput", "mic-1", "Built-in"), fakeDeviceInfo("audioinput", "mic-2", "USB")];
+
+    it("offers a choice only when there is more than one device, and switches to the one picked", () => {
+        const { media } = renderLobby({ devices: { cameras, microphones }, selectedDeviceIds: { video: "cam-1", audio: "mic-2" } });
+
+        const camera = screen.getByLabelText<HTMLSelectElement>("Camera");
+        const microphone = screen.getByLabelText<HTMLSelectElement>("Microphone");
+        expect(camera.value).toBe("cam-1");
+        expect(microphone.value).toBe("mic-2");
+        // An unlabeled device still gets a name.
+        expect(screen.getByRole("option", { name: "Camera 2" })).toBeInTheDocument();
+
+        fireEvent.change(camera, { target: { value: "cam-2" } });
+        expect(media.selectDevice).toHaveBeenCalledWith("video", "cam-2");
+        fireEvent.change(microphone, { target: { value: "mic-1" } });
+        expect(media.selectDevice).toHaveBeenCalledWith("audio", "mic-1");
     });
 
-    it("stops the preview stream's tracks on unmount", async () => {
-        const audio = fakeTrack("audio");
-        const video = fakeTrack("video");
-        installMediaDevices(fakeMediaDevices({ userMediaStream: fakeMediaStream([audio, video]) }));
-        const { unmount } = render(<MeetLobby meeting={meeting} onJoin={vi.fn()} />);
-        await waitFor(() => expect(document.querySelector("video")).not.toBeNull());
-        unmount();
-        expect(audio.stop).toHaveBeenCalledTimes(1);
-        expect(video.stop).toHaveBeenCalledTimes(1);
+    it("prompts for a choice while none is in use", () => {
+        renderLobby({ devices: { cameras, microphones }, selectedDeviceIds: {} });
+        expect(screen.getByRole("option", { name: "Choose a camera" })).toBeInTheDocument();
+        expect(screen.getByRole("option", { name: "Choose a microphone" })).toBeInTheDocument();
+        expect(screen.getByRole("option", { name: "Built-in" })).toBeInTheDocument();
     });
 
-    it("does not update state after unmounting while the initial request is still pending", async () => {
-        let resolve!: (value: { ok: true; value: MediaStream }) => void;
-        const devices = fakeMediaDevices({});
-        devices.getUserMedia!.mockImplementationOnce(
-            () =>
-                new Promise((r) => {
-                    resolve = r as never;
-                }),
-        );
-        installMediaDevices(devices);
-        const { unmount } = render(<MeetLobby meeting={meeting} onJoin={vi.fn()} />);
-        unmount();
-        resolve({ ok: true, value: fakeMediaStream([]) } as never);
-        await Promise.resolve();
-        // No React "update on an unmounted component" warning/crash - nothing further to assert.
-    });
-
-    it("ignores a device switch whose new stream has no matching track, without crashing", async () => {
-        const stream = fakeMediaStream([fakeTrack("audio")]);
-        const devices = fakeMediaDevices({
-            devices: [fakeDeviceInfo("audioinput", "mic1", "Mic 1"), fakeDeviceInfo("audioinput", "mic2", "Mic 2")],
-            userMediaStream: stream,
-        });
-        installMediaDevices(devices);
-        // The "switch" call resolves a stream with no audio track at all (defensive: e.g. a device that vanished).
-        devices.getUserMedia!.mockImplementationOnce(async () => stream).mockImplementationOnce(async () => fakeMediaStream([]));
-        render(<MeetLobby meeting={meeting} onJoin={vi.fn()} />);
-        const select = await screen.findByLabelText("Microphone");
-        fireEvent.change(select, { target: { value: "mic2" } });
-        await waitFor(() => expect(devices.getUserMedia).toHaveBeenCalledTimes(2));
+    it("shows no picker for a single device", () => {
+        renderLobby({ devices: { cameras: [cameras[0]], microphones: [microphones[0]] } });
+        expect(screen.queryByLabelText("Camera")).toBeNull();
+        expect(screen.queryByLabelText("Microphone")).toBeNull();
     });
 });

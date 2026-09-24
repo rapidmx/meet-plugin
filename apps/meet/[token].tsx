@@ -31,10 +31,13 @@
  */
 import React, { useState } from "react";
 import useBranding from "@rapidmx/react-shared/branding/useBranding.js";
+import { Branding } from "@rapidmx/react-shared/branding/brandingApi.js";
 import { ApiRequestError } from "@rapidmx/react-shared/util/api.js";
+import Button from "@rapidmx/react-shared/components/buttons/Button.js";
 import Alert from "@rapidmx/react-shared/components/feedback/Alert.js";
 import { MeetCard, MeetPageShell } from "./_MeetChrome.js";
-import { type JoinPreferences, default as MeetLobby } from "./_MeetLobby.js";
+import { useLocalMedia } from "../shared/media/useLocalMedia.js";
+import MeetLobby from "./_MeetLobby.js";
 import CallView from "./_CallView.js";
 import { type VideoMeetingJoinResult, joinMeeting } from "./_meetApi.js";
 
@@ -42,18 +45,19 @@ type Phase = "loading" | "not-found" | "lobby" | "in-call" | "ended";
 
 export default function MeetJoinPage({ params }: { params: { token: string } }) {
     const { branding } = useBranding();
-    return (
-        <MeetPageShell branding={branding}>
-            <MeetJoinContent token={params.token} />
-        </MeetPageShell>
-    );
+    return <MeetJoinContent token={params.token} branding={branding} />;
 }
 
-function MeetJoinContent({ token }: { token: string }) {
+/** Owns the camera and microphone (`useLocalMedia()`) for the whole visit, so the tracks the lobby previews are the
+ * ones the call sends. Every phase but the call is drawn inside the branded page shell; the call fills the whole
+ * window instead (see `_CallView.tsx`). */
+function MeetJoinContent({ token, branding }: { token: string; branding: Branding | null }) {
     const [phase, setPhase] = useState<Phase>("loading");
     const [joinResult, setJoinResult] = useState<VideoMeetingJoinResult | null>(null);
-    const [preferences, setPreferences] = useState<JoinPreferences | null>(null);
+    const [name, setName] = useState("");
     const [loadError, setLoadError] = useState<string | null>(null);
+    const media = useLocalMedia();
+    const { release } = media;
 
     React.useEffect(() => {
         let cancelled = false;
@@ -80,41 +84,17 @@ function MeetJoinContent({ token }: { token: string }) {
         };
     }, [token]);
 
-    function handleJoin(prefs: JoinPreferences) {
-        setPreferences(prefs);
+    function handleJoin(joinName: string) {
+        setName(joinName);
         setPhase("in-call");
     }
 
     function handleLeave() {
+        release();
         setPhase("ended");
     }
 
-    if (phase === "loading") {
-        return (
-            <MeetCard>
-                <p className="text-base text-text-muted">Loading&hellip;</p>
-            </MeetCard>
-        );
-    }
-
-    if (phase === "not-found") {
-        return (
-            <MeetCard>
-                <Alert>{loadError ?? "This meeting link isn't valid."}</Alert>
-            </MeetCard>
-        );
-    }
-
-    if (phase === "ended") {
-        return (
-            <MeetCard>
-                <h1 className="text-xl font-bold tracking-tight mb-2">You left the meeting</h1>
-                <p className="text-base text-text-muted">You can close this page now.</p>
-            </MeetCard>
-        );
-    }
-
-    if (phase === "in-call" && joinResult && preferences) {
+    if (phase === "in-call" && joinResult) {
         return (
             <CallView
                 channel={joinResult.meeting.uid}
@@ -125,20 +105,45 @@ function MeetJoinContent({ token }: { token: string }) {
                 // `VideoMeetingJoinResult`'s doc comment in `_meetApi.ts`).
                 token={joinResult.token}
                 selfUid={joinResult.selfUid}
-                selfName={preferences.name}
+                selfName={name}
+                meetingTitle={joinResult.meeting.title}
                 iceServers={joinResult.iceServers}
-                initialStream={preferences.stream}
-                initialMicOn={preferences.micOn}
-                initialCameraOn={preferences.cameraOn}
+                media={media}
                 onLeave={handleLeave}
             />
         );
     }
 
-    // phase === "lobby" (join Result is always set by then - see the effect above).
-    return (
-        <MeetCard maxWidth="max-w-4xl">
-            <MeetLobby meeting={joinResult!.meeting} onJoin={handleJoin} />
-        </MeetCard>
-    );
+    let content: React.ReactNode;
+    if (phase === "loading") {
+        content = (
+            <MeetCard>
+                <p className="text-base text-text-muted">Loading&hellip;</p>
+            </MeetCard>
+        );
+    } else if (phase === "not-found") {
+        content = (
+            <MeetCard>
+                <Alert>{loadError ?? "This meeting link isn't valid."}</Alert>
+            </MeetCard>
+        );
+    } else if (phase === "ended") {
+        content = (
+            <MeetCard>
+                <h1 className="text-xl font-bold tracking-tight mb-2">You left the meeting</h1>
+                <p className="text-base text-text-muted mb-4">You can close this page now, or rejoin.</p>
+                <Button type="button" className="!w-auto" onClick={() => setPhase("lobby")}>
+                    Rejoin meeting
+                </Button>
+            </MeetCard>
+        );
+    } else {
+        // phase === "lobby" (joinResult is always set by then - see the effect above).
+        content = (
+            <MeetCard maxWidth="max-w-4xl">
+                <MeetLobby meeting={joinResult!.meeting} media={media} initialName={name} onJoin={handleJoin} />
+            </MeetCard>
+        );
+    }
+    return <MeetPageShell branding={branding}>{content}</MeetPageShell>;
 }

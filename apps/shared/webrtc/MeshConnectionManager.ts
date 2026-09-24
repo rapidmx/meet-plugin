@@ -15,6 +15,20 @@
  * both sides independently compute the same answer with no coordination round trip, and exactly one side ever
  * calls `createOffer()` for a given pair.
  *
+ * ## Media: two permanent transceivers, tracks swapped in and out
+ *
+ * Every connection carries one send-and-receive audio transceiver and one send-and-receive video transceiver,
+ * whether or not the local participant has a microphone or camera to send yet. The offerer adds them before its
+ * offer; the answerer takes the ones the offer created (`claimTransceivers()`) - a browser does not match an offer's
+ * m-lines to transceivers the answerer added itself, so adding them up front on both sides leaves the answerer
+ * sending nothing at all. A participant who declined permission, has no camera, or turns the camera on halfway
+ * through therefore still negotiates both directions from the first offer, and later `setLocalTrack()` calls just
+ * `replaceTrack()` on the existing senders - never a renegotiation. (Attaching tracks once at connection creation,
+ * as this manager used to, meant a participant with nothing to send at that moment negotiated no media in either
+ * direction, for the whole call.)
+ * The remote side's tracks are collected into one `MediaStream` per peer (`remote-stream` events), rather than
+ * read from `event.streams[0]`: a transceiver whose sender has no track yet announces no stream to the far end.
+ *
  * ## Join announcement and roster discovery
  *
  * The channel has no history (a push event published while a socket was down is never replayed - see
@@ -26,6 +40,17 @@
  * roster regardless of join order. This is naturally bounded (each participant echoes at most once per peer it
  * ever discovers) rather than a risk of runaway flooding.
  *
+ * Each message is its own `POST`, so nothing guarantees they arrive in the order they were sent. Two consequences
+ * are handled here: an `offer` that beats its sender's `hello` creates the peer under a placeholder name that the
+ * `hello` then replaces (`participant-updated`), and an ICE candidate that beats its offer is held until the peer
+ * exists rather than dropped.
+ *
+ * ## Participant state, hands and reactions
+ *
+ * What each participant is sending (`audioOn`/`videoOn`) and whether their hand is up travels in `hello` and in a
+ * `state` message on every change (`setLocalState()`), because a remote track gives no dependable signal that its
+ * sender stopped. `reaction` messages carry one emoji from `REACTION_EMOJIS`; anything else is ignored.
+ *
  * ## Presenter (single-writer screen share)
  *
  * `presenter-claim` is only ever sent locally when `presenterUid` is unset (`claimPresenter()` refuses otherwise).
@@ -35,24 +60,37 @@
  * smaller uid wins, and the losing claimant self-revokes (stops its own share locally and sends
  * `presenter-release`) once it observes the winning claim. See `handlePresenterClaim()`.
  *
- * ## Presentation mode's screen share
- *
- * Sharing a screen never adds a second video track or renegotiates a connection - `replaceLocalVideoTrack()`
- * simply swaps each peer connection's existing outgoing video `RTCRtpSender`'s track (`sender.replaceTrack()`),
- * the same track object already flowing to everyone from the moment they joined. Stopping a share replaces it
- * back to the camera track the same way.
+ * Sharing a screen is `setLocalTrack("video", screenTrack)`; stopping is `setLocalTrack("video", cameraTrack)`.
  */
-import type { MeshEvent, MeshParticipant, RTCPeerConnectionFactory, RTCPeerConnectionLike, SignalMessage, SignalingChannel } from "./types.js";
+import {
+    type MeshEvent,
+    type MeshParticipant,
+    type ParticipantState,
+    type RTCPeerConnectionFactory,
+    type RTCPeerConnectionLike,
+    type RTCRtpSenderLike,
+    type SignalMessage,
+    type SignalingChannel,
+    REACTION_EMOJIS,
+} from "./types.js";
 
 /** The lexicographically smaller uid is always the offerer for that pair - see this module's doc comment. */
 export function isOfferer(selfUid: string, peerUid: string): boolean {
     return selfUid < peerUid;
 }
 
-interface PeerState {
-    uid: string;
-    name: string;
+/** How many peers' worth of early ICE candidates are held, and how many candidates per peer - bounds the memory a
+ * misbehaving participant could make this hold for peers that never materialize. */
+const MAX_ORPHAN_PEERS = 32;
+const MAX_ORPHAN_CANDIDATES = 64;
+
+type MediaKind = "audio" | "video";
+
+interface PeerState extends MeshParticipant {
     pc: RTCPeerConnectionLike;
+    /** Empty on an answerer until the offer arrives - see `handleOffer()`. */
+    senders: Partial<Record<MediaKind, RTCRtpSenderLike>>;
+    remoteStream: MediaStream;
     remoteDescriptionSet: boolean;
     pendingCandidates: RTCIceCandidateInit[];
 }
@@ -63,22 +101,40 @@ export interface MeshConnectionManagerOptions {
     iceServers: RTCIceServer[];
     channel: SignalingChannel;
     createPeerConnection: RTCPeerConnectionFactory;
-    /** The local camera/microphone stream, attached to every new peer connection as it's created. */
-    localStream: MediaStream;
+    /** The tracks to send from the start - either may be absent (no permission, no device) and supplied or
+     * replaced later with `setLocalTrack()`. */
+    localAudioTrack?: MediaStreamTrack | null;
+    localVideoTrack?: MediaStreamTrack | null;
+    /** What to announce at first - defaults to "sending whatever tracks were given, hand down". */
+    localState?: Partial<ParticipantState>;
+    /** Builds the (initially empty) stream one peer's incoming tracks are gathered into. Defaults to
+     * `new MediaStream()`; a test supplies a fake. */
+    createMediaStream?: () => MediaStream;
 }
 
 export class MeshConnectionManager {
     private readonly peers = new Map<string, PeerState>();
     private readonly listeners = new Set<(event: MeshEvent) => void>();
+    private readonly orphanCandidates = new Map<string, RTCIceCandidateInit[]>();
+    private readonly localTracks: Record<MediaKind, MediaStreamTrack | null>;
+    private localState: ParticipantState;
     private unsubscribe: (() => void) | undefined;
     private started = false;
     private stopped = false;
     private currentPresenterUid: string | undefined;
 
-    constructor(private readonly options: MeshConnectionManagerOptions) {}
+    constructor(private readonly options: MeshConnectionManagerOptions) {
+        this.localTracks = { audio: options.localAudioTrack ?? null, video: options.localVideoTrack ?? null };
+        this.localState = {
+            audioOn: !!options.localAudioTrack,
+            videoOn: !!options.localVideoTrack,
+            handRaised: false,
+            ...options.localState,
+        };
+    }
 
     get participants(): MeshParticipant[] {
-        return [...this.peers.values()].map((peer) => ({ uid: peer.uid, name: peer.name }));
+        return [...this.peers.values()].map((peer) => toParticipant(peer));
     }
 
     get presenterUid(): string | undefined {
@@ -101,9 +157,9 @@ export class MeshConnectionManager {
     }
 
     /** Announces departure, closes every peer connection and unsubscribes - idempotent, and safe to call whether
-     * or not `start()` ever ran. Never removes the camera/microphone indicator itself - stopping `localStream`'s
-     * own tracks is the caller's job (see `deviceMedia.ts`'s `stopStream()`), since this manager never owns that
-     * stream's lifecycle, only attaches it. */
+     * or not `start()` ever ran. Never removes the camera/microphone indicator itself - stopping the local
+     * tracks is the caller's job (see `deviceMedia.ts`'s `stopStream()`), since this manager never owns their
+     * lifecycle, only sends them. */
     stop(): void {
         if (this.stopped) {
             return;
@@ -118,18 +174,39 @@ export class MeshConnectionManager {
             peer.pc.close();
         }
         this.peers.clear();
+        this.orphanCandidates.clear();
         this.listeners.clear();
     }
 
-    /** Swaps every peer connection's outgoing video track (presentation mode) - see this module's doc comment.
-     * `track` is `null` to stop sending video at all (never used by this plugin's UI today, which always has a
-     * camera-or-screen track to fall back to, but kept correct since `RTCRtpSender.replaceTrack()` itself allows
-     * it). */
-    replaceLocalVideoTrack(track: MediaStreamTrack | null): void {
+    /** Sets the track sent as `kind` (`null` to send nothing) on every connection, now and for every peer that
+     * joins later - see this module's doc comment. */
+    setLocalTrack(kind: MediaKind, track: MediaStreamTrack | null): void {
+        this.localTracks[kind] = track;
         for (const peer of this.peers.values()) {
-            const sender = peer.pc.getSenders().find((s) => s.track?.kind === "video");
-            void sender?.replaceTrack(track);
+            void peer.senders[kind]?.replaceTrack(track);
         }
+    }
+
+    /** Updates what this participant announces (`audioOn`/`videoOn`/`handRaised`) and tells everyone if anything
+     * actually changed. Before `start()` it only records the state, which `hello` then carries. */
+    setLocalState(partial: Partial<ParticipantState>): void {
+        const next = { ...this.localState, ...partial };
+        if (sameState(next, this.localState)) {
+            return;
+        }
+        this.localState = next;
+        if (this.started && !this.stopped) {
+            this.send({ kind: "state", state: next });
+        }
+    }
+
+    /** Sends one emoji to everyone. Returns `false`, sending nothing, for an emoji outside `REACTION_EMOJIS`. */
+    sendReaction(emoji: string): boolean {
+        if (!isReactionEmoji(emoji)) {
+            return false;
+        }
+        this.send({ kind: "reaction", emoji });
+        return true;
     }
 
     /** Claims presenter status for the local participant. Refuses (returns `false`, sends nothing) when someone
@@ -156,7 +233,7 @@ export class MeshConnectionManager {
     }
 
     private sendHello(): void {
-        this.send({ kind: "hello", name: this.options.selfName });
+        this.send({ kind: "hello", name: this.options.selfName, state: this.localState });
     }
 
     private send(partial: Omit<SignalMessage, "type" | "from">): void {
@@ -198,25 +275,70 @@ export class MeshConnectionManager {
             case "presenter-release":
                 this.handlePresenterRelease(message.from);
                 return;
+            case "state":
+                this.handleState(message);
+                return;
+            case "reaction":
+                this.handleReaction(message);
+                return;
         }
     }
 
     private handleHello(message: SignalMessage): void {
-        if (this.peers.has(message.from)) {
+        const known = this.peers.get(message.from);
+        if (known) {
+            // An offer that beat this hello created the peer under a placeholder name - fill in the real one.
+            this.updatePeer(known, message.name, message.state);
             return;
         }
-        const name = message.name ?? message.from;
-        const peer = this.createPeer(message.from, name);
-        this.emit({ type: "participant-joined", participant: { uid: peer.uid, name: peer.name } });
+        const offerer = isOfferer(this.options.selfUid, message.from);
+        const peer = this.createPeer(message.from, message.name ?? message.from, message.state, offerer);
+        this.emit({ type: "participant-joined", participant: toParticipant(peer) });
         // Let a newcomer who couldn't have seen our own original `hello` learn about us too - see this module's
         // doc comment on roster discovery.
         this.sendHello();
-        if (isOfferer(this.options.selfUid, message.from)) {
+        if (offerer) {
             void this.initiateOffer(peer);
         }
     }
 
+    private handleState(message: SignalMessage): void {
+        const peer = this.peers.get(message.from);
+        if (peer) {
+            this.updatePeer(peer, undefined, message.state);
+        }
+    }
+
+    private handleReaction(message: SignalMessage): void {
+        const peer = this.peers.get(message.from);
+        if (peer && isReactionEmoji(message.emoji)) {
+            this.emit({ type: "reaction", uid: peer.uid, name: peer.name, emoji: message.emoji });
+        }
+    }
+
+    /** Applies a newly learned name and/or state to `peer`, emitting `participant-updated` (and `hand-raised` on a
+     * hand going up) only when something actually changed. */
+    private updatePeer(peer: PeerState, name: string | undefined, state: ParticipantState | undefined): void {
+        const nextName = name ?? peer.name;
+        const next = state ? sanitizeState(state) : undefined;
+        const handWentUp = !!next && next.handRaised && !peer.handRaised;
+        if (nextName === peer.name && (!next || sameState(next, peer))) {
+            return;
+        }
+        peer.name = nextName;
+        if (next) {
+            peer.audioOn = next.audioOn;
+            peer.videoOn = next.videoOn;
+            peer.handRaised = next.handRaised;
+        }
+        this.emit({ type: "participant-updated", participant: toParticipant(peer) });
+        if (handWentUp) {
+            this.emit({ type: "hand-raised", uid: peer.uid, name: peer.name });
+        }
+    }
+
     private handleBye(uid: string): void {
+        this.orphanCandidates.delete(uid);
         const peer = this.peers.get(uid);
         if (!peer) {
             return;
@@ -230,23 +352,35 @@ export class MeshConnectionManager {
         }
     }
 
-    private createPeer(uid: string, name: string): PeerState {
+    private createPeer(uid: string, name: string, state: ParticipantState | undefined, offerer: boolean): PeerState {
         const pc = this.options.createPeerConnection({ iceServers: this.options.iceServers });
-        const peer: PeerState = { uid, name, pc, remoteDescriptionSet: false, pendingCandidates: [] };
+        const peer: PeerState = {
+            uid,
+            name,
+            ...(state ? sanitizeState(state) : { audioOn: false, videoOn: false, handRaised: false }),
+            pc,
+            senders: offerer
+                ? {
+                      audio: pc.addTransceiver("audio", this.localTracks.audio).sender,
+                      video: pc.addTransceiver("video", this.localTracks.video).sender,
+                  }
+                : {},
+            remoteStream: (this.options.createMediaStream ?? (() => new MediaStream()))(),
+            remoteDescriptionSet: false,
+            pendingCandidates: this.orphanCandidates.get(uid) ?? [],
+        };
+        this.orphanCandidates.delete(uid);
         this.peers.set(uid, peer);
-        for (const track of this.options.localStream.getTracks()) {
-            pc.addTrack(track, this.options.localStream);
-        }
         pc.onicecandidate = (event) => {
             if (event.candidate) {
                 this.send({ kind: "ice-candidate", to: uid, candidate: event.candidate });
             }
         };
         pc.ontrack = (event) => {
-            const stream = event.streams[0];
-            if (stream) {
-                this.emit({ type: "remote-stream", uid, stream });
+            if (!peer.remoteStream.getTracks().includes(event.track)) {
+                peer.remoteStream.addTrack(event.track);
             }
+            this.emit({ type: "remote-stream", uid, stream: peer.remoteStream });
         };
         pc.onconnectionstatechange = () => {
             if (pc.connectionState === "failed" || pc.connectionState === "closed") {
@@ -269,12 +403,23 @@ export class MeshConnectionManager {
         let peer = this.peers.get(message.from);
         const isNew = !peer;
         if (!peer) {
-            peer = this.createPeer(message.from, message.from);
+            peer = this.createPeer(message.from, message.from, undefined, false);
         }
         await peer.pc.setRemoteDescription(message.sdp);
         this.flushPendingCandidates(peer);
+        if (!peer.senders.audio && !peer.senders.video) {
+            // The answerer's half of the media setup - see this module's doc comment.
+            peer.senders = peer.pc.claimTransceivers();
+            for (const kind of ["audio", "video"] as const) {
+                const track = this.localTracks[kind];
+                if (track) {
+                    await peer.senders[kind]?.replaceTrack(track);
+                }
+            }
+        }
         if (isNew) {
-            this.emit({ type: "participant-joined", participant: { uid: peer.uid, name: peer.name } });
+            this.emit({ type: "participant-joined", participant: toParticipant(peer) });
+            this.sendHello();
         }
         const answer = await peer.pc.createAnswer();
         await peer.pc.setLocalDescription(answer);
@@ -296,10 +441,16 @@ export class MeshConnectionManager {
         }
         const peer = this.peers.get(message.from);
         if (!peer) {
-            // No connection tracked for this peer yet (a candidate that raced ahead of its own offer/answer) -
-            // nothing to buffer it against, and one lost trickle-ICE candidate does not by itself break a
-            // connection (there are normally several). See this module's known-limitations note in the Phase 2
-            // report.
+            // A candidate that raced ahead of its own offer (each message is a separate `POST`) - hold it for
+            // the peer to claim when it is created. Bounded, see `MAX_ORPHAN_PEERS`.
+            const held = this.orphanCandidates.get(message.from);
+            if (held) {
+                if (held.length < MAX_ORPHAN_CANDIDATES) {
+                    held.push(message.candidate);
+                }
+            } else if (this.orphanCandidates.size < MAX_ORPHAN_PEERS) {
+                this.orphanCandidates.set(message.from, [message.candidate]);
+            }
             return;
         }
         if (!peer.remoteDescriptionSet) {
@@ -347,4 +498,21 @@ export class MeshConnectionManager {
             this.emit({ type: "presenter-changed", uid: undefined });
         }
     }
+}
+
+function toParticipant(peer: PeerState): MeshParticipant {
+    return { uid: peer.uid, name: peer.name, audioOn: peer.audioOn, videoOn: peer.videoOn, handRaised: peer.handRaised };
+}
+
+function sameState(a: ParticipantState, b: ParticipantState): boolean {
+    return a.audioOn === b.audioOn && a.videoOn === b.videoOn && a.handRaised === b.handRaised;
+}
+
+/** Copies only the three booleans out of a received state, coerced - a message off the wire is untrusted. */
+function sanitizeState(state: ParticipantState): ParticipantState {
+    return { audioOn: state.audioOn === true, videoOn: state.videoOn === true, handRaised: state.handRaised === true };
+}
+
+function isReactionEmoji(emoji: unknown): emoji is (typeof REACTION_EMOJIS)[number] {
+    return (REACTION_EMOJIS as readonly unknown[]).includes(emoji);
 }

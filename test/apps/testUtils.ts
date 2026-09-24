@@ -7,6 +7,7 @@
  * to use at all - `navigator.mediaDevices`, `RTCPeerConnection` and the push `WebSocket` (see this plugin's Phase 2
  * `.claude/NOTES.md` entry: there was no existing mocking convention for any of these to follow). */
 import { vi, type Mock } from "vitest";
+import type { LocalMedia } from "../../apps/shared/media/useLocalMedia.js";
 
 /** Builds a real `Response` with a JSON body and `content-type: application/json`. */
 export function jsonResponse(status: number, body: unknown, init: ResponseInit = {}): Response {
@@ -31,7 +32,9 @@ export function fakeTrack(kind: "audio" | "video", id = `${kind}-${Math.random()
         kind,
         id,
         enabled: true,
+        readyState: "live",
         stop: vi.fn(),
+        getSettings: () => ({ deviceId: `${id}-device` }),
         onended: null as (() => void) | null,
     };
     return track as unknown as MediaStreamTrack;
@@ -59,7 +62,8 @@ export function fakeMediaStream(tracks: MediaStreamTrack[] = [], id = `stream-${
  * overridable (or omittable, to simulate an unsupported browser). */
 export interface FakeMediaDevicesOptions {
     devices?: MediaDeviceInfo[];
-    userMediaStream?: MediaStream | (() => MediaStream);
+    /** A stream, or a function of the requested constraints (which may throw, to fail some requests and not others). */
+    userMediaStream?: MediaStream | ((constraints: MediaStreamConstraints) => MediaStream);
     displayMediaStream?: MediaStream | (() => MediaStream);
     userMediaError?: Error;
     displayMediaError?: Error;
@@ -70,7 +74,18 @@ export interface FakeMediaDevicesOptions {
 }
 
 export function fakeMediaDevices(options: FakeMediaDevicesOptions = {}) {
+    const listeners = new Map<string, Set<() => void>>();
     return {
+        addEventListener: vi.fn((type: string, listener: () => void) => {
+            listeners.set(type, (listeners.get(type) ?? new Set()).add(listener));
+        }),
+        removeEventListener: vi.fn((type: string, listener: () => void) => {
+            listeners.get(type)?.delete(listener);
+        }),
+        /** Fires `type` (e.g. "devicechange") at whoever is listening. */
+        emit: (type: string) => {
+            for (const listener of [...(listeners.get(type) ?? [])]) listener();
+        },
         enumerateDevices: options.omitEnumerate
             ? undefined
             : vi.fn(async () => {
@@ -79,10 +94,10 @@ export function fakeMediaDevices(options: FakeMediaDevicesOptions = {}) {
               }),
         getUserMedia: options.omitGetUserMedia
             ? undefined
-            : vi.fn(async () => {
+            : vi.fn(async (constraints: MediaStreamConstraints) => {
                   if (options.userMediaError) throw options.userMediaError;
                   const stream = options.userMediaStream ?? fakeMediaStream([fakeTrack("audio"), fakeTrack("video")]);
-                  return typeof stream === "function" ? stream() : stream;
+                  return typeof stream === "function" ? stream(constraints) : stream;
               }),
         getDisplayMedia: options.omitGetDisplayMedia
             ? undefined
@@ -94,15 +109,38 @@ export function fakeMediaDevices(options: FakeMediaDevicesOptions = {}) {
     };
 }
 
+/** jsdom has neither `navigator.mediaDevices` nor a `MediaStream` constructor - these install fakes (undo with
+ * `removeMediaDevices()` and `vi.unstubAllGlobals()`). */
+export function installMediaDevices(devices: ReturnType<typeof fakeMediaDevices> | undefined): void {
+    Object.defineProperty(window.navigator, "mediaDevices", { value: devices, configurable: true });
+}
+
+export function removeMediaDevices(): void {
+    Object.defineProperty(window.navigator, "mediaDevices", { value: undefined, configurable: true });
+}
+
+/** A `MediaStream` constructor building a `fakeMediaStream()` from the tracks it is given. */
+export function installFakeMediaStream(): void {
+    vi.stubGlobal(
+        "MediaStream",
+        class {
+            constructor(tracks: MediaStreamTrack[] = []) {
+                return fakeMediaStream(tracks);
+            }
+        },
+    );
+}
+
 /** A fake `MediaDeviceInfo` entry. */
 export function fakeDeviceInfo(kind: MediaDeviceKind, deviceId: string, label = ""): MediaDeviceInfo {
     return { kind, deviceId, label, groupId: "", toJSON: () => ({}) };
 }
 
 /** A minimal fake `RTCRtpSender`. */
-function fakeSender(track: MediaStreamTrack): { track: MediaStreamTrack | null; replaceTrack: Mock } {
+export type FakeSender = { track: MediaStreamTrack | null; replaceTrack: Mock };
+function fakeSender(track: MediaStreamTrack | null): FakeSender {
     const sender = {
-        track: track as MediaStreamTrack | null,
+        track,
         replaceTrack: vi.fn(async (next: MediaStreamTrack | null) => {
             sender.track = next;
         }),
@@ -115,8 +153,10 @@ function fakeSender(track: MediaStreamTrack): { track: MediaStreamTrack | null; 
  * named portably (TS2883) once callback bodies get this involved, and a test only ever needs
  * `expect(...).toHaveBeenCalledWith(...)`/`.mock.calls`, never a precise call signature. */
 export interface FakeRTCPeerConnection {
-    addTrack: Mock;
-    getSenders: Mock;
+    addTransceiver: Mock;
+    claimTransceivers: Mock;
+    /** The senders handed out so far, by kind (whichever of `addTransceiver()`/`claimTransceivers()` created them). */
+    senders: Partial<Record<"audio" | "video", FakeSender>>;
     createOffer: Mock;
     createAnswer: Mock;
     setLocalDescription: Mock;
@@ -124,22 +164,28 @@ export interface FakeRTCPeerConnection {
     addIceCandidate: Mock;
     close: Mock;
     onicecandidate: ((event: { candidate: RTCIceCandidateInit | null }) => void) | null;
-    ontrack: ((event: { streams: readonly MediaStream[] }) => void) | null;
+    ontrack: ((event: { track: MediaStreamTrack }) => void) | null;
     onconnectionstatechange: (() => void) | null;
     connectionState: string;
 }
 
 /** A fake `RTCPeerConnectionLike` (`apps/shared/webrtc/types.ts`) with scriptable offer/answer SDP and no real ICE
- * negotiation at all - `MeshConnectionManager`'s tests drive its `on*` handlers directly to simulate the network. */
-export function fakeRTCPeerConnection(): FakeRTCPeerConnection {
-    const senders: ReturnType<typeof fakeSender>[] = [];
+ * negotiation at all - `MeshConnectionManager`'s tests drive its `on*` handlers directly to simulate the network.
+ * `claimKinds` is which m-lines the (fake) remote offer had, i.e. what `claimTransceivers()` finds. */
+export function fakeRTCPeerConnection(claimKinds: ("audio" | "video")[] = ["audio", "video"]): FakeRTCPeerConnection {
+    const senders: Partial<Record<"audio" | "video", FakeSender>> = {};
     return {
-        addTrack: vi.fn((track: MediaStreamTrack) => {
-            const sender = fakeSender(track);
-            senders.push(sender);
-            return sender;
+        senders,
+        addTransceiver: vi.fn((kind: "audio" | "video", track: MediaStreamTrack | null) => {
+            senders[kind] = fakeSender(track);
+            return { sender: senders[kind] };
         }),
-        getSenders: vi.fn(() => senders),
+        claimTransceivers: vi.fn(() => {
+            for (const kind of claimKinds) {
+                senders[kind] = fakeSender(null);
+            }
+            return { ...senders };
+        }),
         createOffer: vi.fn(async () => ({ type: "offer", sdp: "fake-offer-sdp" })),
         createAnswer: vi.fn(async () => ({ type: "answer", sdp: "fake-answer-sdp" })),
         setLocalDescription: vi.fn(async () => undefined),
@@ -195,4 +241,32 @@ export function fakePushSocket(): FakePushSocket {
         },
     };
     return socket;
+}
+
+/** A `LocalMedia` (`apps/shared/media/useLocalMedia.ts`) with a live camera and microphone and every action a mock -
+ * override whatever a test cares about. */
+export function fakeLocalMedia(overrides: Partial<LocalMedia> = {}): LocalMedia {
+    const audioTrack = fakeTrack("audio", "local-audio");
+    const videoTrack = fakeTrack("video", "local-video");
+    return {
+        supported: true,
+        requesting: false,
+        error: null,
+        audioTrack,
+        videoTrack,
+        videoStream: fakeMediaStream([videoTrack]),
+        micEnabled: true,
+        micOn: true,
+        cameraOn: true,
+        status: { audio: "live", video: "live" },
+        devices: { cameras: [], microphones: [] },
+        selectedDeviceIds: {},
+        audioLevel: 0,
+        requestAccess: vi.fn(async () => undefined),
+        toggleMic: vi.fn(async () => undefined),
+        toggleCamera: vi.fn(async () => undefined),
+        selectDevice: vi.fn(async () => undefined),
+        release: vi.fn(),
+        ...overrides,
+    };
 }

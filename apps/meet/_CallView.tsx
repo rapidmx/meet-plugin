@@ -11,6 +11,21 @@
  * program rooted at `apps/`, which cannot reference files outside it (`TS6059`), matching `booking-plugin`'s own
  * identical `apps/shared/` convention for reusable frontend-only code.
  *
+ * ## Fitting the window
+ *
+ * The call fills the viewport (`fixed inset-0`) as three rows - a slim header, the tiles (which take whatever room
+ * is left and never scroll the page), and the control bar pinned to the bottom - instead of being laid out inside
+ * the branded page shell, whose header, footer and padding pushed it off the screen. The local participant's own
+ * tile is a small tile in the bottom-right corner while anyone else is in the call (above the control bar on a narrower
+ * window, and at the top on a phone, where the bar wraps onto a second row), and fills the tile area while they are
+ * alone.
+ *
+ * ## Who is heard
+ *
+ * A tile never plays sound. Each remote stream is played by its own hidden `<audio>` element, so a participant is
+ * heard whether or not their camera is on and whichever layout is showing. If the browser refuses to start the
+ * audio (an autoplay policy), a banner asks for a click, which is the gesture that allows it.
+ *
  * ## Layout precedence
  *
  * `computeMainUid()` decides who is shown large, in this order: an active presenter always wins (presentation
@@ -19,15 +34,16 @@
  * slot); else, in focus mode with nobody yet speaking, the first other participant - so focus mode never shows an
  * empty main slot once someone else has joined.
  */
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { playRaisedHandChime } from "../shared/media/chime.js";
 import { pickActiveSpeaker } from "../shared/media/activeSpeaker.js";
 import { startLevelMeter, type LevelMeterHandle } from "../shared/media/levelMeter.js";
-import { requestDisplayMedia, setTracksEnabled, stopStream } from "../shared/media/deviceMedia.js";
+import { requestDisplayMedia, stopStream } from "../shared/media/deviceMedia.js";
+import type { LocalMedia } from "../shared/media/useLocalMedia.js";
 import { createBrowserPeerConnection } from "../shared/webrtc/realPeerConnection.js";
 import { MeshConnectionManager } from "../shared/webrtc/MeshConnectionManager.js";
 import type { MeshParticipant } from "../shared/webrtc/types.js";
 import { GuestSignalingClient } from "../shared/push/GuestSignalingClient.js";
-import Alert from "@rapidmx/react-shared/components/feedback/Alert.js";
 import CallControls, { type CallViewMode } from "./_CallControls.js";
 import ParticipantTile from "./_ParticipantTile.js";
 
@@ -39,11 +55,22 @@ export interface CallViewProps {
     token?: string;
     selfUid: string;
     selfName: string;
+    meetingTitle: string;
     iceServers: RTCIceServer[];
-    initialStream: MediaStream;
-    initialMicOn: boolean;
-    initialCameraOn: boolean;
+    /** The camera and microphone, owned by the page (`[token].tsx`) - the lobby's tracks carried into the call. */
+    media: LocalMedia;
     onLeave: () => void;
+}
+
+/** How long a reaction floats on screen. */
+const REACTION_MS = 4_000;
+/** The most reactions shown at once - a burst beyond this drops the oldest. */
+const MAX_REACTIONS = 12;
+
+interface Reaction {
+    id: number;
+    emoji: string;
+    name: string;
 }
 
 /** Who is shown large - see this module's doc comment. `undefined` when nobody but the local participant has
@@ -66,48 +93,58 @@ export function computeMainUid(options: {
     return options.otherUids[0];
 }
 
-export default function CallView({
-    channel,
-    token,
-    selfUid,
-    selfName,
-    iceServers,
-    initialStream,
-    initialMicOn,
-    initialCameraOn,
-    onLeave,
-}: CallViewProps) {
+/** This tab's identity on the signaling channel: the account (or guest) uid plus a random suffix, so the same
+ * account joining from two devices - or two tabs - is two participants rather than one that ignores itself. */
+export function newPeerId(selfUid: string): string {
+    return `${selfUid}~${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)}`;
+}
+
+export default function CallView({ channel, token, selfUid, selfName, meetingTitle, iceServers, media, onLeave }: CallViewProps) {
+    const [peerId] = useState(() => newPeerId(selfUid));
     const [connectError, setConnectError] = useState<string | null>(null);
     const [participants, setParticipants] = useState<MeshParticipant[]>([]);
     const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
     const [levels, setLevels] = useState<Record<string, number>>({});
     const [presenterUid, setPresenterUid] = useState<string | undefined>(undefined);
-    const [micOn, setMicOn] = useState(initialMicOn);
-    const [cameraOn, setCameraOn] = useState(initialCameraOn);
-    const [isPresenting, setIsPresenting] = useState(false);
+    const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
+    const [handRaised, setHandRaised] = useState(false);
     const [viewMode, setViewMode] = useState<CallViewMode>("grid");
     const [pinnedUid, setPinnedUid] = useState<string | undefined>(undefined);
     const [activeSpeakerUid, setActiveSpeakerUid] = useState<string | undefined>(undefined);
+    const [reactions, setReactions] = useState<Reaction[]>([]);
+    const [announcement, setAnnouncement] = useState("");
+    const [audioBlocked, setAudioBlocked] = useState(false);
+    const [audioNonce, setAudioNonce] = useState(0);
 
     const managerRef = useRef<MeshConnectionManager | null>(null);
-    const clientRef = useRef<GuestSignalingClient | null>(null);
-    const localStreamRef = useRef(initialStream);
     const screenStreamRef = useRef<MediaStream | null>(null);
-    const cameraTrackRef = useRef<MediaStreamTrack | null>(initialStream.getVideoTracks()[0] ?? null);
     const levelMetersRef = useRef<Record<string, LevelMeterHandle>>({});
-    const isPresentingRef = useRef(false);
+    const reactionSeqRef = useRef(0);
+    const reactionTimersRef = useRef(new Set<ReturnType<typeof setTimeout>>());
+    const isPresenting = !!screenStream;
+
+    const showReaction = useCallback((emoji: string, name: string) => {
+        const id = ++reactionSeqRef.current;
+        setReactions((prev) => [...prev.slice(-(MAX_REACTIONS - 1)), { id, emoji, name }]);
+        const timer = setTimeout(() => {
+            reactionTimersRef.current.delete(timer);
+            setReactions((prev) => prev.filter((reaction) => reaction.id !== id));
+        }, REACTION_MS);
+        reactionTimersRef.current.add(timer);
+    }, []);
 
     useEffect(() => {
         let cancelled = false;
         const client = new GuestSignalingClient({ channel, token });
-        clientRef.current = client;
         const manager = new MeshConnectionManager({
-            selfUid,
+            selfUid: peerId,
             selfName,
             iceServers,
             channel: client,
             createPeerConnection: createBrowserPeerConnection,
-            localStream: localStreamRef.current,
+            localAudioTrack: media.audioTrack,
+            localVideoTrack: media.videoTrack,
+            localState: { audioOn: media.micOn, videoOn: media.cameraOn },
         });
         managerRef.current = manager;
 
@@ -115,6 +152,9 @@ export default function CallView({
             switch (event.type) {
                 case "participant-joined":
                     setParticipants((prev) => [...prev.filter((p) => p.uid !== event.participant.uid), event.participant]);
+                    return;
+                case "participant-updated":
+                    setParticipants((prev) => prev.map((p) => (p.uid === event.participant.uid ? event.participant : p)));
                     return;
                 case "participant-left":
                     setParticipants((prev) => prev.filter((p) => p.uid !== event.uid));
@@ -135,9 +175,16 @@ export default function CallView({
                         setLevels((prev) => ({ ...prev, [event.uid]: level })),
                     );
                     return;
+                case "hand-raised":
+                    playRaisedHandChime();
+                    setAnnouncement(`${event.name} raised a hand`);
+                    return;
+                case "reaction":
+                    showReaction(event.emoji, event.name);
+                    return;
                 case "presenter-changed":
                     setPresenterUid(event.uid);
-                    if (event.uid !== selfUid && isPresentingRef.current) {
+                    if (event.uid !== peerId && screenStreamRef.current) {
                         // Lost a presenter-claim collision (see `MeshConnectionManager`'s doc comment) - stop our
                         // own capture without re-sending a release the manager already handled internally.
                         stopLocalPresentation(false);
@@ -159,8 +206,15 @@ export default function CallView({
                 }
             });
 
+        // A closing tab doesn't unmount React, so say goodbye explicitly - otherwise everyone else keeps a tile for a
+        // participant who is gone.
+        const onPageHide = () => manager.stop();
+        window.addEventListener("pagehide", onPageHide);
+
+        const timers = reactionTimersRef.current;
         return () => {
             cancelled = true;
+            window.removeEventListener("pagehide", onPageHide);
             unsubscribe();
             manager.stop();
             client.close();
@@ -168,12 +222,28 @@ export default function CallView({
                 handle.stop();
             }
             levelMetersRef.current = {};
-            stopStream(localStreamRef.current);
+            // Only the screen capture is this view's to stop - the camera and microphone belong to the page, which
+            // releases them when the participant leaves.
             stopStream(screenStreamRef.current);
+            for (const timer of timers) {
+                clearTimeout(timer);
+            }
+            timers.clear();
         };
         // Deliberately runs once - the call's identity (channel/token/selfUid) never changes for the life of this
         // component; a real identity change is a new call, which unmounts/remounts this view from `[token].tsx`.
     }, []);
+
+    // What is sent follows what the participant has: the camera or the shared screen, and the microphone.
+    useEffect(() => {
+        managerRef.current?.setLocalTrack("audio", media.audioTrack);
+    }, [media.audioTrack]);
+    useEffect(() => {
+        managerRef.current?.setLocalTrack("video", screenStream?.getVideoTracks()[0] ?? media.videoTrack);
+    }, [media.videoTrack, screenStream]);
+    useEffect(() => {
+        managerRef.current?.setLocalState({ audioOn: media.micOn, videoOn: media.cameraOn || isPresenting, handRaised });
+    }, [media.micOn, media.cameraOn, isPresenting, handRaised]);
 
     useEffect(() => {
         if (!presenterUid) {
@@ -182,21 +252,17 @@ export default function CallView({
     }, [levels, presenterUid]);
 
     function stopLocalPresentation(alsoRelease: boolean): void {
-        isPresentingRef.current = false;
-        setIsPresenting(false);
         if (alsoRelease) {
             managerRef.current?.releasePresenter();
         }
         stopStream(screenStreamRef.current);
         screenStreamRef.current = null;
-        // Restores the camera track as the outgoing video sender - its own `enabled` flag (toggled by
-        // `handleToggleCamera`, untouched by presenting) already governs whether it actually sends frames, so
-        // this is correct whether or not the camera happens to be off right now.
-        managerRef.current?.replaceLocalVideoTrack(cameraTrackRef.current);
+        // The sync effect above swaps the camera back in as the outgoing video track.
+        setScreenStream(null);
     }
 
     async function handleToggleShare() {
-        if (isPresenting) {
+        if (screenStreamRef.current) {
             stopLocalPresentation(true);
             return;
         }
@@ -211,112 +277,206 @@ export default function CallView({
             return;
         }
         screenStreamRef.current = result.value;
-        const [screenTrack] = result.value.getVideoTracks();
-        managerRef.current?.replaceLocalVideoTrack(screenTrack);
-        isPresentingRef.current = true;
-        setIsPresenting(true);
-        screenTrack.onended = () => stopLocalPresentation(true);
+        setScreenStream(result.value);
+        result.value.getVideoTracks()[0].onended = () => stopLocalPresentation(true);
     }
 
-    function handleToggleMic() {
-        setMicOn((prev) => {
-            const next = !prev;
-            setTracksEnabled(localStreamRef.current, "audio", next);
-            return next;
-        });
+    function handleToggleHand() {
+        setHandRaised((prev) => !prev);
     }
 
-    function handleToggleCamera() {
-        setCameraOn((prev) => {
-            const next = !prev;
-            // Just the track's own `enabled` flag (see `deviceMedia.ts`'s `setTracksEnabled()` doc comment) -
-            // whether that track is actually the one being sent (camera) or has been swapped out for a screen
-            // share (`replaceLocalVideoTrack()`) is an orthogonal concern this toggle never touches.
-            setTracksEnabled(localStreamRef.current, "video", next);
-            return next;
-        });
-    }
-
-    function handleLeave() {
-        onLeave();
+    function handleReaction(emoji: string) {
+        if (managerRef.current?.sendReaction(emoji)) {
+            showReaction(emoji, "You");
+        }
     }
 
     function togglePin(uid: string) {
         setPinnedUid((prev) => (prev === uid ? undefined : uid));
     }
 
+    function handleAudioBlocked() {
+        setAudioBlocked(true);
+    }
+
+    function handleResumeAudio() {
+        setAudioBlocked(false);
+        setAudioNonce((prev) => prev + 1);
+    }
+
     const otherUids = participants.map((p) => p.uid);
+    // A pin or an active-speaker pick can name someone who has just left, until the state catches up.
+    const stillHere = (uid: string | undefined) => (uid && otherUids.includes(uid) ? uid : undefined);
     const showFocusLayout = !!presenterUid || viewMode === "focus";
-    const mainUid = showFocusLayout ? computeMainUid({ presenterUid, pinnedUid, activeSpeakerUid, otherUids }) : undefined;
-    const presenterName = presenterUid ? (presenterUid === selfUid ? selfName : (participants.find((p) => p.uid === presenterUid)?.name ?? "Someone")) : undefined;
+    const mainUid = showFocusLayout
+        ? computeMainUid({ presenterUid, pinnedUid: stillHere(pinnedUid), activeSpeakerUid: stillHere(activeSpeakerUid), otherUids })
+        : undefined;
+    const presenterName = presenterUid ? (presenterUid === peerId ? selfName : (participants.find((p) => p.uid === presenterUid)?.name ?? "Someone")) : undefined;
+    const raisedNames = [...(handRaised ? ["You"] : []), ...participants.filter((p) => p.handRaised).map((p) => p.name)];
+    const alone = participants.length === 0;
 
-    const localTile = (
-        <ParticipantTile
-            key="__self"
-            name={selfName}
-            stream={isPresenting ? null : localStreamRef.current}
-            isLocal
-            cameraOff={!cameraOn && !isPresenting}
-            micMuted={!micOn}
-            isFocused={mainUid === selfUid}
-            onClick={() => togglePin(selfUid)}
-        />
-    );
-
-    const remoteTiles = participants.map((p) => (
+    const remoteTile = (p: MeshParticipant, className?: string) => (
         <ParticipantTile
             key={p.uid}
             name={p.name}
             stream={remoteStreams[p.uid] ?? null}
-            cameraOff={!remoteStreams[p.uid]}
+            cameraOff={!p.videoOn}
+            micMuted={!p.audioOn}
+            handRaised={p.handRaised}
             isFocused={mainUid === p.uid}
+            contain={presenterUid === p.uid}
+            className={className}
             onClick={() => togglePin(p.uid)}
         />
-    ));
+    );
 
-    const allTiles = [localTile, ...remoteTiles];
-    // The presenter's own screen content is rendered from their local capture, not their (replaced) outgoing
-    // video sender - `mainStream` picks whichever is right for `mainUid`.
-    const mainStream =
-        mainUid === selfUid ? (isPresenting ? screenStreamRef.current : localStreamRef.current) : mainUid ? (remoteStreams[mainUid] ?? null) : null;
-    const mainName = mainUid === selfUid ? selfName : (participants.find((p) => p.uid === mainUid)?.name ?? "");
-    const thumbnailTiles = showFocusLayout ? allTiles.filter((tile) => tile.key !== (mainUid === selfUid ? "__self" : mainUid)) : allTiles;
+    const selfTile = (className?: string) => (
+        <ParticipantTile
+            name={selfName}
+            stream={media.videoStream}
+            isLocal
+            cameraOff={!media.cameraOn}
+            micMuted={!media.micOn}
+            handRaised={handRaised}
+            className={className}
+        />
+    );
 
-    return (
-        <div className="min-h-screen flex flex-col bg-surface-alt">
-            {connectError && <Alert>{connectError}</Alert>}
-            <div className="flex-1 p-3 flex flex-col gap-3 min-h-0">
-                {showFocusLayout && mainUid ? (
-                    <>
-                        <div className="flex-1 min-h-0">
-                            <ParticipantTile name={mainName} stream={mainStream} isLocal={mainUid === selfUid} isFocused className="h-full" />
-                        </div>
-                        <div className="flex gap-2 overflow-x-auto h-24 shrink-0">
-                            {thumbnailTiles.map((tile) => (
-                                <div key={tile.key} className="w-32 shrink-0">
-                                    {tile}
-                                </div>
-                            ))}
-                        </div>
-                    </>
-                ) : (
-                    <div className="flex-1 grid gap-2 [grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]">{allTiles}</div>
+    const mainParticipant = participants.find((p) => p.uid === mainUid);
+    const thumbnails = participants.filter((p) => p.uid !== mainUid);
+
+    let stage: React.ReactNode;
+    if (alone) {
+        // Nobody else yet: the local participant fills the tile area, presenting or not.
+        stage = isPresenting ? (
+            <ParticipantTile name={selfName} stream={screenStream} isLocal contain isFocused className="h-full" />
+        ) : (
+            selfTile("h-full")
+        );
+    } else if (showFocusLayout && (mainParticipant || isPresenting)) {
+        stage = (
+            <div className="h-full flex flex-col gap-2">
+                <div className="flex-1 min-h-0" data-testid="main-tile">
+                    {mainParticipant ? (
+                        remoteTile(mainParticipant, "h-full")
+                    ) : (
+                        <ParticipantTile name={selfName} stream={screenStream} isLocal contain isFocused className="h-full" />
+                    )}
+                </div>
+                {thumbnails.length > 0 && (
+                    <div className="flex gap-2 overflow-x-auto h-24 shrink-0" data-testid="thumbnails">
+                        {thumbnails.map((p) => (
+                            <div key={p.uid} className="w-36 shrink-0">
+                                {remoteTile(p, "h-full")}
+                            </div>
+                        ))}
+                    </div>
                 )}
             </div>
-            <CallControls
-                micOn={micOn}
-                onToggleMic={handleToggleMic}
-                cameraOn={cameraOn}
-                onToggleCamera={handleToggleCamera}
-                isPresenting={isPresenting}
-                presentingElsewhereName={presenterUid && presenterUid !== selfUid ? presenterName : undefined}
-                onToggleShare={handleToggleShare}
-                viewMode={viewMode}
-                onToggleViewMode={() => setViewMode((prev) => (prev === "grid" ? "focus" : "grid"))}
-                onLeave={handleLeave}
-            />
+        );
+    } else {
+        stage = (
+            <div className="h-full grid gap-2 auto-rows-fr [grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr))]">
+                {participants.map((p) => remoteTile(p, "h-full"))}
+            </div>
+        );
+    }
+
+    return (
+        <div className="fixed inset-0 z-50 flex flex-col bg-[#202124] text-white overflow-hidden">
+            <style>{`@keyframes meet-float { 0% { transform: translateY(0) scale(.6); opacity: 0; } 12% { opacity: 1; transform: translateY(-4vh) scale(1); } 100% { transform: translateY(-45vh) scale(1); opacity: 0; } }`}</style>
+            <header className="shrink-0 flex items-center justify-between gap-3 px-4 py-3">
+                <h1 className="min-w-0 truncate text-base font-medium">{meetingTitle}</h1>
+                <div className="flex items-center gap-2 shrink-0">
+                    {raisedNames.length > 0 && (
+                        <span className="max-w-[45vw] truncate px-3 py-1.5 rounded-full bg-[#a8c7fa] text-[#062e6f] text-sm font-medium" data-testid="raised-hands">
+                            ✋ {raisedNames.join(", ")}
+                        </span>
+                    )}
+                    <span className="px-3 py-1.5 rounded-full bg-[#3c4043] text-sm" aria-label={`${participants.length + 1} participants`}>
+                        {participants.length + 1}
+                    </span>
+                </div>
+            </header>
+            {connectError && (
+                <div role="alert" className="shrink-0 mx-3 mb-2 px-3 py-2 rounded-lg bg-[#601410] text-[#f9dedc] text-sm">
+                    {connectError}
+                </div>
+            )}
+            {audioBlocked && (
+                <button
+                    type="button"
+                    className="shrink-0 mx-3 mb-2 px-3 py-2 rounded-lg bg-[#a8c7fa] text-[#062e6f] text-sm font-medium"
+                    onClick={handleResumeAudio}
+                >
+                    Click here to turn on sound
+                </button>
+            )}
+            <main className="relative flex-1 min-h-0 px-3 pb-3">
+                {stage}
+                {presenterName && presenterUid !== peerId && (
+                    <p className="absolute top-2 left-5 px-2 py-0.5 rounded bg-black/60 text-sm">{presenterName} is presenting</p>
+                )}
+            </main>
+            <footer className="shrink-0 pt-1 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+                <CallControls
+                    media={media}
+                    isPresenting={isPresenting}
+                    presentingElsewhereName={presenterUid && presenterUid !== peerId ? presenterName : undefined}
+                    onToggleShare={() => void handleToggleShare()}
+                    handRaised={handRaised}
+                    onToggleHand={handleToggleHand}
+                    onReaction={handleReaction}
+                    viewMode={viewMode}
+                    onToggleViewMode={() => setViewMode((prev) => (prev === "grid" ? "focus" : "grid"))}
+                    onLeave={onLeave}
+                />
+            </footer>
+
+            {!alone && (
+                <div
+                    className="absolute z-10 right-3 top-14 w-28 sm:top-auto sm:bottom-24 sm:w-52 aspect-video shadow-xl xl:right-4 xl:bottom-4"
+                    data-testid="self-view"
+                >
+                    {selfTile("h-full")}
+                </div>
+            )}
+
+            <div className="pointer-events-none absolute left-4 bottom-28 w-40 h-[45vh]" aria-hidden="true">
+                {reactions.map((reaction) => (
+                    <div
+                        key={reaction.id}
+                        className="absolute bottom-0 flex flex-col items-center"
+                        style={{ left: `${(reaction.id % 4) * 36}px`, animation: `meet-float ${REACTION_MS}ms ease-out forwards` }}
+                        data-testid="reaction"
+                    >
+                        <span className="text-4xl leading-none">{reaction.emoji}</span>
+                        <span className="mt-1 px-1.5 rounded-full bg-[#a8c7fa] text-[#062e6f] text-xs">{reaction.name}</span>
+                    </div>
+                ))}
+            </div>
+
+            {participants.map((p) => {
+                const stream = remoteStreams[p.uid];
+                return stream ? <RemoteAudio key={`${p.uid}:${audioNonce}`} stream={stream} onBlocked={handleAudioBlocked} /> : null;
+            })}
+            <div role="status" aria-live="polite" className="sr-only">
+                {announcement}
+            </div>
         </div>
     );
+}
+
+/** Plays one remote participant's stream through a hidden `<audio>` element. `onBlocked` fires if the browser
+ * refuses to start it (an autoplay policy) - the view then asks for a click. */
+function RemoteAudio({ stream, onBlocked }: { stream: MediaStream; onBlocked: () => void }) {
+    const audioRef = useRef<HTMLAudioElement>(null);
+    useEffect(() => {
+        const element = audioRef.current!;
+        element.srcObject = stream;
+        void Promise.resolve(element.play()).catch(onBlocked);
+    }, [stream, onBlocked]);
+    return <audio ref={audioRef} autoPlay data-testid="remote-audio" />;
 }
 
 function stopLevelMeter(ref: React.MutableRefObject<Record<string, LevelMeterHandle>>, uid: string): void {
