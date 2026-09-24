@@ -120,8 +120,8 @@
                     "key": "mail:videoconf:public_url",
                     "label": "Public join page URL",
                     "type": "string",
-                    "default": "",
-                    "help": "The address of the public join pages, for example https://mail.example.com/meet. Calendar invites include a join link only when this is set."
+                    "default": "https://<host>/meet",
+                    "help": "The address of the public join pages. Filled in with this server's address when the plugin is installed. Calendar invites include a join link only when this is set."
                 },
                 {
                     "key": "mail:videoconf:turn:url",

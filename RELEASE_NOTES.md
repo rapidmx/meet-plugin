@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- **The "Public join page URL" setting defaults to `https://<host>/meet`**, which the server saves with its own host when the plugin is installed, so join links in calendar invites work with no further steps. Needs `@rapidmx/restapi` with `<host>` defaults; an older server saves nothing for it, as before, and the admin console's form offers the address to save.
+
 ## v0.2.0
 
 ### Phase 1: data model, routes and signaling

@@ -85,7 +85,7 @@ describe("plugin manifest", () => {
         expect(manifest).toEqual(expect.objectContaining({ displayName: "Video Conferencing", mailboxScopedData: true }));
     });
 
-    it("declares the videoconf settings, each empty by default", () => {
+    it("declares the videoconf settings, each empty by default but the join page URL, which offers this server's address", () => {
         const manifest: any = parsePluginManifest(pkg);
         expect(manifest.settings.map((s: any) => s.key)).toEqual([
             "mail:videoconf:public_url",
@@ -95,7 +95,7 @@ describe("plugin manifest", () => {
             "mail:videoconf:turn:shared_secret",
         ]);
         for (const setting of manifest.settings) {
-            expect(setting.default).toBe("");
+            expect(setting.default).toBe(setting.key === "mail:videoconf:public_url" ? "https://<host>/meet" : "");
         }
     });
 
