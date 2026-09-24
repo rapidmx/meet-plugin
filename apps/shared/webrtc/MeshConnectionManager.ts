@@ -75,8 +75,8 @@ import {
 } from "./types.js";
 
 /** The lexicographically smaller uid is always the offerer for that pair - see this module's doc comment. */
-export function isOfferer(selfUid: string, peerUid: string): boolean {
-    return selfUid < peerUid;
+export function isOfferer(selfId: string, peerId: string): boolean {
+    return selfId < peerId;
 }
 
 /** How many peers' worth of early ICE candidates are held, and how many candidates per peer - bounds the memory a
@@ -96,7 +96,11 @@ interface PeerState extends MeshParticipant {
 }
 
 export interface MeshConnectionManagerOptions {
+    /** The authenticated uid - what `from` must be on the wire (see `SignalMessage.from`). */
     selfUid: string;
+    /** This tab's identity in the call, `<selfUid>~<random>` - defaults to `selfUid`. Everything the manager keys on
+     * (the roster, who offers, who presents) is a peer id, so two tabs of one account are two participants. */
+    peerId?: string;
     selfName: string;
     iceServers: RTCIceServer[];
     channel: SignalingChannel;
@@ -122,8 +126,10 @@ export class MeshConnectionManager {
     private started = false;
     private stopped = false;
     private currentPresenterUid: string | undefined;
+    private readonly selfId: string;
 
     constructor(private readonly options: MeshConnectionManagerOptions) {
+        this.selfId = options.peerId ?? options.selfUid;
         this.localTracks = { audio: options.localAudioTrack ?? null, video: options.localVideoTrack ?? null };
         this.localState = {
             audioOn: !!options.localAudioTrack,
@@ -213,10 +219,10 @@ export class MeshConnectionManager {
      * else already presents - the caller (`_CallView.tsx`) uses this to disable its own "share screen" control
      * rather than let a claim silently do nothing. */
     claimPresenter(): boolean {
-        if (this.currentPresenterUid !== undefined && this.currentPresenterUid !== this.options.selfUid) {
+        if (this.currentPresenterUid !== undefined && this.currentPresenterUid !== this.selfId) {
             return false;
         }
-        this.currentPresenterUid = this.options.selfUid;
+        this.currentPresenterUid = this.selfId;
         this.send({ kind: "presenter-claim" });
         this.emit({ type: "presenter-changed", uid: this.currentPresenterUid });
         return true;
@@ -224,7 +230,7 @@ export class MeshConnectionManager {
 
     /** Releases presenter status - a no-op unless the local participant currently holds it. */
     releasePresenter(): void {
-        if (this.currentPresenterUid !== this.options.selfUid) {
+        if (this.currentPresenterUid !== this.selfId) {
             return;
         }
         this.currentPresenterUid = undefined;
@@ -237,7 +243,7 @@ export class MeshConnectionManager {
     }
 
     private send(partial: Omit<SignalMessage, "type" | "from">): void {
-        this.options.channel.send({ type: "video-meeting-signal", from: this.options.selfUid, ...partial });
+        this.options.channel.send({ type: "video-meeting-signal", from: this.options.selfUid, peer: this.selfId, ...partial });
     }
 
     private emit(event: MeshEvent): void {
@@ -246,11 +252,19 @@ export class MeshConnectionManager {
         }
     }
 
-    private handleMessage(message: SignalMessage): void {
-        if (message.type !== "video-meeting-signal" || message.from === this.options.selfUid) {
+    private handleMessage(raw: SignalMessage): void {
+        if (raw.type !== "video-meeting-signal") {
             return;
         }
-        if (message.to !== undefined && message.to !== this.options.selfUid) {
+        // From here on `from` is the sender's peer id - see `SignalMessage.peer`.
+        if (raw.peer !== undefined && raw.peer !== raw.from && !raw.peer.startsWith(`${raw.from}~`)) {
+            return;
+        }
+        const message: SignalMessage = { ...raw, from: raw.peer ?? raw.from };
+        if (message.from === this.selfId) {
+            return;
+        }
+        if (message.to !== undefined && message.to !== this.selfId) {
             return;
         }
         switch (message.kind) {
@@ -291,7 +305,7 @@ export class MeshConnectionManager {
             this.updatePeer(known, message.name, message.state);
             return;
         }
-        const offerer = isOfferer(this.options.selfUid, message.from);
+        const offerer = isOfferer(this.selfId, message.from);
         const peer = this.createPeer(message.from, message.name ?? message.from, message.state, offerer);
         this.emit({ type: "participant-joined", participant: toParticipant(peer) });
         // Let a newcomer who couldn't have seen our own original `hello` learn about us too - see this module's
@@ -481,12 +495,12 @@ export class MeshConnectionManager {
         // Collision: a claim from someone other than the presenter we already recorded. Resolve deterministically
         // - see this module's doc comment - so every participant converges on the same winner. When the
         // already-recorded presenter has the smaller uid, it wins and nothing changes here - including when that
-        // presenter is `this.options.selfUid` itself, whose own optimistic claim simply stays in place.
+        // presenter is this participant itself, whose own optimistic claim simply stays in place.
         if (from < this.currentPresenterUid) {
             const loser = this.currentPresenterUid;
             this.currentPresenterUid = from;
             this.emit({ type: "presenter-changed", uid: from });
-            if (loser === this.options.selfUid) {
+            if (loser === this.selfId) {
                 this.send({ kind: "presenter-release" });
             }
         }

@@ -14,7 +14,8 @@ function manualChannel(): SignalingChannel & { emit: (message: SignalMessage) =>
     const sent: SignalMessage[] = [];
     return {
         sent,
-        send: (message) => sent.push(message),
+        // `peer` defaults to `from`, so it is only kept where a test gave the manager a distinct peer id.
+        send: (message) => sent.push(message.peer === message.from ? { ...message, peer: undefined } : message),
         onMessage: (handler) => {
             handlers.add(handler);
             return () => handlers.delete(handler);
@@ -93,6 +94,56 @@ const signal = (kind: SignalMessage["kind"], from: string, rest: Partial<SignalM
 });
 const offer = (from: string, to: string): SignalMessage => signal("offer", from, { to, sdp: { type: "offer", sdp: "remote-offer" } });
 const STATE = { audioOn: true, videoOn: true, handRaised: false };
+
+describe("MeshConnectionManager - peer ids", () => {
+    it("publishes as the authenticated uid and names its own tab in 'peer'", async () => {
+        const { manager, channel } = setup({ selfUid: "user-1", peerId: "user-1~abc" });
+        manager.start();
+        channel.emit(hello("z", "Zed"));
+        await flush();
+        expect(channel.sent.length).toBeGreaterThan(1);
+        for (const message of channel.sent) {
+            expect(message).toMatchObject({ from: "user-1", peer: "user-1~abc" });
+        }
+    });
+
+    it("identifies a sender by its peer, so two tabs of one account are two participants that see each other", async () => {
+        const { manager, channel, events } = setup({ selfUid: "user-1", peerId: "user-1~aaa" });
+        manager.start();
+        // Its own messages (same peer) are ignored, but the same account's other tab is a participant.
+        channel.emit({ ...hello("user-1", "Me"), peer: "user-1~aaa" });
+        expect(manager.participants).toEqual([]);
+        channel.emit({ ...hello("user-1", "Me on my phone", STATE), peer: "user-1~bbb" });
+        await flush();
+        expect(manager.participants).toEqual([{ uid: "user-1~bbb", name: "Me on my phone", ...STATE }]);
+        expect(events).toContainEqual({ type: "participant-joined", participant: { uid: "user-1~bbb", name: "Me on my phone", ...STATE } });
+        // Point-to-point messages address the peer, not the account.
+        expect(channel.sent).toContainEqual(expect.objectContaining({ kind: "offer", to: "user-1~bbb" }));
+    });
+
+    it("only answers messages addressed to its own peer id", async () => {
+        const { manager, channel } = setup({ selfUid: "user-1", peerId: "user-1~aaa" });
+        manager.start();
+        channel.emit({ ...signal("offer", "z", { to: "user-1", sdp: { type: "offer", sdp: "x" } }) });
+        channel.emit({ ...signal("offer", "z", { to: "user-1~bbb", sdp: { type: "offer", sdp: "x" } }) });
+        await flush();
+        expect(manager.participants).toEqual([]);
+        channel.emit({ ...signal("offer", "z", { to: "user-1~aaa", sdp: { type: "offer", sdp: "x" } }) });
+        await flush();
+        expect(manager.participants).toHaveLength(1);
+    });
+
+    it("ignores a peer id that doesn't belong to the sender's verified uid", () => {
+        const { manager, channel } = setup();
+        manager.start();
+        channel.emit({ ...hello("mallory", "Mallory"), peer: "victim~1" });
+        channel.emit({ ...hello("mallory", "Mallory"), peer: "mallory-x~1" });
+        expect(manager.participants).toEqual([]);
+        channel.emit({ ...hello("mallory", "Mallory"), peer: "mallory~1" });
+        expect(manager.participants).toHaveLength(1);
+        expect(manager.participants[0].uid).toBe("mallory~1");
+    });
+});
 
 describe("isOfferer", () => {
     it("is true for the lexicographically smaller uid", () => {

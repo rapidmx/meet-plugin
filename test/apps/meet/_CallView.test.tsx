@@ -164,9 +164,17 @@ describe("CallView - connecting", () => {
     it("connects, starts the mesh under its own peer id, and announces its name and what it sends", async () => {
         const { client } = await connected();
         expect(client.opts).toEqual({ channel: "meeting-1", token: "guest-token" });
-        expect(client.sent).toContainEqual({ type: "video-meeting-signal", kind: "hello", from: SELF, name: "Alice", state: STATE });
+        expect(client.sent).toContainEqual({ type: "video-meeting-signal", kind: "hello", from: "local-me", peer: SELF, name: "Alice", state: STATE });
         expect(screen.getByRole("heading", { name: "Standup" })).toBeInTheDocument();
         expect(screen.getByLabelText("1 participants")).toBeInTheDocument();
+    });
+
+    it("publishes as the authenticated uid - the server refuses any other 'from' - and names its tab in 'peer'", async () => {
+        const { client } = await connected({ selfUid: "user-1" });
+        for (const message of client.sent) {
+            expect(message.from).toBe("user-1");
+            expect(message.peer).toBe("user-1~fixed");
+        }
     });
 
     it("announces a muted microphone and a camera that is off as they are", async () => {
@@ -226,7 +234,7 @@ describe("CallView - connecting", () => {
         act(() => {
             window.dispatchEvent(new Event("pagehide"));
         });
-        expect(client.sent).toContainEqual({ type: "video-meeting-signal", kind: "bye", from: SELF });
+        expect(client.sent).toContainEqual({ type: "video-meeting-signal", kind: "bye", from: "local-me", peer: SELF });
 
         const screenTrack = fakeTrack("video", "screen");
         displayMediaMock.mockResolvedValueOnce({ ok: true, value: fakeMediaStream([screenTrack]) });
@@ -411,7 +419,7 @@ describe("CallView - raising a hand", () => {
         const { client } = await connected();
         fireEvent.click(screen.getByRole("button", { name: "Raise hand" }));
 
-        expect(client.sent).toContainEqual({ type: "video-meeting-signal", kind: "state", from: SELF, state: { ...STATE, handRaised: true } });
+        expect(client.sent).toContainEqual({ type: "video-meeting-signal", kind: "state", from: "local-me", peer: SELF, state: { ...STATE, handRaised: true } });
         expect(screen.getByTestId("raised-hands")).toHaveTextContent("You");
         expect(screen.getByRole("button", { name: "Lower hand" })).toBeInTheDocument();
         expect(screen.getByRole("img", { name: "Hand raised" })).toBeInTheDocument();
@@ -419,7 +427,7 @@ describe("CallView - raising a hand", () => {
         expect(chimeMock).not.toHaveBeenCalled();
 
         fireEvent.click(screen.getByRole("button", { name: "Lower hand" }));
-        expect(client.sent).toContainEqual({ type: "video-meeting-signal", kind: "state", from: SELF, state: STATE });
+        expect(client.sent).toContainEqual({ type: "video-meeting-signal", kind: "state", from: "local-me", peer: SELF, state: STATE });
         expect(screen.queryByTestId("raised-hands")).toBeNull();
     });
 
@@ -452,7 +460,7 @@ describe("CallView - reactions", () => {
         fireEvent.click(screen.getByRole("button", { name: "Send a reaction" }));
         fireEvent.click(screen.getByRole("menuitem", { name: `Send ${REACTION_EMOJIS[3]}` }));
 
-        expect(client.sent).toContainEqual({ type: "video-meeting-signal", kind: "reaction", from: SELF, emoji: REACTION_EMOJIS[3] });
+        expect(client.sent).toContainEqual({ type: "video-meeting-signal", kind: "reaction", from: "local-me", peer: SELF, emoji: REACTION_EMOJIS[3] });
         const reaction = screen.getByTestId("reaction");
         expect(reaction).toHaveTextContent(REACTION_EMOJIS[3]);
         expect(reaction).toHaveTextContent("You");
@@ -502,7 +510,7 @@ describe("CallView - what is sent follows the local media", () => {
 
         expect(pc.senders.audio!.replaceTrack).toHaveBeenLastCalledWith(newAudio);
         expect(pc.senders.video!.replaceTrack).toHaveBeenLastCalledWith(newVideo);
-        expect(client.sent).toContainEqual({ type: "video-meeting-signal", kind: "state", from: SELF, state: { audioOn: false, videoOn: false, handRaised: false } });
+        expect(client.sent).toContainEqual({ type: "video-meeting-signal", kind: "state", from: "local-me", peer: SELF, state: { audioOn: false, videoOn: false, handRaised: false } });
     });
 
     it("sends the shared screen in place of the camera while presenting, and the camera again after", async () => {
@@ -515,14 +523,14 @@ describe("CallView - what is sent follows the local media", () => {
         fireEvent.click(screen.getByRole("button", { name: "Share screen" }));
         await screen.findByRole("button", { name: "Stop sharing" });
         expect(pc.senders.video!.replaceTrack).toHaveBeenLastCalledWith(screenTrack);
-        expect(client.sent).toContainEqual({ type: "video-meeting-signal", kind: "presenter-claim", from: SELF });
+        expect(client.sent).toContainEqual({ type: "video-meeting-signal", kind: "presenter-claim", from: "local-me", peer: SELF });
         // The presenter is main tile, showing their screen fitted rather than cropped.
         expect(screen.getByTestId("main-tile").querySelector("video")!.className).toContain("object-contain");
 
         fireEvent.click(screen.getByRole("button", { name: "Stop sharing" }));
         expect(screen.getByRole("button", { name: "Share screen" })).toBeInTheDocument();
         expect(pc.senders.video!.replaceTrack).toHaveBeenLastCalledWith(media.videoTrack);
-        expect(client.sent).toContainEqual({ type: "video-meeting-signal", kind: "presenter-release", from: SELF });
+        expect(client.sent).toContainEqual({ type: "video-meeting-signal", kind: "presenter-release", from: "local-me", peer: SELF });
         expect(screenTrack.stop).toHaveBeenCalled();
     });
 

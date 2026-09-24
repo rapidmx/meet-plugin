@@ -567,3 +567,11 @@ JP tried a real meeting on Edge (PC) and a phone: permission was never asked on 
 - The "participant with zero tracks negotiates no media" limitation in the Phase 2 entry above is fixed by this change.
 - Speaker (output device) selection isn't offered - only the microphone and camera pickers were asked for.
 - Session-based name prefill is still not implemented (see Phase 2).
+
+## 2026-09-24: Fix - nobody could join once deployed: the server refuses a `from` that isn't the authenticated uid
+
+Right after the entry above was deployed to mail.powerlevel.gg, two devices on one meeting URL each sat alone. Reproduced from Node against the live server (two guests via `GET .../join/:token`, `wss://<host>/push` with the guest JWT as the `jwt` cookie, `POST /push/:meetingUid` with a bearer token): every message from the page came back **400 `api-003`, "A published message's own 'from' field must match the authenticated ..."** - the restapi fix the round-3 review note above called for (`MailPushRoute.send()` binds `from` to the caller's uid) is now live. I had made `from` `<uid>~<random>` (see "Same account, two devices" above), so every hello/offer/candidate was dropped and nobody ever saw anyone. Unit tests could not catch it: `GuestSignalingClient` is faked there, and the backend push tests don't publish signaling messages from `apps/`.
+
+**Fix**: `from` is again exactly the authenticated uid. The per-tab identity moved to a separate `peer` field (`<uid>~<random>`, `CallView`'s `newPeerId()`, passed to the manager as `peerId`). `MeshConnectionManager.handleMessage()` normalizes at the boundary - the sender is `peer ?? from` and everything downstream (roster, `isOfferer`, `to`, presenter) is keyed by peer id - and drops a message whose `peer` is neither `from` nor `from~...`, so the server's anti-impersonation binding still holds (a participant can only name their own tabs). Verified against the live server afterwards: `from` = exact uid with `peer` and `state` fields is accepted (204) and delivered to every subscriber intact.
+
+**Lesson**: anything that changes what `apps/` publishes to `/push` must be checked against the real server's `POST /push/:id` validation, not just the fakes. The Node recipe above (about 40 lines, no browser needed) is the quick way; run it after any change to the signaling wire format.

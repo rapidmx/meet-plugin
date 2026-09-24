@@ -45,10 +45,16 @@ export interface SignalMessage {
         | "presenter-release"
         | "state"
         | "reaction";
-    /** The sender's per-call peer id - `CallView` derives it from `VideoMeetingJoinResult.selfUid` plus a random
-     * suffix, so the same account joining from two devices (or two tabs) is two participants, not one that ignores
-     * its own messages. */
+    /** The sender's authenticated uid - the real caller's own uid when `join()` returned `authenticated: true`, else
+     * the `guest:<random>` uid `BaseVideoMeetingRoute.join()` minted. The server refuses a published message whose
+     * `from` isn't the authenticated caller's uid (it stops one participant speaking as another), so this must be
+     * exactly that uid. */
     from: string;
+    /** Which of the sender's tabs or devices this is: `<from>~<random>`. The same account joining from two devices is
+     * two participants, not one that ignores its own messages. A `peer` that doesn't start with `<from>~` is
+     * ignored, so it can't name someone else's tab. Absent from a sender that predates it (the participant is then
+     * identified by `from`). */
+    peer?: string;
     /** Set only on a point-to-point message (`offer`/`answer`/`ice-candidate`). */
     to?: string;
     /** `hello` only - the display name the sender chose in the lobby. */

@@ -93,8 +93,9 @@ export function computeMainUid(options: {
     return options.otherUids[0];
 }
 
-/** This tab's identity on the signaling channel: the account (or guest) uid plus a random suffix, so the same
- * account joining from two devices - or two tabs - is two participants rather than one that ignores itself. */
+/** This tab's identity in the call: the account (or guest) uid plus a random suffix, so the same account joining
+ * from two devices - or two tabs - is two participants rather than one that ignores itself. It travels as the
+ * `peer` of each message; `from` stays the exact authenticated uid, which the server requires. */
 export function newPeerId(selfUid: string): string {
     return `${selfUid}~${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)}`;
 }
@@ -137,7 +138,8 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
         let cancelled = false;
         const client = new GuestSignalingClient({ channel, token });
         const manager = new MeshConnectionManager({
-            selfUid: peerId,
+            selfUid,
+            peerId,
             selfName,
             iceServers,
             channel: client,
