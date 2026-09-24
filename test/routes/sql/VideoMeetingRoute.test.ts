@@ -13,7 +13,7 @@ import { JWTUtils, Logger } from "@rapidrest/core";
 import { MailPushRoute } from "@rapidmx/restapi";
 import * as uuid from "uuid";
 import { Repository } from "typeorm";
-import { MailboxSQL } from "@rapidmx/restapi/sql";
+import { CalendarEventAttendeeLinkSQL, MailboxSQL } from "@rapidmx/restapi/sql";
 import { VideoMeetingSQL } from "../../../src/models/sql/VideoMeetingSQL.js";
 import { VideoMeetingInviteeSQL } from "../../../src/models/sql/VideoMeetingInviteeSQL.js";
 import { VideoMeetingStatus, VideoMeetingVisibility } from "../../../src/models/types.js";
@@ -32,6 +32,7 @@ describe("Route:VideoMeetingSQL Tests", () => {
     let mailboxRepo: Repository<MailboxSQL>;
     let meetingRepo: Repository<VideoMeetingSQL>;
     let inviteeRepo: Repository<VideoMeetingInviteeSQL>;
+    let linkRepo: Repository<CalendarEventAttendeeLinkSQL>;
     let aclRepo: Repository<AccessControlListSQL>;
 
     let mailbox: MailboxSQL;
@@ -44,6 +45,8 @@ describe("Route:VideoMeetingSQL Tests", () => {
     const adminToken = JWTUtils.createTokenSync(config.get("auth"), admin);
     const delegate: any = { uid: uuid.v4(), roles: [], scopes: [], elevated: Date.now() };
     const delegateToken = JWTUtils.createTokenSync(config.get("auth"), delegate);
+
+    const findLinks = async (): Promise<CalendarEventAttendeeLinkSQL[]> => await linkRepo.find();
 
     const authed = (token: string) => ({
         get: (url: string) => request(server.getApplication()).get(url).set("Authorization", "jwt " + token),
@@ -67,6 +70,7 @@ describe("Route:VideoMeetingSQL Tests", () => {
             mailboxRepo = conn.getRepository(MailboxSQL);
             meetingRepo = conn.getRepository(VideoMeetingSQL);
             inviteeRepo = conn.getRepository(VideoMeetingInviteeSQL);
+            linkRepo = conn.getRepository(CalendarEventAttendeeLinkSQL);
         } else {
             throw new Error("Could not find sql connection");
         }
@@ -79,7 +83,7 @@ describe("Route:VideoMeetingSQL Tests", () => {
 
     beforeEach(async () => {
         // Child rows first - these tables are shared on disk with every other SQL test file in the run.
-        for (const repo of [inviteeRepo, meetingRepo, mailboxRepo]) {
+        for (const repo of [linkRepo, inviteeRepo, meetingRepo, mailboxRepo]) {
             await repo.clear();
         }
         mailbox = await mailboxRepo.save(
@@ -311,6 +315,89 @@ describe("Route:VideoMeetingSQL Tests", () => {
         it("Returns 404 for an unknown id.", async () => {
             const result = await authed(ownerToken).delete(`${baseUrl}/${uuid.v4()}`);
             expect(result.status).toBe(404);
+        });
+    });
+
+    describe("calendar invite attendee links", () => {
+        const privateBody = (extra: Record<string, any> = {}) => ({
+            mailboxUid: mailbox.uid,
+            title: "Invite Links",
+            visibility: "private",
+            calendarEventUid: "event-1",
+            invitees: [{ email: "  Grace@Example.com " }, { email: "alan@example.com" }],
+            ...extra,
+        });
+
+        it("Writes one link per invitee for a private meeting with a calendarEventUid, carrying that invitee's exact join URL and normalized address.", async () => {
+            const result = await authed(ownerToken).post(baseUrl).send(privateBody());
+
+            expect(result.status).toBe(200);
+            const links = await findLinks();
+            expect(links).toHaveLength(2);
+            for (const invitee of result.body.invitees) {
+                const link = links.find((l) => l.attendeeAddress === invitee.email)!;
+                expect(link).toBeDefined();
+                expect(link.url).toBe(invitee.joinUrl);
+                expect(link.mailboxUid).toBe(mailbox.uid);
+                expect(link.calendarEventUid).toBe("event-1");
+                expect(link.label).toBe("Join video call");
+            }
+            expect(links.map((l) => l.attendeeAddress).sort()).toEqual(["alan@example.com", "grace@example.com"]);
+            // Each invitee's link is their own: no two share a URL, and none is the organizer's link.
+            expect(new Set(links.map((l) => l.url)).size).toBe(2);
+            expect(links.map((l) => l.url)).not.toContain(result.body.organizerJoinUrl);
+        });
+
+        it("Writes no links for a public meeting, even with a calendarEventUid.", async () => {
+            const result = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "Town Hall", visibility: "public", calendarEventUid: "event-1" });
+            expect(result.status).toBe(200);
+            expect(await findLinks()).toHaveLength(0);
+        });
+
+        it("Writes no links for a private meeting with no calendarEventUid.", async () => {
+            const result = await authed(ownerToken).post(baseUrl).send(privateBody({ calendarEventUid: undefined }));
+            expect(result.status).toBe(200);
+            expect(await findLinks()).toHaveLength(0);
+        });
+
+        it("Writes no links when no public url is configured (there is no join URL to put in one).", async () => {
+            const route: any = objectFactory.getInstance("routes.VideoMeetingRoute");
+            const original = route.publicUrl;
+            route.publicUrl = "";
+            try {
+                const result = await authed(ownerToken).post(baseUrl).send(privateBody());
+                expect(result.status).toBe(200);
+                expect(await findLinks()).toHaveLength(0);
+            } finally {
+                route.publicUrl = original;
+            }
+        });
+
+        it("Deletes the meeting's links with the meeting, leaving other events' and other meetings' links alone.", async () => {
+            const first = await authed(ownerToken).post(baseUrl).send(privateBody());
+            const sameEvent = await authed(ownerToken).post(baseUrl).send(privateBody({ invitees: [{ email: "zed@example.com" }] }));
+            const otherEvent = await authed(ownerToken).post(baseUrl).send(privateBody({ calendarEventUid: "event-2" }));
+            expect(await findLinks()).toHaveLength(5);
+
+            const result = await authed(ownerToken).delete(`${baseUrl}/${first.body.meeting.uid}`);
+
+            expect(result.status).toBe(204);
+            const remaining = await findLinks();
+            expect(remaining.map((l) => l.url).sort()).toEqual(
+                [...sameEvent.body.invitees, ...otherEvent.body.invitees].map((i: any) => i.joinUrl).sort(),
+            );
+        });
+
+        it("Deletes the meeting's links when it is cancelled, but keeps them for an ordinary title update.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send(privateBody());
+
+            const renamed = await authed(ownerToken).put(`${baseUrl}/${created.body.meeting.uid}`).send({ title: "Renamed" });
+            expect(renamed.status).toBe(200);
+            expect(await findLinks()).toHaveLength(2);
+
+            const cancelled = await authed(ownerToken).put(`${baseUrl}/${created.body.meeting.uid}`).send({ status: "cancelled" });
+            expect(cancelled.status).toBe(200);
+            expect(await findLinks()).toHaveLength(0);
         });
     });
 

@@ -24,6 +24,7 @@
 - **A participant who closed the tab stayed in everyone else's call.** The goodbye is now sent when the page is closed.
 - **Access to the camera and microphone is asked for in a way more browsers honor**: once when the lobby opens and again from a button (a click is a user gesture, which some browsers require before they will prompt), with each device asked for on its own if the pair can't be satisfied together.
 - **The lobby's camera preview went blank after turning the camera off and on again.**
+- **A private meeting's invitees now receive their own join link in the calendar invite.** `create()` wrote the meeting and its invitees but never the `CalendarEventAttendeeLink` rows `MeetingSchedulingJob` reads to personalize each attendee's invite, so every invitee got only the event's placeholder location and no link in the body. For a private meeting with a `calendarEventUid`, one link per invitee (their exact join URL, address normalized) is now written in the same transaction as the meeting, and removed again when the meeting is cancelled or deleted. Nothing is written for a public meeting, a meeting with no event, or when `mail:videoconf:public_url` isn't set. Needs `@rapidmx/restapi` 0.19.0 or later, which added the model; the peer floor is raised to match. A meeting created before this fix has no links and needs to be re-created.
 
 ## v0.2.0
 

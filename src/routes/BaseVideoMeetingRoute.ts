@@ -18,7 +18,7 @@ import {
     RouteDecorators,
     type AccessControlList,
 } from "@rapidrest/service-core";
-import { Mailbox } from "@rapidmx/restapi";
+import { CalendarEventAttendeeLink, Mailbox } from "@rapidmx/restapi";
 import { buildIceServers, IceServerConfig } from "../util/IceServerUtils.js";
 import { buildBaseUrl } from "../util/PublicUrlUtils.js";
 import { stripTrustedRoles } from "../util/RouteAccessUtils.js";
@@ -58,6 +58,9 @@ export const GUEST_UID_PREFIX = "guest:";
 /** How many times `ensureChannelGrant()` retries an optimistic-lock conflict on the meeting's own ACL before
  * giving up - see that method's doc comment. */
 const GUEST_GRANT_MAX_ATTEMPTS = 5;
+
+/** The `label` of every `CalendarEventAttendeeLink` `persistMeeting()` writes. */
+const ATTENDEE_LINK_LABEL = "Join video call";
 
 /** The request body accepted by `create()`. */
 export interface CreateVideoMeetingBody {
@@ -290,6 +293,9 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     protected abstract meetingClass: any;
     protected abstract inviteeClass: any;
     protected abstract mailboxClass: any;
+    /** The concrete `CalendarEventAttendeeLink` class for this backend (`CalendarEventAttendeeLinkMongo`/
+     * `CalendarEventAttendeeLinkSQL`, from `@rapidmx/restapi`) - see `persistMeeting()`. */
+    protected abstract attendeeLinkClass: any;
 
     // Automatically injected by ObjectFactory on instantiation
     private _objectFactory?: ObjectFactory;
@@ -297,6 +303,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     private meetingRepo?: RepoUtils<VM>;
     private inviteeRepo?: RepoUtils<VMI>;
     private mailboxRepo?: RepoUtils<M>;
+    private attendeeLinkRepo?: RepoUtils<CalendarEventAttendeeLink>;
 
     @Inject(ACLUtils)
     private aclUtils?: ACLUtils;
@@ -349,6 +356,12 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         }
         if (!this.mailboxRepo) {
             this.mailboxRepo = await this._objectFactory!.newInstance(RepoUtils, { name: this.mailboxClass.name, args: [this.mailboxClass] });
+        }
+        if (!this.attendeeLinkRepo) {
+            this.attendeeLinkRepo = await this._objectFactory!.newInstance(RepoUtils, {
+                name: this.attendeeLinkClass.name,
+                args: [this.attendeeLinkClass],
+            });
         }
     }
 
@@ -488,8 +501,58 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
                     ),
                 );
             }
+
+            // The meeting's calendar event is invited by `MeetingSchedulingJob`, which gives each attendee their own
+            // `LOCATION`/body link from the `CalendarEventAttendeeLink` rows written for that event here - without
+            // them every invitee only receives the event's shared placeholder location, never a working join link.
+            // Written in this same transaction, so a meeting never exists without the links its invite needs.
+            if (meeting.calendarEventUid) {
+                for (const invitee of invitees) {
+                    const url: string | undefined = this.joinUrl(invitee.joinToken);
+                    if (url) {
+                        await this.attendeeLinkRepo!.create(
+                            new this.attendeeLinkClass({
+                                mailboxUid,
+                                calendarEventUid: meeting.calendarEventUid,
+                                attendeeAddress: invitee.email,
+                                url,
+                                label: ATTENDEE_LINK_LABEL,
+                            }),
+                            { user: strippedUser, ignoreACL: true },
+                        );
+                    }
+                }
+            }
         }
         return { meeting, invitees };
+    }
+
+    /**
+     * Deletes the `CalendarEventAttendeeLink` rows `persistMeeting()` wrote for `meeting`'s invitees, so a
+     * cancelled or deleted meeting's calendar event never keeps handing out join links to it. A row belongs to this
+     * meeting when it is for the meeting's own event and its `url` ends in one of `invitees`' own join tokens - the
+     * tokens (unlike the addresses, or the configured base URL, which may since have changed) name exactly this
+     * meeting's rows, so another meeting sharing the same event is never touched. A no-op for a meeting with no
+     * `calendarEventUid` (it never had any).
+     */
+    private async deleteAttendeeLinks(meeting: VM, invitees: VMI[], user: JWTUser | undefined): Promise<void> {
+        if (!meeting.calendarEventUid) {
+            return;
+        }
+        const links: CalendarEventAttendeeLink[] = await this.attendeeLinkRepo!.find(
+            { mailboxUid: ModelUtils.literal(meeting.mailboxUid), calendarEventUid: ModelUtils.literal(meeting.calendarEventUid) } as any,
+            { ignoreACL: true, skipCache: true },
+        );
+        for (const link of links) {
+            if (invitees.some((invitee) => link.url.endsWith(`/${invitee.joinToken}`))) {
+                await this.attendeeLinkRepo!.delete(link.uid, { user, ignoreACL: true });
+            }
+        }
+    }
+
+    /** The meeting's own invitees. */
+    private async findInvitees(meeting: VM): Promise<VMI[]> {
+        return await this.inviteeRepo!.find({ meetingUid: ModelUtils.literal(meeting.uid) } as any, { ignoreACL: true });
     }
 
     /** The join URL for a token/slug, or `undefined` when no public URL is configured - see this class's doc
@@ -631,12 +694,17 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         if (patch.title === undefined && patch.status === undefined) {
             throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "Nothing to update: supply 'title' and/or 'status'.");
         }
-        return await this.meetingRepo!.update(patch as any, meeting, { user: stripTrustedRoles(user, this.trustedRoles), ignoreACL: true });
+        const strippedUser: JWTUser | undefined = stripTrustedRoles(user, this.trustedRoles);
+        const updated: VM = await this.meetingRepo!.update(patch as any, meeting, { user: strippedUser, ignoreACL: true });
+        if (patch.status === VideoMeetingStatus.CANCELLED) {
+            await this.deleteAttendeeLinks(meeting, await this.findInvitees(meeting), strippedUser);
+        }
+        return updated;
     }
 
     @Summary("Deletes a video meeting.")
     @Description(
-        "Deletes the meeting and every one of its invitees. Deleting the meeting also removes its own " +
+        "Deletes the meeting, every one of its invitees and the calendar invite links written for them. Deleting the meeting also removes its own " +
             "per-record AccessControlList (RepoUtils.delete()'s standard recordACL cleanup - see the VideoMeeting " +
             "interface's doc comment), so its uid stops working as a push channel immediately. Requires DELETE on " +
             "the meeting's owning mailbox.",
@@ -646,7 +714,8 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         await this.init();
         const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.DELETE);
         const strippedUser: JWTUser | undefined = stripTrustedRoles(user, this.trustedRoles);
-        const invitees: VMI[] = await this.inviteeRepo!.find({ meetingUid: ModelUtils.literal(meeting.uid) } as any, { ignoreACL: true });
+        const invitees: VMI[] = await this.findInvitees(meeting);
+        await this.deleteAttendeeLinks(meeting, invitees, strippedUser);
         for (const invitee of invitees) {
             await this.inviteeRepo!.delete(invitee.uid, { user: strippedUser, ignoreACL: true });
         }

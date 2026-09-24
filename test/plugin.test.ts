@@ -158,6 +158,20 @@ describe("package.json dependency consistency", () => {
         expect(semverGte(declaredFloor, REQUIRED_REACT_SHARED_FLOOR)).toBe(true);
     });
 
+    // `BaseVideoMeetingRoute` writes `CalendarEventAttendeeLink` rows (the per-invitee calendar invite links
+    // `MeetingSchedulingJob` reads), a model `@rapidmx/restapi` only added in 0.19.0 - a lower peer floor would let
+    // an install resolve a restapi with no such model, failing at import time.
+    it("declares a restapi peer floor high enough for the CalendarEventAttendeeLink model the routes write", () => {
+        const REQUIRED_RESTAPI_FLOOR = "0.19.0";
+        const routeSource: string = fs.readFileSync(fileURLToPath(new URL("../src/routes/BaseVideoMeetingRoute.ts", import.meta.url)), "utf8");
+        // Sanity check on the test itself: the import it guards must still exist.
+        expect(routeSource).toMatch(/CalendarEventAttendeeLink/);
+
+        const floorMatch: RegExpMatchArray | null = pkg.peerDependencies["@rapidmx/restapi"].match(/>=(\d+\.\d+\.\d+)/);
+        expect(floorMatch).not.toBeNull();
+        expect(semverGte(floorMatch![1], REQUIRED_RESTAPI_FLOOR)).toBe(true);
+    });
+
     it("pins every 'resolutions' entry to exactly its own 'peerDependencies' floor, matching booking-plugin's convention", () => {
         for (const name of ["@rapidmx/react-shared", "@rapidmx/restapi", "@rapidmx/web-client"]) {
             const peerFloor: string = pkg.peerDependencies[name].match(/>=(\d+\.\d+\.\d+)/)[1];

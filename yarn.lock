@@ -983,7 +983,7 @@ __metadata:
     winston: "npm:^3.19.0"
   peerDependencies:
     "@rapidmx/react-shared": ">=0.14.0 <1"
-    "@rapidmx/restapi": ">=0.17.0 <1"
+    "@rapidmx/restapi": ">=0.19.0 <1"
     "@rapidmx/web-client": ">=0.11.0 <1"
     "@rapidrest/core": 5.x
     "@rapidrest/service-core": 2.x
@@ -1013,9 +1013,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@rapidmx/restapi@npm:^0.17.0":
-  version: 0.17.0
-  resolution: "@rapidmx/restapi@npm:0.17.0"
+"@rapidmx/restapi@npm:^0.19.0":
+  version: 0.19.0
+  resolution: "@rapidmx/restapi@npm:0.19.0"
   dependencies:
     "@peculiar/x509": "npm:^2.1.0"
     acme-client: "npm:^5.4.0"
@@ -1048,7 +1048,7 @@ __metadata:
       optional: true
     pdf-parse:
       optional: true
-  checksum: 10c0/171eb0dec8af2df8c364c63f610a3daef9f0a86ee657fa0c89432456b0f019770988b646c26840c393b466c6744d5fe04e3817412536e8f901355c56ca6543de
+  checksum: 10c0/205c79db6e5b7a5c87f9b6bf8a42a49864c5c9dabaf544fd042603d1054580a8b0ab5be89a25a4cb9bcfd9416270e098ef606133b6518e481cd2794642c040fe
   languageName: node
   linkType: hard
 

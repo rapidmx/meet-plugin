@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import { RouteDecorators } from "@rapidrest/service-core";
-import { MailboxSQL } from "@rapidmx/restapi/sql";
+import { CalendarEventAttendeeLinkSQL, MailboxSQL } from "@rapidmx/restapi/sql";
 import { VideoMeetingSQL } from "../../models/sql/VideoMeetingSQL.js";
 import { VideoMeetingInviteeSQL } from "../../models/sql/VideoMeetingInviteeSQL.js";
 import { BaseVideoMeetingRoute } from "../BaseVideoMeetingRoute.js";
@@ -16,4 +16,5 @@ export class VideoMeetingRouteSQL extends BaseVideoMeetingRoute<VideoMeetingSQL,
     protected meetingClass: any = VideoMeetingSQL;
     protected inviteeClass: any = VideoMeetingInviteeSQL;
     protected mailboxClass: any = MailboxSQL;
+    protected attendeeLinkClass: any = CalendarEventAttendeeLinkSQL;
 }

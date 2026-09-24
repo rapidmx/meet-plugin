@@ -501,6 +501,44 @@ repo's to fix; the first is documented here for cross-reference only.
   `vitest run --coverage` all re-run clean after the bump: 410 tests (unchanged), 100% statement/function/line
   coverage, 97.52% branch (floor 95%, unchanged).
 
+## 2026-09-24: Fix - a private meeting's invitees never received their join link in the calendar invite
+
+**Bug**: an invite for a private video meeting (`Invitation: Video Test`) went out with the placeholder LOCATION
+"Video call - link in this invitation" and no link in the body. Verified on a real server: the
+`calendar_event_attendee_link_mongo` collection had 0 rows. restapi's `MeetingSchedulingJob.sendPersonalizedInvites()`
+gives each attendee their own LOCATION/body link from `CalendarEventAttendeeLink` rows (`mailboxUid`,
+`calendarEventUid`, `attendeeAddress` normalized, `url`, optional `label`), and the model's doc comment says the
+*plugin* writes them through its own `RepoUtils`. `BaseVideoMeetingRoute` never did.
+
+**Fix** (`BaseVideoMeetingRoute`, `VideoMeetingRouteMongo`/`SQL`):
+- New abstract `attendeeLinkClass` (`CalendarEventAttendeeLinkMongo`/`SQL` from `@rapidmx/restapi/mongo`/`sql`) and an
+  `attendeeLinkRepo` built in `init()` like `mailboxRepo`.
+- `persistMeeting()` (already `@Transactional()`) writes one link per invitee, `ignoreACL: true`, label
+  "Join video call", url = that invitee's own `joinUrl(joinToken)`, address = the already-lowercased invitee email -
+  only for a private meeting with a `calendarEventUid`, and skipping any invitee whose join URL is undefined (no
+  `mail:videoconf:public_url`). Atomic with the meeting and invitees. Never the organizer (not an invitee).
+- `delete()` and `update()` with `status: cancelled` remove the meeting's links (`deleteAttendeeLinks()`): rows for
+  the meeting's mailbox + `calendarEventUid` (`ModelUtils.literal`) whose `url` ends in one of *this meeting's*
+  invitees' join tokens. Matching on the token, not just the event uid, so a second meeting sharing the same event is
+  untouched, and a changed `public_url` can't orphan rows. The cancel cleanup runs after the meeting update (not in
+  one transaction - `update()` isn't transactional); a failure there leaves the rows, which is harmless since a
+  cancelled meeting's join links already answer 404.
+- `createSingleInviteeVideoMeeting()` (booking-plugin integration) left alone: it takes no `calendarEventUid` and mints
+  a meeting for a booking, not a calendar event invite, so there is nothing for `MeetingSchedulingJob` to look up.
+- Meetings created before this fix have no link rows; not backfilled (re-create the meeting).
+
+**Dependencies**: the model exists since restapi 0.19.0, so the peer floor is now `>=0.19.0 <1`. The repo's regression
+test requires `resolutions` to equal exactly `^<peer floor>`, so `resolutions` is `^0.19.0` (not `^0.20.1`); that
+resolution overrides `devDependencies`' `^0.20.1`, so this repo now installs and tests against restapi 0.19.0.
+`yarn install` resolved 0.17.0 -> 0.19.0 (yarn.lock updated). Added a `plugin.test.ts` check that the peer floor
+covers the `CalendarEventAttendeeLink` import.
+
+**Tests** (Mongo and SQL route tests, same cases in each): one link per invitee with the exact join URL, normalized
+address, label and event uid; none for a public meeting, none without a `calendarEventUid`, none without a public
+URL; delete removes only that meeting's links (another event's and another meeting's on the same event survive);
+cancel removes them, a title-only update keeps them. The test servers' model indexes export the link model so it
+registers. `tsc --noEmit`, `yarn lint` clean; 423 tests pass, 100% statement/function/line coverage, 97.56% branch.
+
 ## 2026-09-24: Fix - the video call didn't work (no self video, no remote media, off-screen layout) and gained mic/camera menus, reactions and raise hand
 
 JP tried a real meeting on Edge (PC) and a phone: permission was never asked on some devices, the local video vanished on joining, nobody saw or heard anyone else, the call ran off the bottom of the screen. Asked for (Google Meet-style): a bottom-fixed control bar, the local video small in the bottom-right, mic/camera buttons with a device menu and a live level, an emoji button and a raise-hand button. `yarn lint`, `tsc --noEmit` (root and `-p tsconfig.apps.json`) clean; 510 tests, 100% statement/function/line, 97.73% branch.

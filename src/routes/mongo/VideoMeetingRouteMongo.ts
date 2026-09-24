@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import { RouteDecorators } from "@rapidrest/service-core";
-import { MailboxMongo } from "@rapidmx/restapi/mongo";
+import { CalendarEventAttendeeLinkMongo, MailboxMongo } from "@rapidmx/restapi/mongo";
 import { VideoMeetingMongo } from "../../models/mongo/VideoMeetingMongo.js";
 import { VideoMeetingInviteeMongo } from "../../models/mongo/VideoMeetingInviteeMongo.js";
 import { BaseVideoMeetingRoute } from "../BaseVideoMeetingRoute.js";
@@ -16,4 +16,5 @@ export class VideoMeetingRouteMongo extends BaseVideoMeetingRoute<VideoMeetingMo
     protected meetingClass: any = VideoMeetingMongo;
     protected inviteeClass: any = VideoMeetingInviteeMongo;
     protected mailboxClass: any = MailboxMongo;
+    protected attendeeLinkClass: any = CalendarEventAttendeeLinkMongo;
 }
