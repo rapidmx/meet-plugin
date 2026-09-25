@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Raise the `@rapidmx/restapi` peer floor to `>=0.21.1`, `@rapidmx/react-shared` to `>=0.16.0` and `@rapidmx/web-client` to `>=0.15.1`, with the development dependencies and `resolutions` at the same versions, so the plugin is built and tested against the current packages.
+
 ## v0.4.0
 
 ### Added
