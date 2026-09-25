@@ -22,18 +22,18 @@
         "prepublish": "yarn build"
     },
     "peerDependencies": {
-        "@rapidmx/react-shared": ">=0.16.0 <1",
-        "@rapidmx/restapi": ">=0.21.1 <1",
-        "@rapidmx/web-client": ">=0.15.1 <1",
+        "@rapidmx/react-shared": ">=0.18.0 <1",
+        "@rapidmx/restapi": ">=0.22.1 <1",
+        "@rapidmx/web-client": ">=0.16.0 <1",
         "@rapidrest/core": "5.x",
         "@rapidrest/service-core": "2.x",
         "react": "19.x",
         "react-dom": "19.x"
     },
     "devDependencies": {
-        "@rapidmx/react-shared": "^0.16.0",
-        "@rapidmx/restapi": "^0.21.1",
-        "@rapidmx/web-client": "^0.15.1",
+        "@rapidmx/react-shared": "^0.18.0",
+        "@rapidmx/restapi": "^0.22.1",
+        "@rapidmx/web-client": "^0.16.0",
         "@rapidrest/core": "^6.0.0",
         "@rapidrest/service-core": "^2.3.0",
         "@swc/core": "^1.16.2",
@@ -77,9 +77,9 @@
         "winston": "^3.19.0"
     },
     "resolutions": {
-        "@rapidmx/react-shared": "^0.16.0",
-        "@rapidmx/restapi": "^0.21.1",
-        "@rapidmx/web-client": "^0.15.1"
+        "@rapidmx/react-shared": "^0.18.0",
+        "@rapidmx/restapi": "^0.22.1",
+        "@rapidmx/web-client": "^0.16.0"
     },
     "packageManager": "yarn@4.5.3",
     "engines": {

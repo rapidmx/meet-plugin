@@ -937,9 +937,9 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@rapidmx/meet-plugin@workspace:."
   dependencies:
-    "@rapidmx/react-shared": "npm:^0.16.0"
-    "@rapidmx/restapi": "npm:^0.21.1"
-    "@rapidmx/web-client": "npm:^0.15.1"
+    "@rapidmx/react-shared": "npm:^0.18.0"
+    "@rapidmx/restapi": "npm:^0.22.1"
+    "@rapidmx/web-client": "npm:^0.16.0"
     "@rapidrest/core": "npm:^6.0.0"
     "@rapidrest/service-core": "npm:^2.3.0"
     "@swc/core": "npm:^1.16.2"
@@ -982,9 +982,9 @@ __metadata:
     vitest: "npm:^5.0.0"
     winston: "npm:^3.19.0"
   peerDependencies:
-    "@rapidmx/react-shared": ">=0.16.0 <1"
-    "@rapidmx/restapi": ">=0.21.1 <1"
-    "@rapidmx/web-client": ">=0.15.1 <1"
+    "@rapidmx/react-shared": ">=0.18.0 <1"
+    "@rapidmx/restapi": ">=0.22.1 <1"
+    "@rapidmx/web-client": ">=0.16.0 <1"
     "@rapidrest/core": 5.x
     "@rapidrest/service-core": 2.x
     react: 19.x
@@ -992,9 +992,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@rapidmx/react-shared@npm:^0.16.0":
-  version: 0.16.0
-  resolution: "@rapidmx/react-shared@npm:0.16.0"
+"@rapidmx/react-shared@npm:^0.18.0":
+  version: 0.18.0
+  resolution: "@rapidmx/react-shared@npm:0.18.0"
   dependencies:
     "@emoji-mart/data": "npm:^1.2.1"
     "@peculiar/x509": "npm:^2.1.0"
@@ -1009,13 +1009,13 @@ __metadata:
   peerDependencies:
     react: 19.x
     react-dom: 19.x
-  checksum: 10c0/c187d5558a98e1f72c551569e00ca8e6c1765a6bf87520e9a14e78b521297fedd2ece1fe199a9f88df6a2cb5602f1a2e25252b2ba3716f85573162922417cb41
+  checksum: 10c0/6777d9a0392fea0f87dbcbc5be3d09d01ac85b0bba7805eea24b217273c5a4becddf80d3d3d7cecaa0781e27c13aae68f0a7b1fe94af22f68595730fcd0d9a5c
   languageName: node
   linkType: hard
 
-"@rapidmx/restapi@npm:^0.21.1":
-  version: 0.21.1
-  resolution: "@rapidmx/restapi@npm:0.21.1"
+"@rapidmx/restapi@npm:^0.22.1":
+  version: 0.22.1
+  resolution: "@rapidmx/restapi@npm:0.22.1"
   dependencies:
     "@peculiar/x509": "npm:^2.1.0"
     acme-client: "npm:^5.4.0"
@@ -1048,18 +1048,18 @@ __metadata:
       optional: true
     pdf-parse:
       optional: true
-  checksum: 10c0/9e19bbe18f0c29662230f3d8a74377d52baf51403fafde627fd62422a215e9c692e70b926588a46abe6d07780aa28c9eff6cc2711c774bcfa829c16855d7653b
+  checksum: 10c0/cb361bcf10ed84447720a041d0d4b14f939102a6022ce20e1ffce203e6d0990caf752e04f4b3d1dad2f35c5c9919adc70e43c1231eb26b3aeb9cc7a029c609f7
   languageName: node
   linkType: hard
 
-"@rapidmx/web-client@npm:^0.15.1":
-  version: 0.15.1
-  resolution: "@rapidmx/web-client@npm:0.15.1"
+"@rapidmx/web-client@npm:^0.16.0":
+  version: 0.16.0
+  resolution: "@rapidmx/web-client@npm:0.16.0"
   dependencies:
     "@dnd-kit/core": "npm:^6.3.1"
     "@journeyapps/wa-sqlite": "npm:^2.0.4"
     "@peculiar/x509": "npm:^2.1.0"
-    "@rapidmx/react-shared": "npm:^0.16.0"
+    "@rapidmx/react-shared": "npm:^0.18.0"
     "@tiptap/core": "npm:^3.31.3"
     "@tiptap/extension-highlight": "npm:^3.31.3"
     "@tiptap/extension-image": "npm:^3.31.3"
@@ -1081,7 +1081,7 @@ __metadata:
   peerDependencies:
     react: 19.x
     react-dom: 19.x
-  checksum: 10c0/a9974c5b5f3fd7cc877d95f2f7c041e74f6d6af7448afdb8c17458811ec5e2f05f2cbb577032bbb48cd2eddedba978ce907f5ddf89bbb86f50734ad494685a58
+  checksum: 10c0/0c1686c67207404976b20d842ea4781d6a652b8ddd7351c1c8ca31d25b1ac6dc93d7ffb00c10df4d7b0abb4c8ffcba067a6e291587cd904b14b5c6194b93e02b
   languageName: node
   linkType: hard
 
