@@ -16,6 +16,7 @@ import { VideoMeetingInviteeMongo } from "../../../src/models/mongo/VideoMeeting
 import { VideoMeetingStatus, VideoMeetingVisibility } from "../../../src/models/types.js";
 import { GUEST_JWT_TTL_SECONDS, GUEST_UID_PREFIX } from "../../../src/routes/BaseVideoMeetingRoute.js";
 import { turnRestCredential } from "../../../src/util/IceServerUtils.js";
+import { relaySuite } from "../relaySuite.js";
 import { videoMeetingSecuritySuite } from "../videoMeetingSecuritySuite.js";
 
 const redis = vi.hoisted(() => ({ createClient: vi.fn() }));
@@ -513,7 +514,7 @@ describe("Route:VideoMeetingMongo Tests", () => {
             try {
                 const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
                 const result = await request(server.getApplication()).get(`${baseUrl}/join/${created.body.meeting.publicSlug}`);
-                expect(result.body.iceServers).toContainEqual({ urls: "turn:turn.example.com:3478", username: "static-user", credential: "static-pass" });
+                expect(result.body.iceServers).toContainEqual({ urls: ["turn:turn.example.com:3478", "turn:turn.example.com:3478?transport=tcp"], username: "static-user", credential: "static-pass" });
             } finally {
                 route.turnUrl = "";
                 route.turnUsername = "";
@@ -659,7 +660,7 @@ describe("Route:VideoMeetingMongo Tests", () => {
         });
     });
 
-    videoMeetingSecuritySuite({
+    const suiteContext = {
         app: () => server.getApplication(),
         baseUrl,
         mailboxUid: () => mailbox.uid,
@@ -691,6 +692,13 @@ describe("Route:VideoMeetingMongo Tests", () => {
         cancelMeeting: async (uid: string) => {
             await authed(ownerToken).put(`${baseUrl}/${uid}`).send({ status: "cancelled" });
         },
+    };
+
+    videoMeetingSecuritySuite(suiteContext);
+    relaySuite({
+        ...suiteContext,
+        wsPort: () => (server.getApplication() as any).listenPort,
+        route: () => objectFactory.getInstance("routes.VideoMeetingRoute"),
     });
 
     describe("push channel access (real ACLs, fake Redis)", () => {

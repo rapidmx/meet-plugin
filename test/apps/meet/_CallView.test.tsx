@@ -9,12 +9,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type FakeRTCPeerConnection, fakeLocalMedia, fakeMediaStream, fakeTrack, installFakeMediaStream } from "../testUtils.js";
 import { REACTION_EMOJIS, type SignalMessage } from "../../../apps/shared/webrtc/types.js";
 
-const { FakeSignalingClient, createdPcs, levelMeterRegistrations, displayMediaMock, chimeMock } = vi.hoisted(() => {
+const { FakeSignalingClient, createdPcs, levelMeterRegistrations, displayMediaMock, chimeMock, relayMock } = vi.hoisted(() => {
     class FakeSignalingClient {
         static instances: FakeSignalingClient[] = [];
+        /** What the next client's `connect()` settles with - a test sets it to hold signaling open or make it fail. */
+        static nextConnectResult: Promise<void> | undefined;
         sent: SignalMessage[] = [];
         handlers = new Set<(message: SignalMessage) => void>();
-        connectResult: Promise<void> = Promise.resolve();
+        connectResult: Promise<void> = FakeSignalingClient.nextConnectResult ?? Promise.resolve();
         closed = false;
         constructor(public opts: { channel: string; token?: string }) {
             FakeSignalingClient.instances.push(this);
@@ -40,8 +42,37 @@ const { FakeSignalingClient, createdPcs, levelMeterRegistrations, displayMediaMo
     }
     const createdPcs: unknown[] = [];
     const levelMeterRegistrations: { onLevel: (level: number) => void }[] = [];
-    return { FakeSignalingClient, createdPcs, levelMeterRegistrations, displayMediaMock: vi.fn(), chimeMock: vi.fn() };
+    // The WebSocket media relay: `supported` is what the fake reports, `created` every one the view made.
+    const relayMock = {
+        supported: true,
+        created: [] as {
+            supported: boolean;
+            receiveFrom: ReturnType<typeof vi.fn>;
+            stopReceivingFrom: ReturnType<typeof vi.fn>;
+            setSending: ReturnType<typeof vi.fn>;
+            setLocalTrack: ReturnType<typeof vi.fn>;
+            close: ReturnType<typeof vi.fn>;
+        }[],
+        create: vi.fn(),
+    };
+    return { FakeSignalingClient, createdPcs, levelMeterRegistrations, displayMediaMock: vi.fn(), chimeMock: vi.fn(), relayMock };
 });
+
+vi.mock("../../../apps/shared/relay/RelayTransport.js", () => ({
+    createRelayTransport: (options: unknown) => {
+        relayMock.create(options);
+        const relay = {
+            supported: relayMock.supported,
+            receiveFrom: vi.fn(),
+            stopReceivingFrom: vi.fn(),
+            setSending: vi.fn(),
+            setLocalTrack: vi.fn(),
+            close: vi.fn(),
+        };
+        relayMock.created.push(relay);
+        return relay;
+    },
+}));
 
 vi.mock("../../../apps/shared/push/GuestSignalingClient.js", () => ({ GuestSignalingClient: FakeSignalingClient }));
 vi.mock("../../../apps/shared/webrtc/realPeerConnection.js", async () => {
@@ -121,6 +152,7 @@ let playMock: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
     FakeSignalingClient.instances.length = 0;
+    FakeSignalingClient.nextConnectResult = undefined;
     createdPcs.length = 0;
     levelMeterRegistrations.length = 0;
     displayMediaMock.mockReset();
@@ -619,5 +651,93 @@ describe("CallView - presenting", () => {
         expect(main).toHaveTextContent("Alice (you)");
         // The other participant waits in the strip.
         expect(within(screen.getByTestId("thumbnails")).getByRole("button", { name: "Zed" })).toBeInTheDocument();
+    });
+});
+
+describe("CallView - media paths", () => {
+    it("does not create a relay unless the server offers one", async () => {
+        await withParticipant();
+        expect(relayMock.create).not.toHaveBeenCalled();
+    });
+
+    it("falls a participant WebRTC cannot connect to back to the server relay, and says so on their tile", async () => {
+        relayMock.supported = true;
+        relayMock.created.length = 0;
+        await withParticipant({ relayEnabled: true });
+        expect(relayMock.create).toHaveBeenCalledWith({ meetingUid: "meeting-1", peerId: SELF });
+        const relay = relayMock.created[0];
+
+        pcs()[0].connectionState = "failed";
+        act(() => pcs()[0].onconnectionstatechange!());
+
+        expect(await screen.findByTestId("transport-badge")).toHaveTextContent("Server relay");
+        expect(relay.receiveFrom).toHaveBeenCalledWith("zzz", expect.any(Function));
+        expect(relay.setSending).toHaveBeenLastCalledWith(true);
+    });
+
+    it("marks the participant as unreachable, rather than dropping them, in a browser that cannot run the relay", async () => {
+        relayMock.supported = false;
+        relayMock.created.length = 0;
+        await withParticipant({ relayEnabled: true });
+
+        pcs()[0].connectionState = "failed";
+        act(() => pcs()[0].onconnectionstatechange!());
+
+        expect(await screen.findByTestId("transport-badge")).toHaveTextContent("Can't connect");
+        expect(screen.getAllByText("Zed").length).toBeGreaterThan(0);
+        expect(relayMock.created[0].receiveFrom).not.toHaveBeenCalled();
+        relayMock.supported = true;
+    });
+});
+
+describe("CallView - connection status", () => {
+    const connectPc = async (pc: FakeRTCPeerConnection) => {
+        pc.connectionState = "connected";
+        await act(async () => {
+            pc.onconnectionstatechange!();
+        });
+    };
+
+    it("says the local participant is connecting until the signaling channel opens", async () => {
+        let open!: () => void;
+        FakeSignalingClient.nextConnectResult = new Promise<void>((resolve) => (open = resolve));
+        renderCallView();
+
+        expect(screen.getByTestId("tile-status")).toHaveTextContent("Connecting…");
+
+        await act(async () => open());
+        await waitFor(() => expect(screen.queryByTestId("tile-status")).toBeNull());
+    });
+
+    it("stops saying it is connecting when signaling fails, and shows why instead", async () => {
+        FakeSignalingClient.nextConnectResult = Promise.reject(new Error("Not permitted"));
+        renderCallView();
+
+        expect(await screen.findByRole("alert")).toHaveTextContent("Not permitted");
+        expect(screen.queryByTestId("tile-status")).toBeNull();
+    });
+
+    it("shows an awaiting-connection line on a participant still connecting, and Connecting on its own tile until one is up", async () => {
+        await withParticipant();
+
+        const statuses = screen.getAllByTestId("tile-status").map((el) => el.textContent);
+        expect(statuses).toContain("Awaiting connection…");
+        expect(statuses).toContain("Connecting…");
+
+        await connectPc(pcs()[0]);
+        await waitFor(() => expect(screen.queryByTestId("tile-status")).toBeNull());
+    });
+
+    it("does not tell a participant who is already connected to someone that they are connecting", async () => {
+        const { client } = await withParticipant();
+        client.emit(hello("yyy", "Yan"));
+        await screen.findAllByText("Yan");
+        expect(screen.getAllByTestId("tile-status").filter((el) => el.textContent === "Awaiting connection…")).toHaveLength(2);
+
+        await connectPc(pcs()[0]);
+
+        await waitFor(() => expect(screen.getAllByTestId("tile-status")).toHaveLength(1));
+        expect(screen.getByTestId("tile-status")).toHaveTextContent("Awaiting connection…");
+        expect(screen.queryByText("Connecting…")).toBeNull();
     });
 });

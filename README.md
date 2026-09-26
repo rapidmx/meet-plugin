@@ -8,8 +8,15 @@ Private and public WebRTC video meetings for a [RapidMX server](https://github.c
 turns on video conferencing for a calendar event; a private meeting mints one link per invitee (inserted into the
 invite's location and body), a public meeting shares a single link. Joining needs no account: a guest picks a name
 (auto-filled from their RapidMX profile when signed in), checks their camera and microphone, and enters. Calls are
-peer-to-peer WebRTC (no media server), relayed through a configured TURN server only for a participant a direct
-connection can't reach.
+peer-to-peer WebRTC (no media server). Each pair of participants uses the best path that works, tried in order:
+
+1. **Direct peer-to-peer**, the preferred path.
+2. **Relayed through a configured TURN server**, for a participant a direct connection can't reach. A plain `turn:`
+   address is offered over both UDP and TCP, so a network that blocks UDP can still reach it.
+3. **Proxied by the RapidMX server itself over a WebSocket**, the last resort for a participant whose network lets
+   nothing but ordinary HTTPS out. Video is lower quality and sound may lag; it needs a browser with WebCodecs, and
+   can be turned off with the `mail:videoconf:relay:enabled` setting. A tile says when a participant is on the TURN
+   relay or the server relay.
 
 This plugin's `apps/` also ship the public join/lobby/in-call pages and the personal Settings screen - see
 `package.json`'s `rapidmx.plugin.ui` for exactly what's mounted where.

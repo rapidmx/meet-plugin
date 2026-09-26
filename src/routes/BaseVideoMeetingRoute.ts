@@ -21,13 +21,37 @@ import {
 import { CalendarEventAttendeeLink, Mailbox } from "@rapidmx/restapi";
 import { buildIceServers, IceServerConfig } from "../util/IceServerUtils.js";
 import { buildBaseUrl } from "../util/PublicUrlUtils.js";
+import { RedisRelayBus } from "../util/RedisRelayBus.js";
+import {
+    parseRelayEnabled,
+    RELAY_LARGE_PAYLOAD_BYTES,
+    RELAY_MAX_PAYLOAD_BYTES,
+    RELAY_WS_MAX_BACKPRESSURE_BYTES,
+    RelayHub,
+    type RelayConnection,
+} from "../util/RelayHub.js";
 import { stripTrustedRoles } from "../util/RouteAccessUtils.js";
 import { JOIN_TOKEN_PATTERN, PUBLIC_SLUG_PATTERN, mintJoinToken, mintPublicSlug } from "../util/TokenUtils.js";
 import { VideoMeeting, VideoMeetingInvitee, VideoMeetingStatus, VideoMeetingVisibility } from "../models/types.js";
-const { Config, Inject, Logger } = ObjectDecorators;
+const { Config, Destroy, Init, Inject, Logger } = ObjectDecorators;
 const { Description, Summary } = DocDecorators;
 const { Transactional } = DatabaseDecorators;
-const { Delete, Get, Param, Post, Put, Query, RateLimit, Request, User: AuthUser } = RouteDecorators;
+const { Auth, Delete, Get, Param, Post, Put, Query, RateLimit, Request, Socket, User: AuthUser, WebSocket } = RouteDecorators;
+
+/** Whether the installed `@rapidrest/service-core` lets a `@WebSocket()` route set its own message and backpressure
+ * limits (its 2.4.0 and later export the option bounds). Without that the framework holds every WebSocket route to
+ * 16 KiB messages, and asking for more would advertise a limit that is not enforced - so the route then keeps 16 KiB. */
+const WS_ROUTE_OPTIONS_SUPPORTED: boolean = "MAX_WEBSOCKET_PAYLOAD_LENGTH" in RouteDecorators;
+
+/** The largest message a relay socket may send: what the route asks the framework for and what `ready` tells the
+ * client. */
+const RELAY_MESSAGE_LIMIT_BYTES: number = WS_ROUTE_OPTIONS_SUPPORTED ? RELAY_LARGE_PAYLOAD_BYTES : RELAY_MAX_PAYLOAD_BYTES;
+
+/** The relay route's WebSocket options: bigger messages, so a key frame is one message, and a bigger send buffer, so a
+ * receiver that stalls for a moment loses nothing. `undefined` (the framework's defaults) where it cannot be set. */
+const RELAY_WS_OPTIONS = WS_ROUTE_OPTIONS_SUPPORTED
+    ? { maxPayloadLength: RELAY_LARGE_PAYLOAD_BYTES, maxBackpressure: RELAY_WS_MAX_BACKPRESSURE_BYTES }
+    : undefined;
 
 /** Upper bounds on caller-supplied text, matching the general shape `booking-plugin`'s `BaseBookingRoute` bounds
  * its own free-text fields with. */
@@ -61,6 +85,15 @@ const GUEST_GRANT_MAX_ATTEMPTS = 5;
 
 /** The `label` of every `CalendarEventAttendeeLink` `persistMeeting()` writes. */
 const ATTENDEE_LINK_LABEL = "Join video call";
+
+/** The reason `relay()` closes (1008) a socket it refuses for any authorization reason - a caller with no grant, a
+ * meeting that doesn't exist, and one that is cancelled or ended all get exactly this, so a refusal never reveals
+ * whether the meeting exists. */
+const RELAY_NOT_PERMITTED = "Not permitted.";
+
+/** How many messages `relay()` holds for a socket that sends before its authorization finished (a client's `hello`
+ * can arrive while the meeting is still being looked up); the rest are dropped. */
+const RELAY_MAX_QUEUED_MESSAGES = 8;
 
 /** The request body accepted by `create()`. */
 export interface CreateVideoMeetingBody {
@@ -150,6 +183,10 @@ export interface VideoMeetingJoinResult {
     /** ISO 8601 instant `token` expires at. Present only when `authenticated` is `false`, exactly when `token`
      * itself is. */
     expiresAt?: string;
+    /** Whether the last-resort WebSocket media relay (`relay()`, the third tier after a direct WebRTC connection and
+     * TURN) is enabled on this server (`mail:videoconf:relay:enabled`). A client only falls back to it when this is
+     * `true`; connecting to a disabled relay is refused anyway. */
+    relayEnabled: boolean;
 }
 
 /**
@@ -275,6 +312,27 @@ export interface VideoMeetingJoinResult {
  * now run every loaded meeting through `withJoinUrls()` - the exact same computation `create()` already did,
  * applied uniformly on read instead of only once on write.
  *
+ * ## The last-resort WebSocket media relay (`relay()`)
+ *
+ * Clients connect peer-to-peer over WebRTC, fall back to TURN, and as a third and last resort (a corporate firewall
+ * that allows neither) send media over a WebSocket this server proxies: `relay()`, at `/relay/:id` under the
+ * subclass's own base path (`/api/mail/video-meetings/relay/<meetingUid>`). It is a fan-out of opaque binary
+ * frames between the participants of one meeting - the wire protocol and limits are documented on `RelayHub`, which
+ * does all of the relaying; this class only authorizes a socket and hands it over, and picks how frames travel
+ * between server replicas: when the deployment configures `datastores:events` (the Redis the framework's push system
+ * already uses) frames cross replicas over Redis pub/sub (`RedisRelayBus`), so participants connected to different
+ * replicas reach each other; without it they travel in-process only, with a one-time warning at start-up that relay
+ * does not cross replicas.
+ *
+ * Authorization is the very grant `join()`'s `ensureChannelGrant()` already gives every participant, guest or real:
+ * `READ` and `CREATE` on the meeting's uid, checked with the caller's trusted roles stripped exactly as
+ * `MailPushRoute` does for `/push`, so a trusted administrator with no grant is refused just like there. The meeting must exist and be neither
+ * cancelled nor ended. Every refusal closes the socket with code 1008; a missing meeting and a missing grant are
+ * indistinguishable ("Not permitted."), so a caller learns nothing about meetings they can't join. The whole
+ * thing can be turned off with `mail:videoconf:relay:enabled` (default `true`; `false`/`"false"`/`0`/`"0"` disable
+ * it): a disabled relay closes every socket with 1008 "Relay disabled." and `join()` reports `relayEnabled: false`, so
+ * clients don't try it.
+ *
  * ## Other known limitations
  *
  * **`VideoMeetingInvitee.joinToken` never expires** and has no GC job - identical tradeoff to `Booking.manageToken`.
@@ -334,8 +392,26 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     @Config("mail:videoconf:turn:shared_secret", "")
     private turnSharedSecret: string = "";
 
+    /** Whether `relay()` accepts sockets, and `join()` advertises it - read through `isRelayEnabled()`, since a value
+     * set from an environment variable arrives as a string. */
+    @Config("mail:videoconf:relay:enabled", true)
+    private relayEnabledSetting: boolean | string | number = true;
+
+    /** The deployment's `events` datastore (`datastores:events`) - the Redis the framework's push system publishes
+     * across replicas on; `null` when the deployment has none. Decides how `initRelayBus()` carries relay frames. */
+    @Config("datastores:events", null)
+    private eventsConfig: { url?: string } | null = null;
+
     @Logger
     private logger: any;
+
+    /** The rooms of this process's relay sockets. One per route instance. It starts out on an in-process bus, which
+     * is what a route that was never initialized (a test's) keeps; `initRelayBus()` swaps in a hub on a Redis bus
+     * when the deployment has one, before any socket can attach. Its socket caps are per server replica. */
+    private relayHub: RelayHub = new RelayHub({ maxPayloadBytes: RELAY_MESSAGE_LIMIT_BYTES, logger: { debug: (message: string) => this.logger.debug(message) } });
+
+    /** The Redis bus `relayHub` runs on, when there is one. */
+    private relayBus?: RedisRelayBus;
 
     /**
      * Exposes the `@Model(...)`-supplied entity class as an instance property so `@Transactional()` on
@@ -345,6 +421,45 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
      */
     public get modelClass(): any {
         return (this.constructor as any).modelClass;
+    }
+
+    /**
+     * Picks how relay frames travel between server replicas, once the route is created: over Redis pub/sub
+     * (`RedisRelayBus`) when `datastores:events` is configured, else in-process only with a single warning that
+     * participants on different replicas cannot relay to each other. A Redis bus that cannot be created (the `redis`
+     * package is missing, an unusable URL) falls back the same way, with the error logged. Runs before the route
+     * serves anything, so no socket is attached to the hub it replaces.
+     */
+    @Init
+    public async initRelayBus(): Promise<void> {
+        const url: string | undefined = this.eventsConfig?.url;
+        if (!url) {
+            this.logger.warn(
+                "The `events` datastore is not configured: the video meeting relay only carries media between participants " +
+                    "connected to this server instance, not between server replicas.",
+            );
+            return;
+        }
+        const bus: RedisRelayBus = new RedisRelayBus({ url, logger: this.logger });
+        try {
+            await bus.connect();
+        } catch (err: any) {
+            this.logger.error(
+                "Could not create the video meeting relay's Redis bus, so relay only works between participants connected to this " +
+                    `server instance: ${err?.message ?? err}`,
+            );
+            return;
+        }
+        this.relayBus = bus;
+        this.relayHub = new RelayHub({ bus, maxPayloadBytes: RELAY_MESSAGE_LIMIT_BYTES, logger: { debug: (message: string) => this.logger.debug(message) } });
+    }
+
+    /** Disconnects the Redis relay bus, if there is one, when the object factory destroys the route. (The factory
+     * runs one destroy method per object: a subclass declaring its own `@Destroy` must call this one.) */
+    @Destroy
+    public destroyRelayBus(): void {
+        this.relayBus?.close();
+        this.relayBus = undefined;
     }
 
     private async init(): Promise<void> {
@@ -895,6 +1010,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             }
         }
 
+        const relayEnabled: boolean = this.isRelayEnabled();
         const publicMeeting: PublicVideoMeeting = {
             uid: meeting.uid,
             title: meeting.title,
@@ -914,7 +1030,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         // prefix check is a safe, cheap discriminator - see this class's doc comment and GUEST_UID_PREFIX).
         if (user && !user.uid.startsWith(GUEST_UID_PREFIX)) {
             await this.ensureChannelGrant(meeting.uid, user.uid);
-            return { meeting: publicMeeting, iceServers, authenticated: true, selfUid: user.uid };
+            return { meeting: publicMeeting, iceServers, authenticated: true, selfUid: user.uid, relayEnabled };
         }
 
         const { guestUid, token: guestToken, expiresAt } = this.mintGuestToken();
@@ -926,6 +1042,120 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             selfUid: guestUid,
             token: guestToken,
             expiresAt: expiresAt.toISOString(),
+            relayEnabled,
         };
+    }
+
+    /** Whether the WebSocket media relay is enabled - `mail:videoconf:relay:enabled`, see `parseRelayEnabled()`. */
+    private isRelayEnabled(): boolean {
+        return parseRelayEnabled(this.relayEnabledSetting);
+    }
+
+    /**
+     * Decides whether `user` may open a relay socket to meeting `id`: the relay must be enabled, `user` must hold BOTH
+     * `READ` and `CREATE` on the meeting's uid - exactly what `ensureChannelGrant()` gives a joined participant, and
+     * what `/push` demands to subscribe and publish - and the meeting must exist and be neither cancelled nor ended.
+     * Returns the reason to close the socket with, or `undefined` when permitted.
+     *
+     * `hasPermission()` gets `user` with its trusted roles stripped (`stripTrustedRoles()`), exactly as
+     * `@rapidmx/restapi`'s `MailPushRoute` does for the same grant on `/push`: without it the framework's "trusted
+     * users always have permission" rule would let any administrator relay in any meeting they hold no grant on, so
+     * a trusted administrator with no grant is refused here exactly as `/push` refuses them. Every authorization
+     * failure gives the same `RELAY_NOT_PERMITTED`, whether the grant, the meeting or its state is what's missing.
+     */
+    private async authorizeRelay(id: string | undefined, user: JWTUser | undefined): Promise<string | undefined> {
+        if (!this.isRelayEnabled()) {
+            return "Relay disabled.";
+        }
+        // `hasPermission()` answers `true` for an empty ACL uid, so an empty id must never reach it.
+        if (!user || !id) {
+            return RELAY_NOT_PERMITTED;
+        }
+        await this.init();
+        const checked: JWTUser | undefined = stripTrustedRoles(user, this.trustedRoles);
+        if (!(await this.aclUtils!.hasPermission(checked, id, ACLAction.READ)) || !(await this.aclUtils!.hasPermission(checked, id, ACLAction.CREATE))) {
+            return RELAY_NOT_PERMITTED;
+        }
+        const meeting: VM | undefined = await this.meetingRepo!.findOne(id, { ignoreACL: true });
+        if (!meeting || meeting.status === VideoMeetingStatus.CANCELLED || meeting.status === VideoMeetingStatus.ENDED) {
+            return RELAY_NOT_PERMITTED;
+        }
+        return undefined;
+    }
+
+    /**
+     * The meeting uid a relay socket's URL names. `@Param("id")` is filled in by the Bun router, but NOT by the uWS
+     * router this framework actually serves with: it never populates `req.params` for a WebSocket upgrade (a
+     * `@WebSocket()` route has, so far, never had a path parameter - `BasePushRoute.connect()` has none). So when the
+     * decorated argument is empty this reads the last segment of the request path instead, which the
+     * `/relay/:id` pattern guarantees is the id (the framework also registers the trailing-slash form; the path
+     * never carries the query string). Returns `undefined` when there is none or it isn't valid percent-encoding.
+     */
+    private relayMeetingId(paramId: string | undefined, req: HttpRequest | undefined): string | undefined {
+        if (typeof paramId === "string" && paramId) {
+            return paramId;
+        }
+        const segments: string[] = String(req?.path ?? "").split("/").filter((segment) => segment);
+        try {
+            return decodeURIComponent(segments[segments.length - 1] ?? "") || undefined;
+        } catch {
+            return undefined;
+        }
+    }
+
+    @Summary("Relays media over a WebSocket.")
+    @Description(
+        "The last-resort media path for a participant whose network blocks both a direct WebRTC connection and TURN: " +
+            "a WebSocket at /relay/<meetingUid> carrying opaque binary frames between the meeting's participants " +
+            "(see RelayHub for the protocol: a 'hello' text message first, then 'want' to choose whose media to " +
+            "receive, then binary frames of at most the 'maxMessageBytes' the server's 'ready' reply names: 64 KiB, or 16 KiB on a framework that cannot raise its limit). Requires a JWT (a real user's, or the guest token " +
+            "join() minted) holding READ and CREATE on the meeting - the grant join() gives - and an existing, " +
+            "unended, uncancelled meeting; anything else, or a disabled relay, closes the socket with code 1008. When " +
+            "the server runs several replicas and the events datastore (Redis) is configured, media is relayed " +
+            "between participants connected to different replicas too; without it, only between participants " +
+            "connected to the same replica. The socket limits apply per replica.",
+    )
+    @Auth(["jwt"])
+    @WebSocket("/relay/:id", RELAY_WS_OPTIONS)
+    public async relay(@Param("id") paramId: string | undefined, @Request req: HttpRequest, @Socket sock: any, @AuthUser user?: JWTUser): Promise<void> {
+        const id: string | undefined = this.relayMeetingId(paramId, req);
+        // Listeners first, before the first await: the client may send its `hello` the moment the socket opens,
+        // while the meeting is still being looked up, and an event with no listener is lost. Whatever arrives until
+        // the socket is admitted is held (a few messages at most) and replayed to it.
+        let conn: RelayConnection | undefined;
+        let closed = false;
+        const queued: { data: string | Uint8Array; isBinary: boolean }[] = [];
+        sock.on("message", (data: string | Uint8Array, isBinary: boolean) => {
+            if (conn) {
+                conn.message(data, isBinary);
+            } else if (queued.length < RELAY_MAX_QUEUED_MESSAGES) {
+                queued.push({ data, isBinary });
+            }
+        });
+        sock.on("close", () => {
+            closed = true;
+            conn?.close();
+        });
+
+        let refusal: string | undefined;
+        try {
+            refusal = await this.authorizeRelay(id, user);
+        } catch (err: any) {
+            this.logger.error(`Failed to authorize a relay socket for meeting ${id}: ${err?.message ?? err}`);
+            sock.close(1011, "Relay unavailable.");
+            return;
+        }
+        if (refusal) {
+            sock.close(1008, refusal);
+            return;
+        }
+        // The socket closed while it was being authorized: nothing to attach, and nothing left to clean up.
+        if (closed) {
+            return;
+        }
+        conn = this.relayHub.attach(id!, user!.uid, sock);
+        for (const message of queued) {
+            conn?.message(message.data, message.isBinary);
+        }
     }
 }

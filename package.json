@@ -114,7 +114,7 @@
     "rapidmx": {
         "plugin": {
             "apiVersion": 1,
-            "displayName": "Video Conferencing",
+            "displayName": "Meet",
             "description": "Private and public WebRTC video meetings. A private meeting mints one link per invitee for a calendar invite's location and body; a public meeting shares a single link. Joining needs no account - a guest picks a name, checks their camera and microphone, and enters.",
             "mailboxScopedData": true,
             "settings": [
@@ -130,7 +130,7 @@
                     "label": "TURN server URL",
                     "type": "string",
                     "default": "",
-                    "help": "A turn: or turns: URL (e.g. turns:turn.example.com:5349), or several separated by commas (turn:turn.example.com:3478,turns:turn.example.com:5349), relaying media for a participant behind a restrictive NAT or firewall, for whom a direct peer-to-peer connection fails. Public STUN servers are used for everyone else and need no configuration. Leave empty to serve calls with STUN only - most calls will still connect, but some participants may not."
+                    "help": "A turn: or turns: URL (e.g. turns:turn.example.com:5349), or several separated by commas (turn:turn.example.com:3478,turns:turn.example.com:5349), relaying media for a participant behind a restrictive NAT or firewall, for whom a direct peer-to-peer connection fails. A plain turn: address is offered over both UDP and TCP (a network that blocks UDP can still use the TCP one); add ?transport=udp or ?transport=tcp to an address to offer only that. Public STUN servers are used for everyone else and need no configuration. Leave empty to serve calls with STUN only - most calls will still connect, but some participants may not."
                 },
                 {
                     "key": "mail:videoconf:turn:username",
@@ -152,6 +152,13 @@
                     "type": "string",
                     "default": "",
                     "help": "coturn's static-auth-secret, if configured. When set, every join mints its own short-lived username/credential pair (an HMAC-SHA1 of a timestamp with this secret) instead of handing out one permanent password to every participant - the recommended setup. Leave empty to use the static username/credential above instead."
+                },
+                {
+                    "key": "mail:videoconf:relay:enabled",
+                    "label": "WebSocket media relay",
+                    "type": "boolean",
+                    "default": true,
+                    "help": "The last-resort tier for a participant whose network blocks both a direct connection and TURN (e.g. a corporate firewall that only allows web traffic): their media travels over a WebSocket this server relays between the meeting's participants. Turn off to serve calls with direct and TURN connections only. With several server replicas it connects participants across them through the same Redis the push system uses; without that Redis it works only between participants on the same replica."
                 }
             ],
             "ui": {

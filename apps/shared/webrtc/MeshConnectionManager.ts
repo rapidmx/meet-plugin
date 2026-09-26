@@ -61,14 +61,37 @@
  * `presenter-release`) once it observes the winning claim. See `handlePresenterClaim()`.
  *
  * Sharing a screen is `setLocalTrack("video", screenTrack)`; stopping is `setLocalTrack("video", cameraTrack)`.
+ *
+ * ## Three media paths, tried in order
+ *
+ * Each pair of participants reaches for the best path that works, and `MeshParticipant.transport` says which one it
+ * got:
+ *
+ * 1. **Direct peer-to-peer** (`"p2p"`). The `RTCPeerConnection` is given the STUN servers and the TURN server
+ * together, and ICE ranks a direct pair above a relayed one, so this is what a pair gets whenever it can.
+ * 2. **Relayed through the TURN server** (`"turn"`). The same connection, on the relay candidate ICE falls back to
+ * when the direct pairs fail - a participant behind a symmetric NAT or a firewall that blocks direct UDP. Which of
+ * the two ICE picked is read from the selected candidate pair once connected (`RTCPeerConnectionLike.connectionType()`).
+ * 3. **Proxied by this server over a WebSocket** (`"websocket"`, `apps/shared/relay/`). For a participant whose
+ * network lets nothing but ordinary HTTPS out, neither of the above ever connects. A pair whose connection has not
+ * come up within `connectTimeoutMs`, has failed, or has stayed `disconnected` for `disconnectedGraceMs` gives up
+ * on WebRTC and switches to it, telling the other side with a `relay-fallback` message so both switch even when
+ * only one of them noticed. Nothing is renegotiated - the pair simply stops using the `RTCPeerConnection` - and the
+ * relay's stream replaces the one WebRTC would have filled (a `remote-stream` event again). When the relay is
+ * unavailable (turned off by the operator, or a browser without WebCodecs) the pair is marked `"failed"` and stays
+ * in the roster, rather than the participant vanishing with no explanation as it used to.
+ *
+ * A pair never moves back up: once on the relay it stays there for the rest of the call.
  */
 import {
+    type MediaTransport,
     type MeshEvent,
     type MeshParticipant,
     type ParticipantState,
     type RTCPeerConnectionFactory,
     type RTCPeerConnectionLike,
     type RTCRtpSenderLike,
+    type RelayTransportLike,
     type SignalMessage,
     type SignalingChannel,
     REACTION_EMOJIS,
@@ -84,6 +107,14 @@ export function isOfferer(selfId: string, peerId: string): boolean {
 const MAX_ORPHAN_PEERS = 32;
 const MAX_ORPHAN_CANDIDATES = 64;
 
+/** How long a connection may stay in `connecting` before the pair gives up on WebRTC. ICE with an unreachable TURN
+ * server can take the better part of a minute to report `failed`; a person waiting on a call will not. It is still long
+ * enough for a slow TURN allocation and a few round trips of signaling. */
+export const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
+
+/** How long a connection may stay `disconnected` (ICE lost the path but may still recover) before giving up on it. */
+export const DEFAULT_DISCONNECTED_GRACE_MS = 8_000;
+
 type MediaKind = "audio" | "video";
 
 interface PeerState extends MeshParticipant {
@@ -93,6 +124,10 @@ interface PeerState extends MeshParticipant {
     remoteStream: MediaStream;
     remoteDescriptionSet: boolean;
     pendingCandidates: RTCIceCandidateInit[];
+    /** Gives up on WebRTC when the connection is still `connecting` after `connectTimeoutMs`. */
+    connectTimer: ReturnType<typeof setTimeout> | undefined;
+    /** Gives up on WebRTC when the connection has stayed `disconnected` for `disconnectedGraceMs`. */
+    disconnectTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
 export interface MeshConnectionManagerOptions {
@@ -114,6 +149,13 @@ export interface MeshConnectionManagerOptions {
     /** Builds the (initially empty) stream one peer's incoming tracks are gathered into. Defaults to
      * `new MediaStream()`; a test supplies a fake. */
     createMediaStream?: () => MediaStream;
+    /** The WebSocket media relay, the last-resort path - see this module's doc comment. Leave unset when the
+     * operator has turned it off; without one a pair WebRTC cannot connect is marked `"failed"`. */
+    relay?: RelayTransportLike;
+    /** Defaults to `DEFAULT_CONNECT_TIMEOUT_MS`. */
+    connectTimeoutMs?: number;
+    /** Defaults to `DEFAULT_DISCONNECTED_GRACE_MS`. */
+    disconnectedGraceMs?: number;
 }
 
 export class MeshConnectionManager {
@@ -137,6 +179,8 @@ export class MeshConnectionManager {
             handRaised: false,
             ...options.localState,
         };
+        options.relay?.setLocalTrack("audio", this.localTracks.audio);
+        options.relay?.setLocalTrack("video", this.localTracks.video);
     }
 
     get participants(): MeshParticipant[] {
@@ -177,11 +221,13 @@ export class MeshConnectionManager {
         this.unsubscribe?.();
         this.unsubscribe = undefined;
         for (const peer of this.peers.values()) {
+            this.clearTimers(peer);
             peer.pc.close();
         }
         this.peers.clear();
         this.orphanCandidates.clear();
         this.listeners.clear();
+        this.options.relay?.close();
     }
 
     /** Sets the track sent as `kind` (`null` to send nothing) on every connection, now and for every peer that
@@ -191,6 +237,7 @@ export class MeshConnectionManager {
         for (const peer of this.peers.values()) {
             void peer.senders[kind]?.replaceTrack(track);
         }
+        this.options.relay?.setLocalTrack(kind, track);
     }
 
     /** Updates what this participant announces (`audioOn`/`videoOn`/`handRaised`) and tells everyone if anything
@@ -295,6 +342,9 @@ export class MeshConnectionManager {
             case "reaction":
                 this.handleReaction(message);
                 return;
+            case "relay-fallback":
+                this.handleRelayFallback(message.from);
+                return;
         }
     }
 
@@ -357,8 +407,13 @@ export class MeshConnectionManager {
         if (!peer) {
             return;
         }
+        this.clearTimers(peer);
         peer.pc.close();
         this.peers.delete(uid);
+        if (peer.transport === "websocket") {
+            this.options.relay?.stopReceivingFrom(uid);
+            this.syncRelaySending();
+        }
         this.emit({ type: "participant-left", uid });
         if (this.currentPresenterUid === uid) {
             this.currentPresenterUid = undefined;
@@ -382,6 +437,9 @@ export class MeshConnectionManager {
             remoteStream: (this.options.createMediaStream ?? (() => new MediaStream()))(),
             remoteDescriptionSet: false,
             pendingCandidates: this.orphanCandidates.get(uid) ?? [],
+            transport: "connecting",
+            connectTimer: undefined,
+            disconnectTimer: undefined,
         };
         this.orphanCandidates.delete(uid);
         this.peers.set(uid, peer);
@@ -396,12 +454,106 @@ export class MeshConnectionManager {
             }
             this.emit({ type: "remote-stream", uid, stream: peer.remoteStream });
         };
-        pc.onconnectionstatechange = () => {
-            if (pc.connectionState === "failed" || pc.connectionState === "closed") {
-                this.handleBye(uid);
-            }
-        };
+        pc.onconnectionstatechange = () => this.handleConnectionState(peer);
+        // Cleared the moment the connection comes up, so this only ever fires for a pair still waiting on WebRTC.
+        peer.connectTimer = setTimeout(() => this.fallBack(peer), this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS);
         return peer;
+    }
+
+    /** Reacts to the peer connection's state: notes which path a connected pair got, and gives up on WebRTC for a
+     * pair that failed or stays disconnected - see `fallBack()`. Ignores a pair that already left WebRTC. */
+    private handleConnectionState(peer: PeerState): void {
+        if (peer.transport === "websocket" || this.peers.get(peer.uid) !== peer) {
+            return;
+        }
+        switch (peer.pc.connectionState) {
+            case "connected":
+                this.clearTimers(peer);
+                void this.detectTransport(peer);
+                return;
+            case "disconnected":
+                // ICE often recovers from this on its own, so it is only given up on after a grace period.
+                peer.disconnectTimer ??= setTimeout(() => this.fallBack(peer), this.options.disconnectedGraceMs ?? DEFAULT_DISCONNECTED_GRACE_MS);
+                return;
+            case "failed":
+                this.fallBack(peer);
+                return;
+            case "closed":
+                this.handleBye(peer.uid);
+                return;
+        }
+    }
+
+    /** Records whether a connected pair is direct or relayed through TURN, from the candidate pair ICE selected. */
+    private async detectTransport(peer: PeerState): Promise<void> {
+        let type: "p2p" | "turn" | "unknown";
+        try {
+            type = await peer.pc.connectionType();
+        } catch {
+            type = "unknown";
+        }
+        // The pair may have moved on (fallen back, left, or dropped again) while the stats were being read.
+        if (peer.transport !== "websocket" && this.peers.get(peer.uid) === peer && peer.pc.connectionState === "connected") {
+            this.setTransport(peer, type === "turn" ? "turn" : "p2p");
+        }
+    }
+
+    private setTransport(peer: PeerState, transport: MediaTransport): void {
+        if (peer.transport !== transport) {
+            peer.transport = transport;
+            this.emit({ type: "participant-updated", participant: toParticipant(peer) });
+        }
+    }
+
+    private clearTimers(peer: PeerState): void {
+        clearTimeout(peer.connectTimer);
+        clearTimeout(peer.disconnectTimer);
+        peer.connectTimer = undefined;
+        peer.disconnectTimer = undefined;
+    }
+
+    /**
+     * Gives up on WebRTC for `peer` and moves the pair to the WebSocket relay (the third path - see this module's doc
+     * comment), or marks it `"failed"` when there is no relay to move to. `notify` tells the other side, which may not
+     * have noticed yet; a pair told by the other side does not tell it back.
+     */
+    private fallBack(peer: PeerState, notify = true): void {
+        if (peer.transport === "websocket" || this.peers.get(peer.uid) !== peer) {
+            return;
+        }
+        this.clearTimers(peer);
+        const relay = this.options.relay;
+        if (!relay?.supported) {
+            this.setTransport(peer, "failed");
+            return;
+        }
+        // Stop listening to the dead connection before closing it, so closing it cannot be mistaken for the peer leaving.
+        peer.pc.onconnectionstatechange = null;
+        peer.pc.onicecandidate = null;
+        peer.pc.ontrack = null;
+        peer.pc.close();
+        peer.transport = "websocket";
+        relay.receiveFrom(peer.uid, (stream) => {
+            peer.remoteStream = stream;
+            this.emit({ type: "remote-stream", uid: peer.uid, stream });
+        });
+        this.syncRelaySending();
+        this.emit({ type: "participant-updated", participant: toParticipant(peer) });
+        if (notify) {
+            this.send({ kind: "relay-fallback", to: peer.uid });
+        }
+    }
+
+    private handleRelayFallback(from: string): void {
+        const peer = this.peers.get(from);
+        if (peer) {
+            this.fallBack(peer, false);
+        }
+    }
+
+    /** The relay only encodes and uploads the local media while at least one pair is actually using it. */
+    private syncRelaySending(): void {
+        this.options.relay?.setSending([...this.peers.values()].some((peer) => peer.transport === "websocket"));
     }
 
     private async initiateOffer(peer: PeerState): Promise<void> {
@@ -515,7 +667,7 @@ export class MeshConnectionManager {
 }
 
 function toParticipant(peer: PeerState): MeshParticipant {
-    return { uid: peer.uid, name: peer.name, audioOn: peer.audioOn, videoOn: peer.videoOn, handRaised: peer.handRaised };
+    return { uid: peer.uid, name: peer.name, audioOn: peer.audioOn, videoOn: peer.videoOn, handRaised: peer.handRaised, transport: peer.transport };
 }
 
 function sameState(a: ParticipantState, b: ParticipantState): boolean {

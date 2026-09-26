@@ -19,6 +19,8 @@ export * from "./models/types.js";
 export * from "./util/BookingIntegrationUtils.js";
 export * from "./util/IceServerUtils.js";
 export * from "./util/PublicUrlUtils.js";
+export * from "./util/RedisRelayBus.js";
+export * from "./util/RelayHub.js";
 export * from "./util/RouteAccessUtils.js";
 export * from "./util/TokenUtils.js";
 export * from "./routes/BaseVideoMeetingRoute.js";

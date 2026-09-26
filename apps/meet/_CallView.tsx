@@ -42,7 +42,8 @@ import { requestDisplayMedia, stopStream } from "../shared/media/deviceMedia.js"
 import type { LocalMedia } from "../shared/media/useLocalMedia.js";
 import { createBrowserPeerConnection } from "../shared/webrtc/realPeerConnection.js";
 import { MeshConnectionManager } from "../shared/webrtc/MeshConnectionManager.js";
-import type { MeshParticipant } from "../shared/webrtc/types.js";
+import type { MeshParticipant, RelayTransportLike } from "../shared/webrtc/types.js";
+import { createRelayTransport } from "../shared/relay/RelayTransport.js";
 import { GuestSignalingClient } from "../shared/push/GuestSignalingClient.js";
 import CallControls, { type CallViewMode } from "./_CallControls.js";
 import ParticipantTile from "./_ParticipantTile.js";
@@ -57,6 +58,9 @@ export interface CallViewProps {
     selfName: string;
     meetingTitle: string;
     iceServers: RTCIceServer[];
+    /** Whether the server offers the WebSocket media relay, the last-resort path for a participant neither a direct
+     * connection nor the TURN server can reach - `VideoMeetingJoinResult.relayEnabled`. Off when absent. */
+    relayEnabled?: boolean;
     /** The camera and microphone, owned by the page (`[token].tsx`) - the lobby's tracks carried into the call. */
     media: LocalMedia;
     onLeave: () => void;
@@ -100,7 +104,7 @@ export function newPeerId(selfUid: string): string {
     return `${selfUid}~${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)}`;
 }
 
-export default function CallView({ channel, token, selfUid, selfName, meetingTitle, iceServers, media, onLeave }: CallViewProps) {
+export default function CallView({ channel, token, selfUid, selfName, meetingTitle, iceServers, relayEnabled, media, onLeave }: CallViewProps) {
     const [peerId] = useState(() => newPeerId(selfUid));
     const [connectError, setConnectError] = useState<string | null>(null);
     const [participants, setParticipants] = useState<MeshParticipant[]>([]);
@@ -116,6 +120,7 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
     const [announcement, setAnnouncement] = useState("");
     const [audioBlocked, setAudioBlocked] = useState(false);
     const [audioNonce, setAudioNonce] = useState(0);
+    const [signalingReady, setSignalingReady] = useState(false);
 
     const managerRef = useRef<MeshConnectionManager | null>(null);
     const screenStreamRef = useRef<MediaStream | null>(null);
@@ -144,6 +149,7 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
             iceServers,
             channel: client,
             createPeerConnection: createBrowserPeerConnection,
+            relay: relayEnabled ? createRelay(channel, peerId) : undefined,
             localAudioTrack: media.audioTrack,
             localVideoTrack: media.videoTrack,
             localState: { audioOn: media.micOn, videoOn: media.cameraOn },
@@ -200,6 +206,7 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
             .then(() => {
                 if (!cancelled) {
                     manager.start();
+                    setSignalingReady(true);
                 }
             })
             .catch((err: Error) => {
@@ -316,6 +323,10 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
     const presenterName = presenterUid ? (presenterUid === peerId ? selfName : (participants.find((p) => p.uid === presenterUid)?.name ?? "Someone")) : undefined;
     const raisedNames = [...(handRaised ? ["You"] : []), ...participants.filter((p) => p.handRaised).map((p) => p.name)];
     const alone = participants.length === 0;
+    // This participant has no working link yet: the signaling channel is still opening, or there is someone in the call
+    // and every connection to them is still being made. Once any one is up (or nobody else is here) it is not shown,
+    // so someone already in the call is not told they are "connecting" each time a newcomer arrives.
+    const selfConnecting = !connectError && (!signalingReady || (!alone && participants.every((p) => p.transport === "connecting")));
 
     const remoteTile = (p: MeshParticipant, className?: string) => (
         <ParticipantTile
@@ -325,6 +336,8 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
             cameraOff={!p.videoOn}
             micMuted={!p.audioOn}
             handRaised={p.handRaised}
+            transport={p.transport}
+            status={p.transport === "connecting" ? "Awaiting connection…" : undefined}
             isFocused={mainUid === p.uid}
             contain={presenterUid === p.uid}
             className={className}
@@ -340,6 +353,7 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
             cameraOff={!media.cameraOn}
             micMuted={!media.micOn}
             handRaised={handRaised}
+            status={selfConnecting ? "Connecting…" : undefined}
             className={className}
         />
     );
@@ -479,6 +493,13 @@ function RemoteAudio({ stream, onBlocked }: { stream: MediaStream; onBlocked: ()
         void Promise.resolve(element.play()).catch(onBlocked);
     }, [stream, onBlocked]);
     return <audio ref={audioRef} autoPlay data-testid="remote-audio" />;
+}
+
+/** The WebSocket media relay for this call, or `undefined` when this browser cannot run it (no WebCodecs) - the
+ * mesh then never falls back to it, and says so by marking an unreachable participant `"failed"`. */
+function createRelay(meetingUid: string, peerId: string): RelayTransportLike | undefined {
+    const relay = createRelayTransport({ meetingUid, peerId });
+    return relay.supported ? relay : undefined;
 }
 
 function stopLevelMeter(ref: React.MutableRefObject<Record<string, LevelMeterHandle>>, uid: string): void {

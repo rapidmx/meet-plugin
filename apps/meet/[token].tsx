@@ -108,6 +108,7 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
                 selfName={name}
                 meetingTitle={joinResult.meeting.title}
                 iceServers={joinResult.iceServers}
+                relayEnabled={joinResult.relayEnabled}
                 media={media}
                 onLeave={handleLeave}
             />

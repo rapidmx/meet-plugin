@@ -2,9 +2,15 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
-import { describe, expect, it } from "vitest";
-import { MeshConnectionManager, type MeshConnectionManagerOptions, isOfferer } from "../../../../apps/shared/webrtc/MeshConnectionManager.js";
-import { type MeshEvent, REACTION_EMOJIS, type SignalMessage, type SignalingChannel } from "../../../../apps/shared/webrtc/types.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+    DEFAULT_CONNECT_TIMEOUT_MS,
+    DEFAULT_DISCONNECTED_GRACE_MS,
+    MeshConnectionManager,
+    type MeshConnectionManagerOptions,
+    isOfferer,
+} from "../../../../apps/shared/webrtc/MeshConnectionManager.js";
+import { type MeshEvent, REACTION_EMOJIS, type RelayTransportLike, type SignalMessage, type SignalingChannel } from "../../../../apps/shared/webrtc/types.js";
 import { type FakeRTCPeerConnection, fakeMediaStream, fakeRTCPeerConnection, fakeTrack } from "../../testUtils.js";
 
 /** A directly-controllable fake channel for single-manager tests: `emit()` injects an incoming message, `sent`
@@ -94,6 +100,8 @@ const signal = (kind: SignalMessage["kind"], from: string, rest: Partial<SignalM
 });
 const offer = (from: string, to: string): SignalMessage => signal("offer", from, { to, sdp: { type: "offer", sdp: "remote-offer" } });
 const STATE = { audioOn: true, videoOn: true, handRaised: false };
+/** What every participant reports until its connection is up (or given up on). */
+const CONNECTING = { transport: "connecting" } as const;
 
 describe("MeshConnectionManager - peer ids", () => {
     it("publishes as the authenticated uid and names its own tab in 'peer'", async () => {
@@ -115,8 +123,8 @@ describe("MeshConnectionManager - peer ids", () => {
         expect(manager.participants).toEqual([]);
         channel.emit({ ...hello("user-1", "Me on my phone", STATE), peer: "user-1~bbb" });
         await flush();
-        expect(manager.participants).toEqual([{ uid: "user-1~bbb", name: "Me on my phone", ...STATE }]);
-        expect(events).toContainEqual({ type: "participant-joined", participant: { uid: "user-1~bbb", name: "Me on my phone", ...STATE } });
+        expect(manager.participants).toEqual([{ uid: "user-1~bbb", name: "Me on my phone", ...STATE, ...CONNECTING }]);
+        expect(events).toContainEqual({ type: "participant-joined", participant: { uid: "user-1~bbb", name: "Me on my phone", ...STATE, ...CONNECTING } });
         // Point-to-point messages address the peer, not the account.
         expect(channel.sent).toContainEqual(expect.objectContaining({ kind: "offer", to: "user-1~bbb" }));
     });
@@ -199,7 +207,7 @@ describe("MeshConnectionManager - hello/roster", () => {
         channel.emit(hello("z", "Zed", { audioOn: true, videoOn: false, handRaised: false })); // "a" < "z" - self is the offerer
         await flush();
 
-        const zed = { uid: "z", name: "Zed", audioOn: true, videoOn: false, handRaised: false };
+        const zed = { uid: "z", name: "Zed", audioOn: true, videoOn: false, handRaised: false, ...CONNECTING };
         expect(manager.participants).toEqual([zed]);
         expect(events).toContainEqual({ type: "participant-joined", participant: zed });
         expect(channel.sent).toContainEqual({ type: "video-meeting-signal", kind: "hello", from: "a", name: "Alice", state: STATE });
@@ -247,7 +255,7 @@ describe("MeshConnectionManager - hello/roster", () => {
         manager.start();
         channel.emit(hello("a"));
         await flush();
-        expect(manager.participants).toEqual([{ uid: "a", name: "a", audioOn: false, videoOn: false, handRaised: false }]);
+        expect(manager.participants).toEqual([{ uid: "a", name: "a", audioOn: false, videoOn: false, handRaised: false, ...CONNECTING }]);
     });
 
     it("fills in the real name and state when a hello arrives after the offer that created the peer", async () => {
@@ -259,10 +267,19 @@ describe("MeshConnectionManager - hello/roster", () => {
 
         channel.sent.length = 0;
         channel.emit(hello("a", "Alice", STATE));
-        expect(manager.participants).toEqual([{ uid: "a", name: "Alice", ...STATE }]);
-        expect(events).toContainEqual({ type: "participant-updated", participant: { uid: "a", name: "Alice", ...STATE } });
+        expect(manager.participants).toEqual([{ uid: "a", name: "Alice", ...STATE, ...CONNECTING }]);
+        expect(events).toContainEqual({ type: "participant-updated", participant: { uid: "a", name: "Alice", ...STATE, ...CONNECTING } });
         // Not a new peer: no second echo, no second connection.
         expect(channel.sent).toEqual([]);
+    });
+
+    it("takes a new name from a later hello that carries no state, keeping the state it has", async () => {
+        const { manager, channel } = setup({ selfUid: "b", selfName: "Bob" });
+        manager.start();
+        channel.emit(hello("a", "Alice", STATE));
+        await flush();
+        channel.emit(hello("a", "Alicia"));
+        expect(manager.participants[0]).toMatchObject({ name: "Alicia", ...STATE });
     });
 
     it("keeps the name it has when a later hello carries none", async () => {
@@ -298,7 +315,7 @@ describe("MeshConnectionManager - offer/answer/ICE", () => {
         expect(created[0].senders.video!.replaceTrack).toHaveBeenCalledWith(video);
         expect(created[0].createAnswer).toHaveBeenCalledTimes(1);
         expect(channel.sent).toContainEqual({ type: "video-meeting-signal", kind: "answer", from: "b", to: "a", sdp: { type: "answer", sdp: "fake-answer-sdp" } });
-        expect(events).toContainEqual({ type: "participant-joined", participant: { uid: "a", name: "a", audioOn: false, videoOn: false, handRaised: false } });
+        expect(events).toContainEqual({ type: "participant-joined", participant: { uid: "a", name: "a", audioOn: false, videoOn: false, handRaised: false, ...CONNECTING } });
         // It also introduces itself, since the offer may have beaten its own hello.
         expect(channel.sent).toContainEqual({ type: "video-meeting-signal", kind: "hello", from: "b", name: "Bob", state: STATE });
     });
@@ -501,12 +518,12 @@ describe("MeshConnectionManager - offer/answer/ICE", () => {
         }
     });
 
-    it("treats a failed/closed connection state as the peer leaving", async () => {
+    it("treats a closed connection state as the peer leaving", async () => {
         const { manager, channel, created, events } = setup();
         manager.start();
         channel.emit(hello("z", "Zed"));
         await flush();
-        created[0].connectionState = "failed";
+        created[0].connectionState = "closed";
         created[0].onconnectionstatechange!();
         expect(manager.participants).toEqual([]);
         expect(events).toContainEqual({ type: "participant-left", uid: "z" });
@@ -633,7 +650,7 @@ describe("MeshConnectionManager - local tracks and state", () => {
         channel.emit(signal("state", "z", { state: { audioOn: false, videoOn: true, handRaised: true } }));
         expect(manager.participants[0]).toMatchObject({ audioOn: false, handRaised: true });
         expect(events).toEqual([
-            { type: "participant-updated", participant: { uid: "z", name: "Zed", audioOn: false, videoOn: true, handRaised: true } },
+            { type: "participant-updated", participant: { uid: "z", name: "Zed", audioOn: false, videoOn: true, handRaised: true, ...CONNECTING } },
             { type: "hand-raised", uid: "z", name: "Zed" },
         ]);
 
@@ -818,8 +835,8 @@ describe("MeshConnectionManager - two real instances converging", () => {
         managerZ.start();
         await flush();
 
-        expect(managerA.participants).toEqual([{ uid: "z", name: "Zed", ...STATE }]);
-        expect(managerZ.participants).toEqual([{ uid: "a", name: "Alice", ...STATE }]);
+        expect(managerA.participants).toEqual([{ uid: "z", name: "Zed", ...STATE, ...CONNECTING }]);
+        expect(managerZ.participants).toEqual([{ uid: "a", name: "Alice", ...STATE, ...CONNECTING }]);
         expect(createdA[0].setLocalDescription).toHaveBeenCalledWith({ type: "offer", sdp: "fake-offer-sdp" });
         expect(createdZ[0].setRemoteDescription).toHaveBeenCalledWith({ type: "offer", sdp: "fake-offer-sdp" });
         expect(createdZ[0].setLocalDescription).toHaveBeenCalledWith({ type: "answer", sdp: "fake-answer-sdp" });
@@ -827,5 +844,312 @@ describe("MeshConnectionManager - two real instances converging", () => {
         // Each side ends up with a sender for each kind, the answerer's from claiming the offer's transceivers.
         expect(createdA[0].senders.audio).toBeDefined();
         expect(createdZ[0].senders.video).toBeDefined();
+    });
+});
+
+/** A fake `RelayTransportLike` recording every call, and remembering each `receiveFrom()` callback so a test can hand
+ * the manager a stream the way the real relay would. */
+function fakeRelay(supported = true) {
+    const streamHandlers = new Map<string, (stream: MediaStream) => void>();
+    return {
+        supported,
+        streamHandlers,
+        receiveFrom: vi.fn((peerId: string, onStream: (stream: MediaStream) => void) => streamHandlers.set(peerId, onStream)),
+        stopReceivingFrom: vi.fn(),
+        setSending: vi.fn(),
+        setLocalTrack: vi.fn(),
+        close: vi.fn(),
+    };
+}
+
+/** A manager with a relay and a peer "z" that has said hello (so the connection to it exists). */
+async function setupWithPeer(relay: RelayTransportLike | undefined, overrides: Partial<MeshConnectionManagerOptions> = {}) {
+    const context = setup({ relay, ...overrides });
+    context.manager.start();
+    context.channel.emit(hello("z", "Zed"));
+    await flush();
+    return { ...context, pc: context.created[0], transportOf: () => context.manager.participants[0]?.transport };
+}
+
+const setState = (pc: FakeRTCPeerConnection, state: string) => {
+    pc.connectionState = state;
+    pc.onconnectionstatechange?.();
+};
+
+describe("MeshConnectionManager - media paths (p2p, then TURN, then the WebSocket relay)", () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it("reports a connected pair as direct, or as relayed through TURN when the selected candidate pair is a relay", async () => {
+        const direct = await setupWithPeer(undefined);
+        expect(direct.transportOf()).toBe("connecting");
+        setState(direct.pc, "connected");
+        await flush();
+        expect(direct.transportOf()).toBe("p2p");
+        expect(direct.events).toContainEqual({ type: "participant-updated", participant: expect.objectContaining({ uid: "z", transport: "p2p" }) });
+
+        const relayed = await setupWithPeer(undefined);
+        relayed.pc.type = "turn";
+        setState(relayed.pc, "connected");
+        await flush();
+        expect(relayed.transportOf()).toBe("turn");
+    });
+
+    it("counts a pair whose type the browser does not report, or whose stats fail to read, as direct", async () => {
+        const unknown = await setupWithPeer(undefined);
+        unknown.pc.type = "unknown";
+        setState(unknown.pc, "connected");
+        await flush();
+        expect(unknown.transportOf()).toBe("p2p");
+
+        const failing = await setupWithPeer(undefined);
+        failing.pc.connectionType.mockRejectedValueOnce(new Error("no stats"));
+        setState(failing.pc, "connected");
+        await flush();
+        expect(failing.transportOf()).toBe("p2p");
+    });
+
+    it("announces a path change once, and re-reads the path when ICE reconnects on a different one", async () => {
+        const { pc, events, transportOf } = await setupWithPeer(undefined);
+        setState(pc, "connected");
+        await flush();
+        setState(pc, "connected");
+        await flush();
+        expect(events.filter((e) => e.type === "participant-updated")).toHaveLength(1);
+
+        pc.type = "turn";
+        setState(pc, "connected");
+        await flush();
+        expect(transportOf()).toBe("turn");
+        expect(events.filter((e) => e.type === "participant-updated")).toHaveLength(2);
+    });
+
+    it("drops a path reading that lands after the pair dropped, fell back or left", async () => {
+        const dropped = await setupWithPeer(undefined);
+        dropped.pc.connectionState = "connected";
+        dropped.pc.onconnectionstatechange!();
+        dropped.pc.connectionState = "disconnected";
+        await flush();
+        expect(dropped.transportOf()).toBe("connecting");
+
+        const relay = fakeRelay();
+        const fellBack = await setupWithPeer(relay);
+        fellBack.pc.connectionState = "connected";
+        fellBack.pc.onconnectionstatechange!();
+        fellBack.channel.emit(signal("relay-fallback", "z"));
+        await flush();
+        expect(fellBack.transportOf()).toBe("websocket");
+
+        const left = await setupWithPeer(undefined);
+        left.pc.connectionState = "connected";
+        left.pc.onconnectionstatechange!();
+        left.channel.emit(signal("bye", "z"));
+        await flush();
+        expect(left.events.filter((e) => e.type === "participant-updated")).toEqual([]);
+    });
+
+    it("moves a pair whose connection failed to the WebSocket relay, closing the connection and telling the peer", async () => {
+        const relay = fakeRelay();
+        const { manager, channel, pc, events } = await setupWithPeer(relay);
+        channel.sent.length = 0;
+
+        setState(pc, "failed");
+
+        expect(manager.participants).toEqual([{ uid: "z", name: "Zed", audioOn: false, videoOn: false, handRaised: false, transport: "websocket" }]);
+        expect(pc.close).toHaveBeenCalledTimes(1);
+        expect(pc.onconnectionstatechange).toBeNull();
+        expect(pc.onicecandidate).toBeNull();
+        expect(pc.ontrack).toBeNull();
+        expect(relay.receiveFrom).toHaveBeenCalledWith("z", expect.any(Function));
+        expect(relay.setSending).toHaveBeenLastCalledWith(true);
+        expect(channel.sent).toEqual([{ type: "video-meeting-signal", kind: "relay-fallback", from: "a", to: "z" }]);
+        expect(events).toContainEqual({ type: "participant-updated", participant: expect.objectContaining({ uid: "z", transport: "websocket" }) });
+        // Not a departure: the participant stays in the call.
+        expect(events.some((e) => e.type === "participant-left")).toBe(false);
+    });
+
+    it("plays the relay's stream in place of the one WebRTC would have filled", async () => {
+        const relay = fakeRelay();
+        const { pc, events } = await setupWithPeer(relay);
+        setState(pc, "failed");
+        const stream = fakeMediaStream();
+
+        relay.streamHandlers.get("z")!(stream);
+
+        expect(events).toContainEqual({ type: "remote-stream", uid: "z", stream });
+    });
+
+    it("moves a pair that has not connected within the timeout, and leaves one that connected in time alone", async () => {
+        vi.useFakeTimers();
+        const relay = fakeRelay();
+        const slow = await setupWithPeer(relay, { connectTimeoutMs: 5000 });
+        vi.advanceTimersByTime(4999);
+        expect(slow.transportOf()).toBe("connecting");
+        vi.advanceTimersByTime(1);
+        expect(slow.transportOf()).toBe("websocket");
+
+        const quick = await setupWithPeer(relay, { connectTimeoutMs: 5000 });
+        setState(quick.pc, "connected");
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(quick.transportOf()).toBe("p2p");
+    });
+
+    it("waits DEFAULT_CONNECT_TIMEOUT_MS when no timeout is given", async () => {
+        vi.useFakeTimers();
+        const { transportOf } = await setupWithPeer(fakeRelay());
+        vi.advanceTimersByTime(DEFAULT_CONNECT_TIMEOUT_MS - 1);
+        expect(transportOf()).toBe("connecting");
+        vi.advanceTimersByTime(1);
+        expect(transportOf()).toBe("websocket");
+    });
+
+    it("gives a disconnected pair a grace period to recover before moving it, without restarting the wait", async () => {
+        vi.useFakeTimers();
+        const relay = fakeRelay();
+        const { pc, transportOf } = await setupWithPeer(relay, { disconnectedGraceMs: 3000 });
+        setState(pc, "connected");
+        await vi.advanceTimersByTimeAsync(0);
+
+        setState(pc, "disconnected");
+        vi.advanceTimersByTime(2000);
+        setState(pc, "disconnected");
+        vi.advanceTimersByTime(999);
+        expect(transportOf()).toBe("p2p");
+        vi.advanceTimersByTime(1);
+        expect(transportOf()).toBe("websocket");
+    });
+
+    it("keeps a disconnected pair that reconnects within the grace period on WebRTC", async () => {
+        vi.useFakeTimers();
+        const { pc, transportOf } = await setupWithPeer(fakeRelay(), { disconnectedGraceMs: 3000 });
+        setState(pc, "connected");
+        await vi.advanceTimersByTimeAsync(0);
+        setState(pc, "disconnected");
+        vi.advanceTimersByTime(2000);
+        setState(pc, "connected");
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(transportOf()).toBe("p2p");
+    });
+
+    it("waits DEFAULT_DISCONNECTED_GRACE_MS when no grace period is given", async () => {
+        vi.useFakeTimers();
+        const { pc, transportOf } = await setupWithPeer(fakeRelay());
+        setState(pc, "connected");
+        await vi.advanceTimersByTimeAsync(0);
+        setState(pc, "disconnected");
+        vi.advanceTimersByTime(DEFAULT_DISCONNECTED_GRACE_MS - 1);
+        expect(transportOf()).toBe("p2p");
+        vi.advanceTimersByTime(1);
+        expect(transportOf()).toBe("websocket");
+    });
+
+    it("ignores connection states that need no action", async () => {
+        const { pc, transportOf } = await setupWithPeer(fakeRelay());
+        setState(pc, "connecting");
+        expect(transportOf()).toBe("connecting");
+    });
+
+    it("marks a pair failed - and keeps the participant - when there is no relay to fall back to", async () => {
+        for (const relay of [undefined, fakeRelay(false)]) {
+            const { manager, channel, pc, events } = await setupWithPeer(relay);
+            channel.sent.length = 0;
+            setState(pc, "failed");
+            expect(manager.participants).toEqual([{ uid: "z", name: "Zed", audioOn: false, videoOn: false, handRaised: false, transport: "failed" }]);
+            expect(pc.close).not.toHaveBeenCalled();
+            expect(channel.sent).toEqual([]);
+            expect(events.some((e) => e.type === "participant-left")).toBe(false);
+            // Reporting the same failure again changes nothing.
+            const updates = events.filter((e) => e.type === "participant-updated").length;
+            setState(pc, "failed");
+            expect(events.filter((e) => e.type === "participant-updated")).toHaveLength(updates);
+        }
+    });
+
+    it("switches to the relay when the peer says it has, without saying so back", async () => {
+        const relay = fakeRelay();
+        const { manager, channel, pc } = await setupWithPeer(relay);
+        channel.sent.length = 0;
+
+        channel.emit(signal("relay-fallback", "z", { to: "a" }));
+
+        expect(manager.participants[0].transport).toBe("websocket");
+        expect(pc.close).toHaveBeenCalledTimes(1);
+        expect(relay.receiveFrom).toHaveBeenCalledTimes(1);
+        expect(channel.sent).toEqual([]);
+
+        // Hearing it again, or from someone unknown, does nothing more.
+        channel.emit(signal("relay-fallback", "z", { to: "a" }));
+        channel.emit(signal("relay-fallback", "nobody", { to: "a" }));
+        expect(relay.receiveFrom).toHaveBeenCalledTimes(1);
+    });
+
+    it("ignores a late connection event from a connection it already left, or after stopping", async () => {
+        const relay = fakeRelay();
+        const { manager, pc } = await setupWithPeer(relay);
+        const late = pc.onconnectionstatechange!;
+        setState(pc, "failed");
+        pc.connectionState = "connected";
+        late();
+        expect(manager.participants[0].transport).toBe("websocket");
+
+        const stopped = await setupWithPeer(fakeRelay());
+        const staleHandler = stopped.pc.onconnectionstatechange!;
+        stopped.manager.stop();
+        stopped.pc.connectionState = "failed";
+        staleHandler();
+        expect(stopped.events.filter((e) => e.type !== "participant-joined")).toEqual([]);
+    });
+
+    it("stops the relay when the last relayed peer leaves, and only then", async () => {
+        const relay = fakeRelay();
+        const { manager, channel, created } = await setupWithPeer(relay);
+        channel.emit(hello("y", "Yan"));
+        await flush();
+        expect(created).toHaveLength(2);
+        setState(created[0], "failed");
+        setState(created[1], "failed");
+        expect(relay.setSending).toHaveBeenLastCalledWith(true);
+
+        channel.emit(signal("bye", "z"));
+        expect(relay.stopReceivingFrom).toHaveBeenCalledWith("z");
+        expect(relay.setSending).toHaveBeenLastCalledWith(true);
+
+        channel.emit(signal("bye", "y"));
+        expect(relay.stopReceivingFrom).toHaveBeenCalledWith("y");
+        expect(relay.setSending).toHaveBeenLastCalledWith(false);
+        expect(manager.participants).toEqual([]);
+    });
+
+    it("leaves the relay alone when a peer that never used it leaves", async () => {
+        const relay = fakeRelay();
+        const { channel } = await setupWithPeer(relay);
+        channel.emit(signal("bye", "z"));
+        expect(relay.stopReceivingFrom).not.toHaveBeenCalled();
+        expect(relay.setSending).not.toHaveBeenCalled();
+    });
+
+    it("hands the relay the local tracks from the start and on every change, and closes it on stop", () => {
+        const relay = fakeRelay();
+        const { manager, audio, video } = setup({ relay });
+        expect(relay.setLocalTrack).toHaveBeenCalledWith("audio", audio);
+        expect(relay.setLocalTrack).toHaveBeenCalledWith("video", video);
+
+        const screen = fakeTrack("video", "screen");
+        manager.setLocalTrack("video", screen);
+        expect(relay.setLocalTrack).toHaveBeenLastCalledWith("video", screen);
+
+        manager.start();
+        manager.stop();
+        expect(relay.close).toHaveBeenCalledTimes(1);
+    });
+
+    it("cancels a pending fallback when the manager stops", async () => {
+        vi.useFakeTimers();
+        const relay = fakeRelay();
+        const { manager } = await setupWithPeer(relay, { connectTimeoutMs: 1000 });
+        manager.stop();
+        vi.advanceTimersByTime(5000);
+        expect(relay.receiveFrom).not.toHaveBeenCalled();
     });
 });

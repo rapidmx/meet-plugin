@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Fall back, per pair of participants, from a direct connection to TURN to media proxied over a WebSocket by the server (`/api/mail/video-meetings/relay/:id`, Opus and VP8 through WebCodecs), with the `mail:videoconf:relay:enabled` setting and `relayEnabled` in the join response
+- Show on a participant's tile when their media is relayed through TURN or the server, or cannot connect
+- Show "Awaiting connection…" on a participant still connecting and "Connecting…" on the local tile until the first connection is up
+- Carry relayed media between server replicas through Redis (`RedisRelayBus`, the `events` datastore), falling back to one process without it
+- Ask the framework for 64 KiB relay messages and a 1 MiB send buffer when `@rapidrest/service-core` supports per-route WebSocket options (2.4.0), and tell the client the limit in the relay's `ready` message (`maxMessageBytes`)
+- Export `withTcpFallback()`, and the relay hub and its limits, from the package root
+
+### Changed
+- Offer every plain `turn:` address over TCP as well as UDP, for networks that block UDP
+- Keep a participant whose connection failed in the call, marked as unreachable, instead of removing them
+
 ## [0.6.0] - 2026-09-26
 
 ### Changed

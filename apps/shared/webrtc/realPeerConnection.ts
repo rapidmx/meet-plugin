@@ -9,6 +9,27 @@
  * exist at all - it would only throw if actually *called* outside a browser. */
 import type { RTCPeerConnectionFactory, RTCPeerConnectionLike } from "./types.js";
 
+/**
+ * Whether the pair ICE settled on goes through a TURN relay. The selected pair is found the standard way (the
+ * `transport` report's `selectedCandidatePairId`) and, for a browser that does not fill that in, as the succeeded and
+ * nominated `candidate-pair`. A relay on *either* end means the media passes through a TURN server, so it counts as
+ * `"turn"`; `"unknown"` when no pair is reported at all.
+ */
+export async function selectedConnectionType(pc: Pick<RTCPeerConnection, "getStats">): Promise<"p2p" | "turn" | "unknown"> {
+    const reports = new Map<string, Record<string, unknown>>();
+    (await pc.getStats()).forEach((report: Record<string, unknown>) => reports.set(String(report.id), report));
+    const transport = [...reports.values()].find((report) => report.type === "transport" && report.selectedCandidatePairId);
+    const pair =
+        (transport ? reports.get(String(transport.selectedCandidatePairId)) : undefined) ??
+        [...reports.values()].find((report) => report.type === "candidate-pair" && (report.selected || (report.nominated && report.state === "succeeded")));
+    if (!pair) {
+        return "unknown";
+    }
+    const local = reports.get(String(pair.localCandidateId));
+    const remote = reports.get(String(pair.remoteCandidateId));
+    return local?.candidateType === "relay" || remote?.candidateType === "relay" ? "turn" : "p2p";
+}
+
 export const createBrowserPeerConnection: RTCPeerConnectionFactory = (config) => {
     const pc = new RTCPeerConnection(config);
     const like: RTCPeerConnectionLike = {
@@ -33,6 +54,7 @@ export const createBrowserPeerConnection: RTCPeerConnectionFactory = (config) =>
         setRemoteDescription: (description) => pc.setRemoteDescription(description),
         addIceCandidate: (candidate) => pc.addIceCandidate(candidate),
         close: () => pc.close(),
+        connectionType: () => selectedConnectionType(pc),
         onicecandidate: null,
         ontrack: null,
         onconnectionstatechange: null,

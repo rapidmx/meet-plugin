@@ -51,6 +51,9 @@ export interface VideoMeetingJoinResult {
     token?: string;
     /** ISO 8601 instant `token` expires at. Present only when `authenticated` is `false`. */
     expiresAt?: string;
+    /** Whether the server offers the WebSocket media relay - the last-resort path for a participant neither a direct
+     * connection nor the TURN server can reach. Absent from a server that predates it, which reads as off. */
+    relayEnabled?: boolean;
 }
 
 /** Resolves a join token (an invitee's own link) or a public meeting's slug to its meeting info, ICE servers, and

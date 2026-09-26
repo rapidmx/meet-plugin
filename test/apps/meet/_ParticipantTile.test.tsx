@@ -86,3 +86,49 @@ describe("ParticipantTile", () => {
         expect(screen.queryByRole("button")).toBeNull();
     });
 });
+
+describe("ParticipantTile transport badge", () => {
+    it("says so when the participant's media comes through the TURN relay, the server relay, or not at all", () => {
+        const { rerender } = render(<ParticipantTile name="Bob" transport="turn" />);
+        expect(screen.getByTestId("transport-badge")).toHaveTextContent("Relayed");
+
+        rerender(<ParticipantTile name="Bob" transport="websocket" />);
+        expect(screen.getByTestId("transport-badge")).toHaveTextContent("Server relay");
+        expect(screen.getByTestId("transport-badge").title).toMatch(/last resort/);
+
+        rerender(<ParticipantTile name="Bob" transport="failed" />);
+        expect(screen.getByTestId("transport-badge")).toHaveTextContent("Can't connect");
+    });
+
+    it("stays quiet for a direct connection, one still connecting, and a tile with no transport", () => {
+        const { rerender } = render(<ParticipantTile name="Bob" transport="p2p" />);
+        expect(screen.queryByTestId("transport-badge")).toBeNull();
+        rerender(<ParticipantTile name="Bob" transport="connecting" />);
+        expect(screen.queryByTestId("transport-badge")).toBeNull();
+        rerender(<ParticipantTile name="Bob" />);
+        expect(screen.queryByTestId("transport-badge")).toBeNull();
+    });
+});
+
+describe("ParticipantTile status", () => {
+    it("shows the status with a spinner under the initial while there is no video", () => {
+        render(<ParticipantTile name="Bob" status="Awaiting connection…" />);
+        expect(screen.getByTestId("tile-status")).toHaveTextContent("Awaiting connection…");
+        expect(screen.getByTestId("tile-status").getAttribute("aria-live")).toBe("polite");
+        expect(screen.getByText("B")).toBeInTheDocument();
+    });
+
+    it("shows the status over the picture when there is video", () => {
+        const { container } = render(<ParticipantTile name="Me" isLocal status="Connecting…" stream={fakeMediaStream([fakeTrack("video")])} />);
+        expect(container.querySelector("video")).not.toBeNull();
+        expect(screen.getByTestId("tile-status")).toHaveTextContent("Connecting…");
+    });
+
+    it("shows nothing when there is no status", () => {
+        const { rerender, container } = render(<ParticipantTile name="Bob" />);
+        expect(screen.queryByTestId("tile-status")).toBeNull();
+        rerender(<ParticipantTile name="Bob" stream={fakeMediaStream([fakeTrack("video")])} />);
+        expect(container.querySelector("video")).not.toBeNull();
+        expect(screen.queryByTestId("tile-status")).toBeNull();
+    });
+});

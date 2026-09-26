@@ -10,7 +10,35 @@
  * own `<audio>` elements (`_CallView.tsx`'s `RemoteAudio`), so a tile that isn't showing video - or isn't on screen
  * in the current layout - can never silence anyone. */
 import React, { useEffect, useRef } from "react";
+import type { MediaTransport } from "../shared/webrtc/types.js";
 import { MicOffIcon } from "./_icons.js";
+
+/** What a tile says about how its participant's media is arriving, for the paths that are not the ordinary direct one
+ * (which needs no comment). Text rather than only an icon, so the reason a picture is degraded is never a guess. */
+const TRANSPORT_BADGES: Partial<Record<MediaTransport, { label: string; title: string }>> = {
+    turn: { label: "Relayed", title: "Connected through the relay server, because a direct connection was not possible." },
+    websocket: {
+        label: "Server relay",
+        title: "Sent through the server as a last resort, because no other connection was possible. Video is lower quality and sound may lag.",
+    },
+    failed: { label: "Can't connect", title: "This participant could not be reached from your network." },
+};
+
+/** A short line saying the connection is still being made, with a spinner - a polite live region (not `role="status"`,
+ * which the call view's own announcement region already is), so a participant who cannot see the tile still learns
+ * why nothing is happening yet. */
+function StatusPill({ status, className }: { status: string; className?: string }) {
+    return (
+        <span
+            aria-live="polite"
+            data-testid="tile-status"
+            className={`flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-black/60 text-white text-xs ${className ?? ""}`}
+        >
+            <span className="inline-block w-3 h-3 rounded-full border-2 border-white/30 border-t-white animate-spin" aria-hidden="true" />
+            {status}
+        </span>
+    );
+}
 
 export interface ParticipantTileProps {
     name: string;
@@ -20,6 +48,11 @@ export interface ParticipantTileProps {
     cameraOff?: boolean;
     micMuted?: boolean;
     handRaised?: boolean;
+    /** How this participant's media reaches you - a badge is shown for everything but a direct or still-connecting one. */
+    transport?: MediaTransport;
+    /** Says the connection is still being made, e.g. "Connecting..." on the local tile and "Awaiting connection..." on a
+     * participant's - shown with a spinner until the caller clears it. */
+    status?: string;
     /** Highlights this tile as the current presenter/focus. */
     isFocused?: boolean;
     /** Fits the whole picture inside the tile instead of filling it - a shared screen must not be cropped. */
@@ -39,11 +72,14 @@ export default function ParticipantTile({
     cameraOff,
     micMuted,
     handRaised,
+    transport,
+    status,
     isFocused,
     contain,
     onClick,
     className,
 }: ParticipantTileProps) {
+    const badge = transport ? TRANSPORT_BADGES[transport] : undefined;
     const videoRef = useRef<HTMLVideoElement>(null);
     const showVideo = !!stream && !cameraOff;
 
@@ -65,16 +101,22 @@ export default function ParticipantTile({
             aria-label={onClick ? `${name}${isLocal ? " (you)" : ""}` : undefined}
         >
             {showVideo ? (
-                <video
-                    ref={videoRef}
-                    autoPlay
-                    playsInline
-                    muted
-                    className={`w-full h-full ${contain ? "object-contain bg-black" : "object-cover"} ${isLocal && !contain ? "[transform:scaleX(-1)]" : ""}`}
-                />
+                <>
+                    <video
+                        ref={videoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className={`w-full h-full ${contain ? "object-contain bg-black" : "object-cover"} ${isLocal && !contain ? "[transform:scaleX(-1)]" : ""}`}
+                    />
+                    {status && <StatusPill status={status} className="absolute top-2 left-1/2 -translate-x-1/2 whitespace-nowrap" />}
+                </>
             ) : (
-                <div className="w-16 h-16 rounded-full bg-primary text-white flex items-center justify-center text-2xl font-bold" aria-hidden="true">
-                    {initialOf(name)}
+                <div className="flex flex-col items-center gap-2 max-w-full px-1">
+                    <div className="w-16 h-16 rounded-full bg-primary text-white flex items-center justify-center text-2xl font-bold" aria-hidden="true">
+                        {initialOf(name)}
+                    </div>
+                    {status && <StatusPill status={status} />}
                 </div>
             )}
             {handRaised && (
@@ -87,6 +129,17 @@ export default function ParticipantTile({
                     <span className="w-4 h-4 [&>svg]:w-4 [&>svg]:h-4">
                         <MicOffIcon />
                     </span>
+                </span>
+            )}
+            {badge && (
+                <span
+                    className={`absolute bottom-2 right-2 px-2 py-0.5 rounded text-xs ${
+                        transport === "failed" ? "bg-[#601410] text-[#f9dedc]" : "bg-black/60 text-white"
+                    }`}
+                    title={badge.title}
+                    data-testid="transport-badge"
+                >
+                    {badge.label}
                 </span>
             )}
             <div className="absolute bottom-2 left-2 max-w-[calc(100%-1rem)] truncate px-2 py-0.5 rounded bg-black/60 text-white text-sm">

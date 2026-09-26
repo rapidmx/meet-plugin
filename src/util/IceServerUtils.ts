@@ -28,6 +28,27 @@ export function parseTurnUrls(value: string): string[] {
     return value.split(/[\s,]+/).filter(Boolean);
 }
 
+/**
+ * Adds the TCP flavour of every plain `turn:` URL that does not name a transport itself. A browser given
+ * `turn:host:3478` speaks only UDP to the TURN server, and UDP is precisely what a restrictive firewall blocks while
+ * still letting outbound TCP through - so a client behind one never reaches a TURN server that was listening on TCP
+ * all along. Offering both lets ICE try UDP first and settle for TCP when UDP goes nowhere. `turns:` URLs are TCP
+ * (TLS) already, and a URL with an explicit `transport=` is the operator's own choice and is left exactly as given.
+ *
+ * @param urls The URLs from `parseTurnUrls()`, in the order the operator wrote them.
+ * @returns The same URLs, each plain `turn:` one followed by its `?transport=tcp` twin, without duplicates.
+ */
+export function withTcpFallback(urls: string[]): string[] {
+    const expanded: string[] = [];
+    for (const url of urls) {
+        expanded.push(url);
+        if (/^turn:/i.test(url) && !/[?&]transport=/i.test(url)) {
+            expanded.push(`${url}${url.includes("?") ? "&" : "?"}transport=tcp`);
+        }
+    }
+    return [...new Set(expanded)];
+}
+
 /** Always-available, free public STUN servers - discovery only, no media relay. Two independent providers, so a
  * call still has STUN available if one of them is ever unreachable. */
 export const DEFAULT_STUN_SERVERS: readonly IceServerConfig[] = [
@@ -68,7 +89,7 @@ export function turnRestCredential(
 
 /**
  * Builds the full ICE server list for a join response: the hardcoded public STUN servers, plus a TURN entry when
- * `settings.url` is configured. When a `sharedSecret` is also configured, the TURN entry carries a fresh,
+ * `settings.url` is configured (see `withTcpFallback()` for the URLs it carries). When a `sharedSecret` is also configured, the TURN entry carries a fresh,
  * time-limited credential (`turnRestCredential()`) rather than the static `username`/`credential` pair, which is
  * used verbatim only when no shared secret is set. A TURN url with neither a shared secret nor a static
  * credential is still included with no credentials at all - some self-hosted TURN servers are deliberately run
@@ -84,11 +105,12 @@ export function buildIceServers(
     options?: { ttlSeconds?: number; now?: Date; randomUserPart?: () => string },
 ): IceServerConfig[] {
     const servers: IceServerConfig[] = [...DEFAULT_STUN_SERVERS];
-    const turnUrls: string[] = parseTurnUrls(settings.url);
-    if (turnUrls.length === 0) {
+    const configured: string[] = parseTurnUrls(settings.url);
+    if (configured.length === 0) {
         return servers;
     }
-    // A single URL stays a string, exactly as before, so a deployment that never sets more than one sees no change.
+    const turnUrls: string[] = withTcpFallback(configured);
+    // One URL stays a string, so an operator who names a single `turns:` or `?transport=` URL sees no change.
     const url: string | string[] = turnUrls.length === 1 ? turnUrls[0] : turnUrls;
     if (settings.sharedSecret.trim()) {
         const userPart: string = settings.username.trim() || (options?.randomUserPart ?? (() => crypto.randomBytes(8).toString("hex")))();

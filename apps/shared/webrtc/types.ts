@@ -44,7 +44,8 @@ export interface SignalMessage {
         | "presenter-claim"
         | "presenter-release"
         | "state"
-        | "reaction";
+        | "reaction"
+        | "relay-fallback";
     /** The sender's authenticated uid - the real caller's own uid when `join()` returned `authenticated: true`, else
      * the `guest:<random>` uid `BaseVideoMeetingRoute.join()` minted. The server refuses a published message whose
      * `from` isn't the authenticated caller's uid (it stops one participant speaking as another), so this must be
@@ -55,7 +56,7 @@ export interface SignalMessage {
      * ignored, so it can't name someone else's tab. Absent from a sender that predates it (the participant is then
      * identified by `from`). */
     peer?: string;
-    /** Set only on a point-to-point message (`offer`/`answer`/`ice-candidate`). */
+    /** Set only on a point-to-point message (`offer`/`answer`/`ice-candidate`/`relay-fallback`). */
     to?: string;
     /** `hello` only - the display name the sender chose in the lobby. */
     name?: string;
@@ -112,6 +113,33 @@ export interface RTCPeerConnectionLike {
     ontrack: ((event: { track: MediaStreamTrack }) => void) | null;
     onconnectionstatechange: (() => void) | null;
     connectionState: string;
+    /** Which path the connected pair is using - read from the selected candidate pair once `connectionState` is
+     * `connected`. `"unknown"` when the browser does not report one (treated as direct by the caller). */
+    connectionType(): Promise<"p2p" | "turn" | "unknown">;
+}
+
+/** Which of the three media paths a participant's audio and video currently take, in the order they are tried:
+ *
+ * - `"p2p"`: a direct peer-to-peer WebRTC connection, the preferred path.
+ * - `"turn"`: still WebRTC, but relayed through the TURN server, for a participant a direct path cannot reach.
+ * - `"websocket"`: not WebRTC at all - encoded frames proxied by this server over a WebSocket (see
+ * `apps/shared/relay/`), the last resort when neither of the above connects.
+ * - `"connecting"`: no path established yet. `"failed"`: every path this browser can try has failed. */
+export type MediaTransport = "connecting" | "p2p" | "turn" | "websocket" | "failed";
+
+/** What `MeshConnectionManager` needs from the WebSocket media relay (`apps/shared/relay/RelayTransport.ts` implements
+ * it) - declared here so the mesh, and its tests, depend on the shape alone. */
+export interface RelayTransportLike {
+    /** `false` when this browser cannot do it (no WebSocket, no WebCodecs) - the mesh then never falls back to it. */
+    readonly supported: boolean;
+    /** Starts receiving `peerId`'s media. `onStream` is given the `MediaStream` that plays it. */
+    receiveFrom(peerId: string, onStream: (stream: MediaStream) => void): void;
+    stopReceivingFrom(peerId: string): void;
+    /** Starts or stops publishing the local tracks to the relay. */
+    setSending(active: boolean): void;
+    /** Same as `MeshConnectionManager.setLocalTrack()` - `null` sends nothing for that kind. */
+    setLocalTrack(kind: "audio" | "video", track: MediaStreamTrack | null): void;
+    close(): void;
 }
 
 export type RTCPeerConnectionFactory = (config: { iceServers: RTCIceServer[] }) => RTCPeerConnectionLike;
@@ -121,6 +149,8 @@ export type RTCPeerConnectionFactory = (config: { iceServers: RTCIceServer[] }) 
 export interface MeshParticipant extends ParticipantState {
     uid: string;
     name: string;
+    /** How this participant's media currently reaches the local one - see `MediaTransport`. */
+    transport: MediaTransport;
 }
 
 export type MeshEvent =

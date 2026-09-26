@@ -2,7 +2,14 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
-import { buildIceServers, DEFAULT_STUN_SERVERS, DEFAULT_TURN_CREDENTIAL_TTL_SECONDS, parseTurnUrls, turnRestCredential } from "../../src/util/IceServerUtils.js";
+import {
+    buildIceServers,
+    DEFAULT_STUN_SERVERS,
+    DEFAULT_TURN_CREDENTIAL_TTL_SECONDS,
+    parseTurnUrls,
+    turnRestCredential,
+    withTcpFallback,
+} from "../../src/util/IceServerUtils.js";
 
 const EMPTY_TURN = { url: "", username: "", credential: "", sharedSecret: "" };
 
@@ -58,19 +65,22 @@ describe("buildIceServers", () => {
     it("Adds a static-credential TURN entry when a url, username and credential are all configured.", () => {
         const result = buildIceServers({ url: "turn:turn.example.com:3478", username: "static-user", credential: "static-pass", sharedSecret: "" });
 
-        expect(result).toEqual([...DEFAULT_STUN_SERVERS, { urls: "turn:turn.example.com:3478", username: "static-user", credential: "static-pass" }]);
+        expect(result).toEqual([
+            ...DEFAULT_STUN_SERVERS,
+            { urls: ["turn:turn.example.com:3478", "turn:turn.example.com:3478?transport=tcp"], username: "static-user", credential: "static-pass" },
+        ]);
     });
 
     it("Adds the TURN url with no credentials when neither a shared secret nor a static credential pair is set.", () => {
         const result = buildIceServers({ ...EMPTY_TURN, url: "turn:open.example.com:3478" });
 
-        expect(result).toEqual([...DEFAULT_STUN_SERVERS, { urls: "turn:open.example.com:3478" }]);
+        expect(result).toEqual([...DEFAULT_STUN_SERVERS, { urls: ["turn:open.example.com:3478", "turn:open.example.com:3478?transport=tcp"] }]);
     });
 
     it("Adds the TURN url with no credentials when only a username (no credential) is set and there's no shared secret.", () => {
         const result = buildIceServers({ ...EMPTY_TURN, url: "turn:open.example.com:3478", username: "someone" });
 
-        expect(result).toEqual([...DEFAULT_STUN_SERVERS, { urls: "turn:open.example.com:3478" }]);
+        expect(result).toEqual([...DEFAULT_STUN_SERVERS, { urls: ["turn:open.example.com:3478", "turn:open.example.com:3478?transport=tcp"] }]);
     });
 
     it("Mints a time-limited REST credential when a shared secret is configured, using the configured username.", () => {
@@ -102,7 +112,11 @@ describe("buildIceServers", () => {
     it("Trims whitespace around every TURN setting before using it.", () => {
         const result = buildIceServers({ url: "  turn:turn.example.com:3478  ", username: " static-user ", credential: " static-pass ", sharedSecret: "" });
 
-        expect(result[2]).toEqual({ urls: "turn:turn.example.com:3478", username: "static-user", credential: "static-pass" });
+        expect(result[2]).toEqual({
+            urls: ["turn:turn.example.com:3478", "turn:turn.example.com:3478?transport=tcp"],
+            username: "static-user",
+            credential: "static-pass",
+        });
     });
 
     it("Gives a TURN server listening on several addresses one entry with all its URLs, sharing one credential.", () => {
@@ -114,7 +128,7 @@ describe("buildIceServers", () => {
 
         expect(result).toHaveLength(DEFAULT_STUN_SERVERS.length + 1);
         expect(result[2]).toEqual({
-            urls: ["turn:turn.example.com:3478", "turns:turn.example.com:5349"],
+            urls: ["turn:turn.example.com:3478", "turn:turn.example.com:3478?transport=tcp", "turns:turn.example.com:5349"],
             username: "1700000000:generated",
             credential: turnRestCredential("sharedsecret123", "generated", 0, now).credential,
         });
@@ -123,7 +137,17 @@ describe("buildIceServers", () => {
     it("Uses the same static credential for every one of several URLs.", () => {
         const result = buildIceServers({ url: "turn:a.example.com:3478 turns:a.example.com:5349", username: "u", credential: "p", sharedSecret: "" });
 
-        expect(result[2]).toEqual({ urls: ["turn:a.example.com:3478", "turns:a.example.com:5349"], username: "u", credential: "p" });
+        expect(result[2]).toEqual({
+            urls: ["turn:a.example.com:3478", "turn:a.example.com:3478?transport=tcp", "turns:a.example.com:5349"],
+            username: "u",
+            credential: "p",
+        });
+    });
+
+    it("Keeps a single turns: URL a plain string, since it needs no TCP twin.", () => {
+        const result = buildIceServers({ ...EMPTY_TURN, url: "turns:turn.example.com:5349" });
+
+        expect(result[2]).toEqual({ urls: "turns:turn.example.com:5349" });
     });
 });
 
@@ -133,5 +157,27 @@ describe("parseTurnUrls", () => {
         expect(parseTurnUrls(" turn:a:3478 ,, turns:a:5349\n turn:b:3478?transport=tcp ")).toEqual(["turn:a:3478", "turns:a:5349", "turn:b:3478?transport=tcp"]);
         expect(parseTurnUrls("")).toEqual([]);
         expect(parseTurnUrls(" , ")).toEqual([]);
+    });
+});
+
+describe("withTcpFallback", () => {
+    it("Follows a plain turn: URL with its TCP twin, in place.", () => {
+        expect(withTcpFallback(["turn:a:3478", "turns:a:5349"])).toEqual(["turn:a:3478", "turn:a:3478?transport=tcp", "turns:a:5349"]);
+    });
+
+    it("Leaves a URL that already names a transport, and a turns: URL, exactly as given.", () => {
+        expect(withTcpFallback(["turn:a:3478?transport=udp", "turn:b:3478?transport=tcp", "turns:b:5349"])).toEqual([
+            "turn:a:3478?transport=udp",
+            "turn:b:3478?transport=tcp",
+            "turns:b:5349",
+        ]);
+    });
+
+    it("Appends to an existing query string, matches the scheme case-insensitively and drops duplicates.", () => {
+        expect(withTcpFallback(["TURN:a:3478?x=1", "TURN:a:3478?x=1&transport=tcp"])).toEqual(["TURN:a:3478?x=1", "TURN:a:3478?x=1&transport=tcp"]);
+    });
+
+    it("Returns nothing for nothing.", () => {
+        expect(withTcpFallback([])).toEqual([]);
     });
 });

@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createBrowserPeerConnection } from "../../../../apps/shared/webrtc/realPeerConnection.js";
+import { createBrowserPeerConnection, selectedConnectionType } from "../../../../apps/shared/webrtc/realPeerConnection.js";
 
 class FakeSender {
     constructor(public track: unknown) {}
@@ -14,6 +14,11 @@ class FakeTransceiver {
     direction = "recvonly";
     sender = new FakeSender(null);
     constructor(public receiver: { track: { kind: string } }) {}
+}
+
+/** A stand-in for the `RTCStatsReport` map: only `forEach` is used. */
+function statsOf(reports: Record<string, unknown>[]) {
+    return { forEach: (callback: (report: Record<string, unknown>) => void) => reports.forEach(callback) } as unknown as RTCStatsReport;
 }
 
 class FakeRTCPeerConnection {
@@ -37,6 +42,7 @@ class FakeRTCPeerConnection {
     setRemoteDescription = vi.fn(async () => undefined);
     addIceCandidate = vi.fn(async () => undefined);
     close = vi.fn();
+    getStats = vi.fn(async () => statsOf([]));
     constructor(config: unknown) {
         this.config = config;
         FakeRTCPeerConnection.instances.push(this);
@@ -131,5 +137,65 @@ describe("createBrowserPeerConnection", () => {
         expect(() => real.onicecandidate!({ candidate: null })).not.toThrow();
         expect(() => real.ontrack!({ track: {}, streams: [] })).not.toThrow();
         expect(() => real.onconnectionstatechange!()).not.toThrow();
+    });
+});
+
+describe("selectedConnectionType", () => {
+    const candidates = (local: string, remote: string) => [
+        { id: "l", type: "local-candidate", candidateType: local },
+        { id: "r", type: "remote-candidate", candidateType: remote },
+    ];
+    const typeOf = (reports: Record<string, unknown>[]) => selectedConnectionType({ getStats: async () => statsOf(reports) });
+
+    it("is p2p when the selected pair (found through the transport report) has no relay end", async () => {
+        expect(
+            await typeOf([
+                { id: "t", type: "transport", selectedCandidatePairId: "p" },
+                { id: "p", type: "candidate-pair", localCandidateId: "l", remoteCandidateId: "r" },
+                ...candidates("host", "srflx"),
+            ]),
+        ).toBe("p2p");
+    });
+
+    it("is turn when either end of the selected pair is a relay candidate", async () => {
+        const report = (local: string, remote: string) => [
+            { id: "t", type: "transport", selectedCandidatePairId: "p" },
+            { id: "p", type: "candidate-pair", localCandidateId: "l", remoteCandidateId: "r" },
+            ...candidates(local, remote),
+        ];
+        expect(await typeOf(report("relay", "host"))).toBe("turn");
+        expect(await typeOf(report("srflx", "relay"))).toBe("turn");
+    });
+
+    it("falls back to the nominated, succeeded candidate pair for a browser with no selectedCandidatePairId", async () => {
+        expect(
+            await typeOf([
+                { id: "old", type: "candidate-pair", nominated: true, state: "failed", localCandidateId: "l", remoteCandidateId: "r" },
+                { id: "p", type: "candidate-pair", nominated: true, state: "succeeded", localCandidateId: "l", remoteCandidateId: "r" },
+                ...candidates("relay", "host"),
+            ]),
+        ).toBe("turn");
+        expect(await typeOf([{ id: "p", type: "candidate-pair", selected: true, localCandidateId: "l", remoteCandidateId: "r" }, ...candidates("host", "host")])).toBe("p2p");
+    });
+
+    it("is unknown when no pair is reported, and p2p when the pair's candidates are missing", async () => {
+        expect(await typeOf([])).toBe("unknown");
+        expect(await typeOf([{ id: "t", type: "transport", selectedCandidatePairId: "gone" }])).toBe("unknown");
+        expect(await typeOf([{ id: "p", type: "candidate-pair", selected: true, localCandidateId: "x", remoteCandidateId: "y" }])).toBe("p2p");
+    });
+});
+
+describe("createBrowserPeerConnection connectionType", () => {
+    it("reads the selected pair from the real connection's stats", async () => {
+        vi.stubGlobal("RTCPeerConnection", FakeRTCPeerConnection);
+        const like = createBrowserPeerConnection({ iceServers: [] });
+        const real = FakeRTCPeerConnection.instances[0];
+        real.getStats.mockResolvedValue(
+            statsOf([
+                { id: "p", type: "candidate-pair", selected: true, localCandidateId: "l", remoteCandidateId: "r" },
+                { id: "l", type: "local-candidate", candidateType: "relay" },
+            ]),
+        );
+        await expect(like.connectionType()).resolves.toBe("turn");
     });
 });

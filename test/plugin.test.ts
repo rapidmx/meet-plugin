@@ -38,6 +38,19 @@ describe("plugin entry points", () => {
         });
     });
 
+    it.each([
+        ["mongo", MongoEntry.VideoMeetingRouteMongo],
+        ["sql", SqlEntry.VideoMeetingRouteSQL],
+    ])("mounts the ./%s route's WebSocket media relay at /api/mail/video-meetings/relay/:id, behind jwt auth", (_name, clazz: any) => {
+        const route = Reflect.getMetadata("rrst:route", clazz.prototype, "relay");
+        expect([...route.methods.entries()]).toEqual([["ws", "/relay/:id"]]);
+        expect(route.authStrategies).toEqual(["jwt"]);
+        expect(route.authRequired).toBe(true);
+        // `RouteUtils.registerRoute()` joins each base path and the method's sub-path exactly like this.
+        const [basePath] = Reflect.getMetadata("rrst:routePaths", clazz.prototype);
+        expect(`${basePath}/${route.methods.get("ws").replace(/^\//, "")}`).toBe("/api/mail/video-meetings/relay/:id");
+    });
+
     it("keeps the collection names, index names and ACL uids of the models core used to define", () => {
         const meetingIndexes: string[] = ["videomeeting_mailbox", "videomeeting_public_slug", "videomeeting_organizer_slug"];
         const inviteeIndexes: string[] = ["videomeetinginvitee_join_token", "videomeetinginvitee_meeting", "videomeetinginvitee_mailbox"];
@@ -65,8 +78,31 @@ describe("plugin entry points", () => {
                 "DEFAULT_TURN_CREDENTIAL_TTL_SECONDS",
                 "parseTurnUrls",
                 "turnRestCredential",
+                "withTcpFallback",
                 "GUEST_JWT_TTL_SECONDS",
                 "GUEST_UID_PREFIX",
+                "InProcessRelayBus",
+                "isValidRelayPeer",
+                "parseRelayEnabled",
+                "RELAY_BURST_BYTES",
+                "RELAY_HELLO_TIMEOUT_MS",
+                "RELAY_LARGE_PAYLOAD_BYTES",
+                "RELAY_MAX_PAYLOAD_BYTES",
+                "RELAY_WS_MAX_BACKPRESSURE_BYTES",
+                "RELAY_MAX_PEER_LENGTH",
+                "RELAY_MAX_SOCKETS_PER_ROOM",
+                "RELAY_MAX_SOCKETS_PER_UID",
+                "RELAY_MAX_WANT_PEERS",
+                "RELAY_OVER_BUDGET_CLOSE_MS",
+                "RELAY_OVER_BUDGET_GRACE_MS",
+                "RELAY_PROTOCOL_VERSION",
+                "RELAY_RATE_BYTES_PER_SECOND",
+                "RelayHub",
+                "REDIS_RELAY_CHANNEL_PREFIX",
+                "REDIS_RELAY_ORIGIN_BYTES",
+                "REDIS_RELAY_WARN_INTERVAL_MS",
+                "RedisRelayBus",
+                "redisRelayChannel",
                 "JOIN_TOKEN_PATTERN",
                 "PUBLIC_SLUG_PATTERN",
                 "mintJoinToken",
@@ -94,10 +130,18 @@ describe("plugin manifest", () => {
             "mail:videoconf:turn:username",
             "mail:videoconf:turn:credential",
             "mail:videoconf:turn:shared_secret",
+            "mail:videoconf:relay:enabled",
         ]);
-        for (const setting of manifest.settings) {
+        for (const setting of manifest.settings.filter((s: any) => s.key !== "mail:videoconf:relay:enabled")) {
             expect(setting.default).toBe(setting.key === "mail:videoconf:public_url" ? "https://<host>/meet" : "");
         }
+    });
+
+    it("declares the WebSocket relay as a boolean setting, on by default", () => {
+        const manifest: any = parsePluginManifest(pkg);
+        expect(manifest.settings.find((s: any) => s.key === "mail:videoconf:relay:enabled")).toEqual(
+            expect.objectContaining({ type: "boolean", default: true }),
+        );
     });
 
     it("declares the meet and settings-video-conferencing apps, and the Video Conferencing settings screen", () => {

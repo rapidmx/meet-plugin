@@ -167,6 +167,9 @@ export interface FakeRTCPeerConnection {
     ontrack: ((event: { track: MediaStreamTrack }) => void) | null;
     onconnectionstatechange: (() => void) | null;
     connectionState: string;
+    /** What `connectionType()` resolves to - a test sets it to script a direct or a TURN-relayed pair. */
+    type: "p2p" | "turn" | "unknown";
+    connectionType: Mock;
 }
 
 /** A fake `RTCPeerConnectionLike` (`apps/shared/webrtc/types.ts`) with scriptable offer/answer SDP and no real ICE
@@ -174,7 +177,7 @@ export interface FakeRTCPeerConnection {
  * `claimKinds` is which m-lines the (fake) remote offer had, i.e. what `claimTransceivers()` finds. */
 export function fakeRTCPeerConnection(claimKinds: ("audio" | "video")[] = ["audio", "video"]): FakeRTCPeerConnection {
     const senders: Partial<Record<"audio" | "video", FakeSender>> = {};
-    return {
+    const pc: FakeRTCPeerConnection = {
         senders,
         addTransceiver: vi.fn((kind: "audio" | "video", track: MediaStreamTrack | null) => {
             senders[kind] = fakeSender(track);
@@ -196,7 +199,10 @@ export function fakeRTCPeerConnection(claimKinds: ("audio" | "video")[] = ["audi
         ontrack: null,
         onconnectionstatechange: null,
         connectionState: "new",
+        type: "p2p",
+        connectionType: vi.fn(async () => pc.type),
     };
+    return pc;
 }
 
 /** `fakePushSocket()`'s return shape - see `FakeRTCPeerConnection`'s doc comment on why `send`/`close` are typed
