@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-26
+
+### Changed
+- Document that a downstream package's release bump level follows its upstream dependency's, minor for minor, patch for patch and major for major, in NOTES
+- Use @rapidmx/restapi 0.23.0, @rapidmx/react-shared 0.19.0 and @rapidmx/web-client 0.17.0, with @rapidrest/react as a peer and development dependency
+- Note the dependency bumps in the release notes
+
 ## [0.4.2] - 2026-09-25
 
 ### Changed
@@ -90,7 +97,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/rapidmx/meet-plugin/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/rapidmx/meet-plugin/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/RapidMX/meet-plugin/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/RapidMX/meet-plugin/compare/v0.3.1...v0.4.0
