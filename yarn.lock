@@ -937,9 +937,9 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@rapidmx/meet-plugin@workspace:."
   dependencies:
-    "@rapidmx/react-shared": "npm:^0.19.0"
-    "@rapidmx/restapi": "npm:^0.23.0"
-    "@rapidmx/web-client": "npm:^0.17.0"
+    "@rapidmx/react-shared": "npm:^0.20.0"
+    "@rapidmx/restapi": "npm:^0.24.0"
+    "@rapidmx/web-client": "npm:^0.19.0"
     "@rapidrest/core": "npm:^6.0.0"
     "@rapidrest/react": "npm:^2.1.0"
     "@rapidrest/service-core": "npm:^2.3.0"
