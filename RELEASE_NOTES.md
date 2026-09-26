@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Builds and is tested against `@rapidmx/restapi` 0.23.0, `@rapidmx/react-shared` 0.19.0 and `@rapidmx/web-client` 0.17.0, and needs those versions or later. web-client 0.17.0 runs its pages on the router of `@rapidrest/react` 2.1.0, which is now a peer dependency (`>=2.1.0 <3`). The plugin's own code is unchanged. A minor bump because all three are minor releases.
+
 ## v0.4.2
 
 ### Changed
