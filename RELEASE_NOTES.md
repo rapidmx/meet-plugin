@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.7.0
+
 ### Added
 
 - **A last-resort media path for participants behind a strict firewall.** Each pair of participants now tries a direct peer-to-peer connection first, then the TURN server, and if neither connects (within 15 seconds, or when the connection fails) their audio and video are sent through the RapidMX server itself over a WebSocket. It needs a browser with WebCodecs (Chrome, Edge and Firefox 130 or later; Safari is untested), picture quality is lower and sound may lag, and it can be switched off with the new "WebSocket media relay" setting (`mail:videoconf:relay:enabled`, on by default). With several server replicas the relay carries media between them through the same Redis the push system uses (the `events` datastore); without it, only participants connected to the same replica reach each other over it. Bigger messages (so a video key frame is one message rather than several) and a bigger send buffer need `@rapidrest/service-core` 2.4.0 or later; on an earlier one the relay still works, with 16 KiB messages.

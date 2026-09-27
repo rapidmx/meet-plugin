@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-27
+
+### Added
+- Added a WebSocket media relay as the last of three media paths, offer TURN over TCP, and show connection progress
+
+### Changed
+- Each pair of participants now tries a direct peer-to-peer connection, then the TURN server, then media proxied by the server over a WebSocket. Add withTcpFallback(), which offers every plain turn: address over UDP and TCP, since a browser given no transport uses only UDP, which strict firewalls block. Add MeshConnectionManager per-pair transport tiers (connecting, p2p, turn, websocket, failed), read from the selected candidate pair, with a relay-fallback signal so both sides switch, and keep a participant whose connection failed in the call instead of dropping them. Add RelayHub and BaseVideoMeetingRoute.relay(), a @WebSocket route at /relay/:id that needs READ and CREATE on the meeting with trusted roles stripped, with room, per-user, size and rate limits, the mail:videoconf:relay:enabled setting and relayEnabled in the join response. Add RedisRelayBus so relayed media crosses server replicas through the events datastore, falling back to one process without it. Add apps/shared/relay, a WebCodecs Opus and VP8 sender and receiver with fragmenting, reassembly and reconnect. Ask the framework for 64 KiB messages and a 1 MiB send buffer when @rapidrest/service-core supports per-route WebSocket options, tell the client the limit in ready (maxMessageBytes), and keep 16 KiB otherwise. Show a Relayed, Server relay or Can't connect badge on a tile, "Awaiting connection..." on a participant still connecting and "Connecting..." on the local tile until the first connection is up. Rename the plugin's display name to Meet. Document the change in the README, release notes, changelog and NOTES, including why TURN did not reach firewalled clients.
+- Needs @rapidrest/service-core 2.4.0 for the larger relay messages; raise the peer range to >=2.4.0 <3 once it is released.
+- Updated rapidrest and rapidmx deps
+
 ### Added
 - Fall back, per pair of participants, from a direct connection to TURN to media proxied over a WebSocket by the server (`/api/mail/video-meetings/relay/:id`, Opus and VP8 through WebCodecs), with the `mail:videoconf:relay:enabled` setting and `relayEnabled` in the join response
 - Show on a participant's tile when their media is relayed through TURN or the server, or cannot connect
@@ -114,7 +124,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/rapidmx/meet-plugin/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/rapidmx/meet-plugin/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/rapidmx/meet-plugin/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/rapidmx/meet-plugin/compare/v0.4.1...v0.4.2
