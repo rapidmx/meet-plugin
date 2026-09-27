@@ -29,7 +29,6 @@
  * saved on this device (`mediaPreferences.ts`) and applied the next time - a saved device is asked for as a
  * preference (`ideal`), so one that has since been unplugged falls back to the default instead of failing.
  *
-
  * Nothing here runs during SSR: browser APIs are only touched from effects and event handlers.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
