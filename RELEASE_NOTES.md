@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.8.0
+
 ### Added
 
 - **Video filters.** Open **Effects** in the lobby, or the sparkle button in the call, to blur your background or replace it with a picture from your own device, give the picture a black and white, sepia, night vision or pixelated look, or put on sunglasses, cat ears, a party hat, a crown or a mustache. They combine, and everyone in the call sees the result. The picture you choose never leaves your browser. Until the background effect has loaded, your real background is hidden rather than shown.

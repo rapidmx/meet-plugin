@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-27
+
+### Added
+- Added video filters and remember devices and settings between calls
+
+### Changed
+- Filters: a blurred or custom background (an image picked from the participant's
+- own device), black and white, sepia, night vision and pixelate looks, and face
+- accessories (sunglasses, cat ears, party hat, crown, mustache). The three kinds
+- combine, and the filtered track replaces the camera track, so every media path
+- sends it unchanged. A background filter fails closed: until the segmentation
+- model is ready the real room is never shown.
+- The models run in the browser with MediaPipe, loaded only when a filter needs
+- them, from public CDNs by default or from the administrator's server with the
+- new mail:videoconf:effects:assets_url setting (returned as effectsAssetsUrl by
+- join()).
+- The camera and microphone a participant picked, whether each was on, and their
+- filters are saved in the browser's localStorage and applied on the next join. A
+- saved device is requested as a preference so an unplugged one falls back to the
+- default.
+- The manifest's displayName became "Meet" in 8e6379e, but the test still
+- expected "Video Conferencing", so CI failed.
+- Upgraded rapidmx deps
+
+### Fixed
+- Fixed crlf issue
+- Fixed the manifest test's stale displayName
+
+
 ### Added
 - Add video filters to the lobby and the in-call controls: a blurred or custom background (a picture picked from the participant's own device), black and white, sepia, night vision and pixelate looks, and face accessories (sunglasses, cat ears, party hat, crown, mustache). The three kinds combine, and the filtered picture is what every media path sends
 - Remember, on the participant's device, the camera and microphone they picked, whether each was on, and their video filters (including the custom background), and apply them the next time they join
@@ -133,7 +162,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/rapidmx/meet-plugin/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/rapidmx/meet-plugin/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/rapidmx/meet-plugin/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/rapidmx/meet-plugin/compare/v0.4.2...v0.5.0
