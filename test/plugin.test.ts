@@ -119,7 +119,7 @@ describe("plugin manifest", () => {
     it("declares a valid plugin manifest", () => {
         const manifest = parsePluginManifest(pkg);
         expect(typeof manifest).toBe("object");
-        expect(manifest).toEqual(expect.objectContaining({ displayName: "Video Conferencing", mailboxScopedData: true }));
+        expect(manifest).toEqual(expect.objectContaining({ displayName: "Meet", mailboxScopedData: true }));
     });
 
     it("declares the videoconf settings, each empty by default but the join page URL, which offers this server's address", () => {
