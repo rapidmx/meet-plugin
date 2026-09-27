@@ -10,7 +10,19 @@ import { fakeMediaDevices, fakeMediaStream, fakeTrack, installFakeMediaStream, i
 import type { CallViewProps } from "../../../apps/meet/_CallView.js";
 import MeetJoinPage from "../../../apps/meet/[token].js";
 
-const { calls } = vi.hoisted(() => ({ calls: [] as unknown[] }));
+const { calls, hookOptions } = vi.hoisted(() => ({ calls: [] as unknown[], hookOptions: [] as unknown[] }));
+
+// The real hook, with what the page hands it recorded.
+vi.mock("../../../apps/shared/media/useLocalMedia.js", async () => {
+    const actual = await vi.importActual<typeof import("../../../apps/shared/media/useLocalMedia.js")>("../../../apps/shared/media/useLocalMedia.js");
+    return {
+        ...actual,
+        useLocalMedia: (options?: { effectsAssetsUrl?: string }) => {
+            hookOptions.push(options);
+            return actual.useLocalMedia(options);
+        },
+    };
+});
 
 vi.mock("../../../apps/meet/_CallView.js", () => ({
     default: (props: CallViewProps) => {
@@ -55,6 +67,7 @@ function mockJoin(response: unknown) {
 
 beforeEach(() => {
     calls.length = 0;
+    hookOptions.length = 0;
     installFakeMediaStream();
 });
 
@@ -132,6 +145,24 @@ describe("MeetJoinPage", () => {
         expect(await screen.findByText("In call as Ada")).toBeInTheDocument();
         expect(screen.getByText("Signaling token: (none - authenticated)")).toBeInTheDocument();
         expect(screen.getByText("Self uid: real-user-1")).toBeInTheDocument();
+    });
+
+    it("hands the join result's effects assets location to the camera and microphone once it is known", async () => {
+        mockJoin({ ...joinResponse, effectsAssetsUrl: "https://cdn.example.com/effects" });
+
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        // Before the join result arrives there is nothing to point at.
+        expect(hookOptions[0]).toEqual({ effectsAssetsUrl: undefined });
+        expect(await screen.findByText("Standup")).toBeInTheDocument();
+        expect(hookOptions[hookOptions.length - 1]).toEqual({ effectsAssetsUrl: "https://cdn.example.com/effects" });
+    });
+
+    it("leaves the effects assets location unset when the join result has none", async () => {
+        mockJoin(joinResponse);
+
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        expect(await screen.findByText("Standup")).toBeInTheDocument();
+        expect(hookOptions.every((options) => (options as { effectsAssetsUrl?: string }).effectsAssetsUrl === undefined)).toBe(true);
     });
 
     it("shows a friendly not-found state for a stale token", async () => {

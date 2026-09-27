@@ -8,6 +8,10 @@
  * the page (`[token].tsx`) rather than by this component - the tracks previewed here are the tracks the call sends,
  * so leaving the lobby for the call must not (and does not) stop them.
  *
+ * The "Effects" section opens the video filter picker (`_EffectsPanel.tsx`), so the participant sees themselves with
+ * a blurred or replaced background, or a fun accessory, before anyone else does. What they chose last time is
+ * already applied when the lobby opens (`useLocalMedia()` remembers it).
+ *
  * Access is requested when the lobby opens, and again from the "Allow" / "Try again" button: a click is a user
  * gesture, which some browsers require before they will show a permission prompt at all. When access is refused, or
  * there is no camera or microphone, the lobby says so and why, and joining is still allowed - a participant with
@@ -24,6 +28,8 @@ import FormField from "@rapidmx/react-shared/components/forms/FormField.js";
 import type { LocalMedia, TrackStatus } from "../shared/media/useLocalMedia.js";
 import type { PublicVideoMeeting } from "./_meetApi.js";
 import { LevelBars } from "./_CallControls.js";
+import EffectsPanel from "./_EffectsPanel.js";
+import { filtersActive } from "../shared/media/filters/filterTypes.js";
 import { MicIcon, MicOffIcon, VideoIcon, VideoOffIcon } from "./_icons.js";
 
 const INPUT_CLASS =
@@ -65,6 +71,7 @@ function previewMessage(media: LocalMedia): string {
 
 export default function MeetLobby({ meeting, media, initialName, onJoin }: MeetLobbyProps) {
     const [name, setName] = useState(initialName ?? "");
+    const [showEffects, setShowEffects] = useState(false);
     const videoRef = useRef<HTMLVideoElement>(null);
     const { requestAccess } = media;
 
@@ -152,6 +159,21 @@ export default function MeetLobby({ meeting, media, initialName, onJoin }: MeetL
                             </select>
                         </label>
                     )}
+                    <div className="mt-3">
+                        <button
+                            type="button"
+                            className="text-sm text-primary underline focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                            aria-expanded={showEffects}
+                            onClick={() => setShowEffects((shown) => !shown)}
+                        >
+                            {filtersActive(media.filters) ? "Effects (on)" : "Effects"}
+                        </button>
+                        {showEffects && (
+                            <div className="mt-2">
+                                <EffectsPanel media={media} tone="light" />
+                            </div>
+                        )}
+                    </div>
                     {media.devices.microphones.length > 1 && (
                         <label className="block text-sm mt-3">
                             Microphone

@@ -21,6 +21,9 @@
         "release": "npx @rapidrest/cli release",
         "prepublish": "yarn build"
     },
+    "dependencies": {
+        "@mediapipe/tasks-vision": "^1.0.1"
+    },
     "peerDependencies": {
         "@rapidmx/react-shared": ">=0.19.0 <1",
         "@rapidmx/restapi": ">=0.23.0 <1",
@@ -159,6 +162,13 @@
                     "type": "boolean",
                     "default": true,
                     "help": "The last-resort tier for a participant whose network blocks both a direct connection and TURN (e.g. a corporate firewall that only allows web traffic): their media travels over a WebSocket this server relays between the meeting's participants. Turn off to serve calls with direct and TURN connections only. With several server replicas it connects participants across them through the same Redis the push system uses; without that Redis it works only between participants on the same replica."
+                },
+                {
+                    "key": "mail:videoconf:effects:assets_url",
+                    "label": "Video effects assets URL",
+                    "type": "string",
+                    "default": "",
+                    "help": "Video effects (background blur, custom backgrounds, face accessories) run a small machine-learning model in the participant's browser. By default the model files and their WebAssembly runtime are downloaded, only when a participant turns such an effect on, from cdn.jsdelivr.net and storage.googleapis.com. To serve them yourself instead, set this to the base URL (https://files.example.com/meet-effects, or a path on this server) of a directory holding wasm/ (the contents of the @mediapipe/tasks-vision package's wasm directory), selfie_segmenter.tflite and face_landmarker.task. Leave empty to use the public CDNs."
                 }
             ],
             "ui": {

@@ -7,6 +7,7 @@
  * to use at all - `navigator.mediaDevices`, `RTCPeerConnection` and the push `WebSocket` (see this plugin's Phase 2
  * `.claude/NOTES.md` entry: there was no existing mocking convention for any of these to follow). */
 import { vi, type Mock } from "vitest";
+import { NO_FILTERS } from "../../apps/shared/media/filters/filterTypes.js";
 import type { LocalMedia } from "../../apps/shared/media/useLocalMedia.js";
 
 /** Builds a real `Response` with a JSON body and `content-type: application/json`. */
@@ -268,6 +269,11 @@ export function fakeLocalMedia(overrides: Partial<LocalMedia> = {}): LocalMedia 
         devices: { cameras: [], microphones: [] },
         selectedDeviceIds: {},
         audioLevel: 0,
+        filters: NO_FILTERS,
+        filterStatus: { loading: false, error: null },
+        hasBackgroundImage: false,
+        setFilters: vi.fn(),
+        chooseBackgroundImage: vi.fn(async () => null),
         requestAccess: vi.fn(async () => undefined),
         toggleMic: vi.fn(async () => undefined),
         toggleCamera: vi.fn(async () => undefined),

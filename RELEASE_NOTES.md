@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+- **Video filters.** Open **Effects** in the lobby, or the sparkle button in the call, to blur your background or replace it with a picture from your own device, give the picture a black and white, sepia, night vision or pixelated look, or put on sunglasses, cat ears, a party hat, a crown or a mustache. They combine, and everyone in the call sees the result. The picture you choose never leaves your browser. Until the background effect has loaded, your real background is hidden rather than shown.
+- **Your settings are remembered on your device.** The camera and microphone you picked, whether each was on when you left, and your video filters (including your background picture) are applied the next time you join a meeting from the same browser. A camera or microphone that is no longer plugged in falls back to the default one.
+- **Optionally host the effects yourself.** Video effects download a machine-learning runtime and model (about 12 MB for a background effect, about 16 MB with a face accessory; only when someone turns such an effect on, and cached by the browser afterwards) from cdn.jsdelivr.net and storage.googleapis.com. Set `mail:videoconf:effects:assets_url` to serve them from your own server instead; the setting's help text lists the files.
+
 ## v0.7.0
 
 ### Added

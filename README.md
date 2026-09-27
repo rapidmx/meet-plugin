@@ -18,6 +18,12 @@ peer-to-peer WebRTC (no media server). Each pair of participants uses the best p
    can be turned off with the `mail:videoconf:relay:enabled` setting. A tile says when a participant is on the TURN
    relay or the server relay.
 
+Participants can put **video filters** on their camera from the lobby or during the call: a blurred or custom
+background, black and white / sepia / night vision / pixelate looks, and face accessories. They run entirely in the
+browser (MediaPipe, loaded only when a filter needs it - from public CDNs by default, or from your own server with
+`mail:videoconf:effects:assets_url`), and the devices, on/off state and filters a participant chose are remembered in
+their browser's `localStorage` for next time.
+
 This plugin's `apps/` also ship the public join/lobby/in-call pages and the personal Settings screen - see
 `package.json`'s `rapidmx.plugin.ui` for exactly what's mounted where.
 

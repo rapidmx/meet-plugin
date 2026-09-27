@@ -20,10 +20,19 @@
  * - **Devices**: `selectDevice()` swaps in another camera or microphone; `devicechange` refreshes the lists.
  * - **Level**: `audioLevel` (0-5) follows the microphone while it is unmuted, for the "your audio is being sent"
  * indicator.
+ * - **Filters**: while any video filter is on (`setFilters()`), `videoTrack`/`videoStream` are the *filtered*
+ * picture (`filters/VideoFilterProcessor.ts`) rather than the camera's own track - so everything downstream, the
+ * lobby preview and every path the call sends over, gets it without knowing. The camera's track stays owned here; the
+ * processor only reads it. If the filtered picture can't be made there is no video at all rather than an unfiltered
+ * one, since the filter may be hiding the participant's room.
+ * - **Remembered settings**: the devices picked, whether the microphone and camera were on, and the filters are
+ * saved on this device (`mediaPreferences.ts`) and applied the next time - a saved device is asked for as a
+ * preference (`ideal`), so one that has since been unplugged falls back to the default instead of failing.
  *
+
  * Nothing here runs during SSR: browser APIs are only touched from effects and event handlers.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
     type DeviceLists,
     type MediaAccessError,
@@ -33,6 +42,10 @@ import {
     requestUserMedia,
 } from "./deviceMedia.js";
 import { startLevelMeter } from "./levelMeter.js";
+import { loadPicture, prepareBackgroundImage } from "./filters/backgroundImage.js";
+import { NO_FILTERS, type VideoFilters, filtersActive } from "./filters/filterTypes.js";
+import { type BackgroundPicture, type FilterStatus, VideoFilterProcessor } from "./filters/VideoFilterProcessor.js";
+import { type MediaPreferences, loadPreferences, savePreferences } from "./mediaPreferences.js";
 
 export type MediaKind = "audio" | "video";
 
@@ -47,6 +60,9 @@ const VIDEO_CONSTRAINTS: MediaTrackConstraints = { facingMode: "user", width: { 
 /** The mean deviation (the level meter's 0-100 scale) that fills the whole indicator - ordinary speech sits well
  * below full scale. */
 const LEVEL_FULL_SCALE = 20;
+const FILTERS_UNSUPPORTED =
+    "Video effects aren't supported in this browser, so your camera is off. Turn the effects off to show your camera.";
+
 export const AUDIO_LEVEL_STEPS = 5;
 
 export interface LocalMedia {
@@ -70,6 +86,16 @@ export interface LocalMedia {
     selectedDeviceIds: Partial<Record<MediaKind, string>>;
     /** 0-`AUDIO_LEVEL_STEPS`: how loud the microphone is right now - always 0 while muted. */
     audioLevel: number;
+    /** The video filters in effect - `NO_FILTERS` when the camera is sent as it is. */
+    filters: VideoFilters;
+    /** Whether the filters' models are still loading, and why a filter isn't fully working. */
+    filterStatus: FilterStatus;
+    /** Whether a custom background image has been chosen (and so "custom image" can be switched to at once). */
+    hasBackgroundImage: boolean;
+    /** Changes some of the filters, keeping the rest. */
+    setFilters(patch: Partial<VideoFilters>): void;
+    /** Uses `file` as the custom background and switches to it. Resolves to why the file can't be used, or `null`. */
+    chooseBackgroundImage(file: File): Promise<string | null>;
     /** Asks for the camera and microphone (or just `kind`), see this module's doc comment. */
     requestAccess(kind?: MediaKind): Promise<void>;
     toggleMic(): Promise<void>;
@@ -90,7 +116,17 @@ function statusFor(error: MediaAccessError): TrackStatus {
     }
 }
 
-export function useLocalMedia(): LocalMedia {
+export interface LocalMediaOptions {
+    /** Where the filters' models are hosted, when not on the default CDN - see `filters/mlModels.ts`. */
+    effectsAssetsUrl?: string;
+}
+
+/** `base`, asking for `preferredId` (the device used last time) when there is one - as a preference, not a demand. */
+function preferring(base: MediaTrackConstraints, preferredId?: string): MediaTrackConstraints {
+    return preferredId ? { ...base, deviceId: { ideal: preferredId } } : base;
+}
+
+export function useLocalMedia({ effectsAssetsUrl }: LocalMediaOptions = {}): LocalMedia {
     const [supported, setSupported] = useState(true);
     const [requesting, setRequesting] = useState(false);
     const [error, setError] = useState<MediaAccessError | null>(null);
@@ -99,10 +135,66 @@ export function useLocalMedia(): LocalMedia {
     const [micEnabled, setMicEnabled] = useState(true);
     const [devices, setDevices] = useState<DeviceLists>({ cameras: [], microphones: [] });
     const [audioLevel, setAudioLevel] = useState(0);
+    const [filters, setFiltersState] = useState<VideoFilters>(NO_FILTERS);
+    const [background, setBackground] = useState<BackgroundPicture | null>(null);
+    const [filterStatus, setFilterStatus] = useState<FilterStatus>({ loading: false, error: null });
+    const [processed, setProcessed] = useState<MediaStreamTrack | null>(null);
 
     const tracksRef = useRef<Record<MediaKind, MediaStreamTrack | null>>({ audio: null, video: null });
     const micEnabledRef = useRef(true);
     const mountedRef = useRef(true);
+    const prefsRef = useRef<MediaPreferences | null>(null);
+    const filtersRef = useRef<VideoFilters>(NO_FILTERS);
+    const backgroundRef = useRef<BackgroundPicture | null>(null);
+    const processorRef = useRef<VideoFilterProcessor | null>(null);
+
+    const applyFilters = useCallback((next: VideoFilters) => {
+        filtersRef.current = next;
+        setFiltersState(next);
+    }, []);
+
+    const applyBackground = useCallback((picture: BackgroundPicture) => {
+        backgroundRef.current = picture;
+        setBackground(picture);
+    }, []);
+
+    /** What was remembered from last time - read once, the first time anything needs it, and applied to the state it
+     * covers. Never during render: storage doesn't exist on the server, and reading it would make the first client
+     * render differ from the server's. */
+    const ensurePrefs = useCallback((): MediaPreferences => {
+        if (prefsRef.current) {
+            return prefsRef.current;
+        }
+        const prefs = loadPreferences();
+        prefsRef.current = prefs;
+        if (prefs.micEnabled === false) {
+            micEnabledRef.current = false;
+            setMicEnabled(false);
+        }
+        if (prefs.filters) {
+            applyFilters(prefs.filters);
+        }
+        if (prefs.backgroundImage) {
+            loadPicture(prefs.backgroundImage).then(
+                (picture) => {
+                    if (mountedRef.current) {
+                        applyBackground(picture);
+                    }
+                },
+                () => undefined,
+            );
+        }
+        return prefs;
+    }, [applyBackground, applyFilters]);
+
+    /** Saves a change to the remembered settings. */
+    const remember = useCallback(
+        (patch: Partial<MediaPreferences>) => {
+            prefsRef.current = { ...ensurePrefs(), ...patch };
+            savePreferences(patch);
+        },
+        [ensurePrefs],
+    );
 
     const refreshDevices = useCallback(async () => {
         const list = await listDevices();
@@ -138,7 +230,10 @@ export function useLocalMedia(): LocalMedia {
         tracksRef.current = { ...tracksRef.current, [kind]: track };
         setTracks(tracksRef.current);
         setStatus((prev) => ({ ...prev, [kind]: "live" }));
-    }, []);
+        if (kind === "video") {
+            remember({ cameraEnabled: true });
+        }
+    }, [remember]);
 
     const adoptStream = useCallback(
         (stream: MediaStream) => {
@@ -149,11 +244,14 @@ export function useLocalMedia(): LocalMedia {
         [adoptTrack],
     );
 
-    /** Asks for one kind on its own - a specific device when `deviceId` is given. */
+    /** Asks for one kind on its own - a specific device when `deviceId` is given, else the one used last time. */
     const acquire = useCallback(
         async (kind: MediaKind, deviceId?: string): Promise<boolean> => {
             const base = kind === "audio" ? AUDIO_CONSTRAINTS : VIDEO_CONSTRAINTS;
-            const constraint: MediaTrackConstraints = deviceId ? { ...base, deviceId: { exact: deviceId } } : base;
+            const prefs = ensurePrefs();
+            const constraint: MediaTrackConstraints = deviceId
+                ? { ...base, deviceId: { exact: deviceId } }
+                : preferring(base, kind === "audio" ? prefs.microphoneId : prefs.cameraId);
             const result = await requestUserMedia({ [kind]: constraint });
             if (!result.ok) {
                 if (mountedRef.current) {
@@ -168,12 +266,24 @@ export function useLocalMedia(): LocalMedia {
             }
             return true;
         },
-        [adoptStream],
+        [adoptStream, ensurePrefs],
     );
 
     /** Asks for the camera and the microphone in a single prompt. */
     const acquireBoth = useCallback(async () => {
-        const both = await requestUserMedia({ audio: AUDIO_CONSTRAINTS, video: VIDEO_CONSTRAINTS });
+        const prefs = ensurePrefs();
+        if (prefs.cameraEnabled === false) {
+            // The camera was off when the participant last left: join with it off, without switching it on first.
+            if (mountedRef.current) {
+                setStatus((prev) => ({ ...prev, video: "off" }));
+            }
+            await acquire("audio");
+            return;
+        }
+        const both = await requestUserMedia({
+            audio: preferring(AUDIO_CONSTRAINTS, prefs.microphoneId),
+            video: preferring(VIDEO_CONSTRAINTS, prefs.cameraId),
+        });
         if (both.ok) {
             adoptStream(both.value);
         } else if (both.error.kind === "permission-denied") {
@@ -187,7 +297,7 @@ export function useLocalMedia(): LocalMedia {
             await acquire("audio");
             await acquire("video");
         }
-    }, [acquire, adoptStream]);
+    }, [acquire, adoptStream, ensurePrefs]);
 
     const requestAccess = useCallback(
         async (kind?: MediaKind) => {
@@ -211,6 +321,7 @@ export function useLocalMedia(): LocalMedia {
         if (!track) {
             micEnabledRef.current = true;
             setMicEnabled(true);
+            remember({ micEnabled: true });
             await acquire("audio");
             await refreshDevices();
             return;
@@ -219,7 +330,8 @@ export function useLocalMedia(): LocalMedia {
         micEnabledRef.current = next;
         track.enabled = next;
         setMicEnabled(next);
-    }, [acquire, refreshDevices]);
+        remember({ micEnabled: next });
+    }, [acquire, refreshDevices, remember]);
 
     const toggleCamera = useCallback(async () => {
         const track = tracksRef.current.video;
@@ -233,7 +345,8 @@ export function useLocalMedia(): LocalMedia {
         tracksRef.current = { ...tracksRef.current, video: null };
         setTracks(tracksRef.current);
         setStatus((prev) => ({ ...prev, video: "off" }));
-    }, [acquire, refreshDevices]);
+        remember({ cameraEnabled: false });
+    }, [acquire, refreshDevices, remember]);
 
     const selectDevice = useCallback(
         async (kind: MediaKind, deviceId: string) => {
@@ -247,10 +360,37 @@ export function useLocalMedia(): LocalMedia {
                     setTracks(tracksRef.current);
                 }
             }
-            await acquire(kind, deviceId);
+            if (await acquire(kind, deviceId)) {
+                remember(kind === "audio" ? { microphoneId: deviceId } : { cameraId: deviceId });
+            }
             await refreshDevices();
         },
-        [acquire, refreshDevices],
+        [acquire, refreshDevices, remember],
+    );
+
+    const setFilters = useCallback(
+        (patch: Partial<VideoFilters>) => {
+            const next = { ...filtersRef.current, ...patch };
+            applyFilters(next);
+            remember({ filters: next });
+        },
+        [applyFilters, remember],
+    );
+
+    const chooseBackgroundImage = useCallback(
+        async (file: File): Promise<string | null> => {
+            const prepared = await prepareBackgroundImage(file);
+            if (!prepared.ok) {
+                return prepared.message;
+            }
+            if (mountedRef.current) {
+                applyBackground(prepared.picture);
+                remember({ backgroundImage: prepared.dataUrl });
+                setFilters({ background: "image" });
+            }
+            return null;
+        },
+        [applyBackground, remember, setFilters],
     );
 
     const release = useCallback(() => {
@@ -304,7 +444,47 @@ export function useLocalMedia(): LocalMedia {
         };
     }, [tracks.audio, micEnabled]);
 
-    const videoStream = useMemo(() => (tracks.video ? new MediaStream([tracks.video]) : null), [tracks.video]);
+    // Puts the camera through the filters for as long as any is on - see this module's doc comment. A layout effect,
+    // so the filtered track is in place before the first frame is painted rather than after an unfiltered one.
+    const filtersOn = filtersActive(filters);
+    const source = tracks.video;
+    useLayoutEffect(() => {
+        if (!source || !filtersOn) {
+            return;
+        }
+        let processor: VideoFilterProcessor;
+        try {
+            processor = new VideoFilterProcessor({
+                source,
+                filters: filtersRef.current,
+                backgroundImage: backgroundRef.current,
+                assetsUrl: effectsAssetsUrl,
+                onStatus: setFilterStatus,
+            });
+        } catch {
+            setFilterStatus({ loading: false, error: FILTERS_UNSUPPORTED });
+            // Turning the filters off (or the camera) clears the message again.
+            return () => setFilterStatus({ loading: false, error: null });
+        }
+        processorRef.current = processor;
+        setProcessed(processor.track);
+        return () => {
+            processor.stop();
+            processorRef.current = null;
+            setProcessed(null);
+            setFilterStatus({ loading: false, error: null });
+        };
+    }, [source, filtersOn, effectsAssetsUrl]);
+
+    // Passes a change of filters (or of the background picture) on to the running processor.
+    useEffect(() => {
+        processorRef.current?.update(filters, background);
+    }, [filters, background]);
+
+    // While filters are on, the camera's own track is never what's sent: the filtered one is, or nothing.
+    const videoTrack = filtersOn ? (source ? processed : null) : source;
+
+    const videoStream = useMemo(() => (videoTrack ? new MediaStream([videoTrack]) : null), [videoTrack]);
 
     const selectedDeviceIds = useMemo(
         () => ({
@@ -319,7 +499,7 @@ export function useLocalMedia(): LocalMedia {
         requesting,
         error,
         audioTrack: tracks.audio,
-        videoTrack: tracks.video,
+        videoTrack,
         videoStream,
         micEnabled,
         micOn: !!tracks.audio && micEnabled,
@@ -328,6 +508,11 @@ export function useLocalMedia(): LocalMedia {
         devices,
         selectedDeviceIds,
         audioLevel,
+        filters,
+        filterStatus,
+        hasBackgroundImage: !!background,
+        setFilters,
+        chooseBackgroundImage,
         requestAccess,
         toggleMic,
         toggleCamera,

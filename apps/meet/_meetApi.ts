@@ -54,6 +54,9 @@ export interface VideoMeetingJoinResult {
     /** Whether the server offers the WebSocket media relay - the last-resort path for a participant neither a direct
      * connection nor the TURN server can reach. Absent from a server that predates it, which reads as off. */
     relayEnabled?: boolean;
+    /** The base URL the video filters' machine-learning runtime and models are hosted under, when the administrator
+     * hosts them (`mail:videoconf:effects:assets_url`). Absent means the public CDN defaults. */
+    effectsAssetsUrl?: string;
 }
 
 /** Resolves a join token (an invitee's own link) or a public meeting's slug to its meeting info, ICE servers, and

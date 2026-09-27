@@ -131,6 +131,7 @@ describe("plugin manifest", () => {
             "mail:videoconf:turn:credential",
             "mail:videoconf:turn:shared_secret",
             "mail:videoconf:relay:enabled",
+            "mail:videoconf:effects:assets_url",
         ]);
         for (const setting of manifest.settings.filter((s: any) => s.key !== "mail:videoconf:relay:enabled")) {
             expect(setting.default).toBe(setting.key === "mail:videoconf:public_url" ? "https://<host>/meet" : "");
@@ -141,6 +142,13 @@ describe("plugin manifest", () => {
         const manifest: any = parsePluginManifest(pkg);
         expect(manifest.settings.find((s: any) => s.key === "mail:videoconf:relay:enabled")).toEqual(
             expect.objectContaining({ type: "boolean", default: true }),
+        );
+    });
+
+    it("declares the video effects assets URL as a string setting, empty by default", () => {
+        const manifest: any = parsePluginManifest(pkg);
+        expect(manifest.settings.find((s: any) => s.key === "mail:videoconf:effects:assets_url")).toEqual(
+            expect.objectContaining({ type: "string", default: "" }),
         );
     });
 

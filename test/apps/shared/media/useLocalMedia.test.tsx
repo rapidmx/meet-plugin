@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import {
     fakeDeviceInfo,
     fakeMediaDevices,
@@ -14,6 +14,9 @@ import {
     installMediaDevices,
     removeMediaDevices,
 } from "../../testUtils.js";
+import type { FilterStatus } from "../../../../apps/shared/media/filters/VideoFilterProcessor.js";
+import type { VideoFilters } from "../../../../apps/shared/media/filters/filterTypes.js";
+import { BACKGROUND_KEY, PREFERENCES_KEY } from "../../../../apps/shared/media/mediaPreferences.js";
 
 const { meters } = vi.hoisted(() => ({ meters: [] as { onLevel: (level: number) => void; stop: ReturnType<typeof vi.fn> }[] }));
 vi.mock("../../../../apps/shared/media/levelMeter.js", () => ({
@@ -24,7 +27,58 @@ vi.mock("../../../../apps/shared/media/levelMeter.js", () => ({
     },
 }));
 
+/** What the fake `VideoFilterProcessor` records: the options it was built with, and the calls made on it. */
+interface FakeProcessor {
+    options: {
+        source: MediaStreamTrack;
+        filters: VideoFilters;
+        backgroundImage: unknown;
+        assetsUrl?: string;
+        onStatus: (status: FilterStatus) => void;
+    };
+    track: MediaStreamTrack;
+    update: Mock;
+    stop: Mock;
+}
+
+const { fake, bg } = vi.hoisted(() => ({
+    fake: {
+        instances: [] as FakeProcessor[],
+        throwOnCreate: false,
+        makeTrack: (() => undefined) as unknown as () => MediaStreamTrack,
+    },
+    bg: { loadPicture: vi.fn(), prepareBackgroundImage: vi.fn() },
+}));
+
+vi.mock("../../../../apps/shared/media/filters/VideoFilterProcessor.js", () => ({
+    VideoFilterProcessor: class {
+        options: FakeProcessor["options"];
+        track: MediaStreamTrack;
+        update = vi.fn();
+        stop = vi.fn();
+        constructor(options: FakeProcessor["options"]) {
+            if (fake.throwOnCreate) {
+                throw new Error("no canvas");
+            }
+            this.options = options;
+            this.track = fake.makeTrack();
+            fake.instances.push(this);
+        }
+    },
+}));
+
+vi.mock("../../../../apps/shared/media/filters/backgroundImage.js", () => ({
+    loadPicture: bg.loadPicture,
+    prepareBackgroundImage: bg.prepareBackgroundImage,
+}));
+
 import { useLocalMedia } from "../../../../apps/shared/media/useLocalMedia.js";
+
+fake.makeTrack = () => fakeTrack("video", `filtered-${fake.instances.length}`);
+
+const PICTURE = { source: {} as CanvasImageSource, width: 10, height: 10 };
+const BACKGROUND_URL = "data:image/jpeg;base64,AAAA";
+const BLUR: VideoFilters = { background: "blur", effect: "none", accessory: "none" };
 
 const DEVICES = [
     fakeDeviceInfo("videoinput", "cam-1", "Front camera"),
@@ -55,13 +109,47 @@ function streamsFor(requests: MediaStreamConstraints[], overrides: { fail?: (con
 
 beforeEach(() => {
     meters.length = 0;
+    fake.instances.length = 0;
+    fake.throwOnCreate = false;
+    bg.loadPicture.mockReset().mockResolvedValue(PICTURE);
+    bg.prepareBackgroundImage.mockReset();
     installFakeMediaStream();
 });
 
 afterEach(() => {
     removeMediaDevices();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
 });
+
+/** Puts what a previous visit would have left in this browser's storage. */
+function seed(prefs: Record<string, unknown>, backgroundImage?: string) {
+    localStorage.setItem(PREFERENCES_KEY, JSON.stringify(prefs));
+    if (backgroundImage) {
+        localStorage.setItem(BACKGROUND_KEY, backgroundImage);
+    }
+}
+
+/** What is saved right now. */
+function saved(): Record<string, unknown> {
+    return JSON.parse(localStorage.getItem(PREFERENCES_KEY) ?? "{}");
+}
+
+/** The hook with working fake devices, before any access is requested. */
+function setup(options?: { effectsAssetsUrl?: string }) {
+    const requests: MediaStreamConstraints[] = [];
+    installMediaDevices(fakeMediaDevices({ devices: DEVICES, userMediaStream: streamsFor(requests) }));
+    const hook = renderHook(() => useLocalMedia(options));
+    return { ...hook, requests };
+}
+
+async function setupLive(options?: { effectsAssetsUrl?: string }) {
+    const hook = setup(options);
+    await act(() => hook.result.current.requestAccess());
+    return hook;
+}
+
+const constraint = (value: MediaStreamConstraints["audio"]) => value as MediaTrackConstraints;
 
 describe("useLocalMedia - requesting access", () => {
     it("asks for the camera and microphone in one request, and reports both live", async () => {
@@ -411,5 +499,455 @@ describe("useLocalMedia - a request that outlives its owner", () => {
         releaseSingle();
         await act(() => pending);
         expect(failing.getUserMedia).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe("useLocalMedia - remembered devices", () => {
+    it("asks for the saved camera and microphone as a preference, in the one request", async () => {
+        seed({ cameraId: "cam-9", microphoneId: "mic-9" });
+        const { result, requests } = setup();
+        await act(() => result.current.requestAccess());
+
+        expect(requests).toHaveLength(1);
+        expect(constraint(requests[0].audio)).toMatchObject({ echoCancellation: true, deviceId: { ideal: "mic-9" } });
+        expect(constraint(requests[0].video)).toMatchObject({ facingMode: "user", deviceId: { ideal: "cam-9" } });
+    });
+
+    it("asks for only what was saved, leaving the other kind to the default", async () => {
+        seed({ cameraId: "cam-9" });
+        const { result, requests } = setup();
+        await act(() => result.current.requestAccess());
+        expect(constraint(requests[0].audio).deviceId).toBeUndefined();
+        expect(constraint(requests[0].video).deviceId).toEqual({ ideal: "cam-9" });
+    });
+
+    it("uses the saved device for a request of one kind, and for each on its own after a fallback", async () => {
+        seed({ cameraId: "cam-9", microphoneId: "mic-9" });
+        const { result, requests } = setup();
+        await act(() => result.current.requestAccess("video"));
+        await act(() => result.current.requestAccess("audio"));
+        expect(constraint(requests[0].video).deviceId).toEqual({ ideal: "cam-9" });
+        expect(constraint(requests[1].audio).deviceId).toEqual({ ideal: "mic-9" });
+
+        const failing: MediaStreamConstraints[] = [];
+        installMediaDevices(
+            fakeMediaDevices({
+                userMediaStream: streamsFor(failing, { fail: (c) => (c.audio && c.video ? domError("OverconstrainedError") : undefined) }),
+            }),
+        );
+        const fallback = renderHook(() => useLocalMedia());
+        await act(() => fallback.result.current.requestAccess());
+        expect(failing).toHaveLength(3);
+        expect(constraint(failing[1].audio).deviceId).toEqual({ ideal: "mic-9" });
+        expect(constraint(failing[2].video).deviceId).toEqual({ ideal: "cam-9" });
+        expect(fallback.result.current.status).toEqual({ audio: "live", video: "live" });
+    });
+
+    it("still demands the device the participant picks, and remembers it once it works", async () => {
+        seed({ cameraId: "cam-old", microphoneId: "mic-old" });
+        const { result, requests } = await setupLive();
+        requests.length = 0;
+
+        await act(() => result.current.selectDevice("video", "cam-2"));
+        await act(() => result.current.selectDevice("audio", "mic-2"));
+
+        expect(constraint(requests[0].video).deviceId).toEqual({ exact: "cam-2" });
+        expect(constraint(requests[1].audio).deviceId).toEqual({ exact: "mic-2" });
+        expect(saved()).toMatchObject({ cameraId: "cam-2", microphoneId: "mic-2" });
+    });
+
+    it("remembers nothing about a device that could not be opened", async () => {
+        const { result } = await setupLive();
+        installMediaDevices(fakeMediaDevices({ userMediaError: domError("NotFoundError") }));
+
+        await act(() => result.current.selectDevice("video", "cam-2"));
+        await act(() => result.current.selectDevice("audio", "mic-2"));
+
+        expect(saved().cameraId).toBeUndefined();
+        expect(saved().microphoneId).toBeUndefined();
+    });
+});
+
+describe("useLocalMedia - remembered on and off", () => {
+    it("joins muted when the microphone was off last time", async () => {
+        seed({ micEnabled: false });
+        const { result } = await setupLive();
+        expect(result.current.micEnabled).toBe(false);
+        expect(result.current.micOn).toBe(false);
+        expect(result.current.audioTrack!.enabled).toBe(false);
+        expect(result.current.cameraOn).toBe(true);
+    });
+
+    it("starts with the microphone on when it was on last time", async () => {
+        seed({ micEnabled: true });
+        const { result } = await setupLive();
+        expect(result.current.micOn).toBe(true);
+        expect(result.current.audioTrack!.enabled).toBe(true);
+    });
+
+    it("joins with the camera off, asking for the microphone alone, when the camera was off last time", async () => {
+        seed({ cameraEnabled: false, microphoneId: "mic-9" });
+        const { result, requests } = setup();
+        await act(() => result.current.requestAccess());
+
+        expect(requests).toHaveLength(1);
+        expect(requests[0].video).toBeUndefined();
+        expect(constraint(requests[0].audio).deviceId).toEqual({ ideal: "mic-9" });
+        expect(result.current.status).toEqual({ audio: "live", video: "off" });
+        expect(result.current.videoTrack).toBeNull();
+        expect(result.current.cameraOn).toBe(false);
+        expect(result.current.requesting).toBe(false);
+        expect(saved().cameraEnabled).toBe(false);
+
+        await act(() => result.current.toggleCamera());
+        expect(result.current.cameraOn).toBe(true);
+        expect(result.current.status.video).toBe("live");
+        expect(saved().cameraEnabled).toBe(true);
+    });
+
+    it("leaves the camera-off join alone when its owner is already gone", async () => {
+        seed({ cameraEnabled: false });
+        const { result, unmount, requests } = setup();
+        unmount();
+        await act(() => result.current.requestAccess());
+        expect(requests).toHaveLength(1);
+        expect(result.current.status.video).toBe("pending");
+    });
+
+    it("remembers each change of the microphone, including asking for one when unmuting with none", async () => {
+        const { result } = await setupLive();
+        await act(() => result.current.toggleMic());
+        expect(saved().micEnabled).toBe(false);
+        await act(() => result.current.toggleMic());
+        expect(saved().micEnabled).toBe(true);
+
+        const none = setup();
+        await act(() => none.result.current.toggleMic());
+        expect(saved().micEnabled).toBe(true);
+    });
+
+    it("remembers the camera being turned off, and on again", async () => {
+        const { result } = await setupLive();
+        expect(saved().cameraEnabled).toBe(true);
+        await act(() => result.current.toggleCamera());
+        expect(saved().cameraEnabled).toBe(false);
+        await act(() => result.current.toggleCamera());
+        expect(saved().cameraEnabled).toBe(true);
+    });
+
+    it("remembers the camera as on once a request for it alone succeeds", async () => {
+        seed({ cameraEnabled: false });
+        const { result } = setup();
+        await act(() => result.current.requestAccess("video"));
+        expect(result.current.cameraOn).toBe(true);
+        expect(saved().cameraEnabled).toBe(true);
+    });
+
+    it("keeps what was saved when the tracks are released", async () => {
+        const { result } = await setupLive();
+        await act(() => result.current.toggleMic());
+        act(() => result.current.release());
+        expect(saved()).toMatchObject({ micEnabled: false, cameraEnabled: true });
+    });
+});
+
+describe("useLocalMedia - remembered filters and background", () => {
+    it("applies the saved filters on the first request for access, and starts filtering", async () => {
+        seed({ filters: BLUR });
+        const { result } = setup();
+        expect(result.current.filters).toEqual({ background: "none", effect: "none", accessory: "none" });
+
+        await act(() => result.current.requestAccess());
+
+        expect(result.current.filters).toEqual(BLUR);
+        expect(fake.instances).toHaveLength(1);
+        expect(fake.instances[0].options.filters).toEqual(BLUR);
+    });
+
+    it("loads the saved background picture, and hands it to the filters", async () => {
+        seed({ filters: { ...BLUR, background: "image" } }, BACKGROUND_URL);
+        const { result } = setup();
+        expect(result.current.hasBackgroundImage).toBe(false);
+
+        await act(() => result.current.requestAccess());
+        await waitFor(() => expect(result.current.hasBackgroundImage).toBe(true));
+
+        expect(bg.loadPicture).toHaveBeenCalledWith(BACKGROUND_URL);
+        expect(fake.instances[0].update).toHaveBeenLastCalledWith({ ...BLUR, background: "image" }, PICTURE);
+    });
+
+    it("ignores a saved background picture that can't be read", async () => {
+        bg.loadPicture.mockRejectedValue(new Error("bad image"));
+        seed({}, BACKGROUND_URL);
+        const { result } = setup();
+        await act(() => result.current.requestAccess());
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(bg.loadPicture).toHaveBeenCalledTimes(1);
+        expect(result.current.hasBackgroundImage).toBe(false);
+    });
+
+    it("ignores a saved background picture that finishes loading after its owner has gone", async () => {
+        let finish!: (picture: typeof PICTURE) => void;
+        bg.loadPicture.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+        seed({ filters: { ...BLUR, background: "image" } }, BACKGROUND_URL);
+        const { result, unmount } = setup();
+        await act(() => result.current.requestAccess());
+        const processor = fake.instances[0];
+        const updates = processor.update.mock.calls.length;
+        unmount();
+
+        finish(PICTURE);
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(result.current.hasBackgroundImage).toBe(false);
+        expect(processor.update).toHaveBeenCalledTimes(updates);
+    });
+
+    it("merges each change of filters into the rest, and remembers them", async () => {
+        const { result } = await setupLive();
+        act(() => result.current.setFilters({ effect: "sepia" }));
+        act(() => result.current.setFilters({ accessory: "crown" }));
+        expect(result.current.filters).toEqual({ background: "none", effect: "sepia", accessory: "crown" });
+        expect(saved().filters).toEqual({ background: "none", effect: "sepia", accessory: "crown" });
+    });
+});
+
+describe("useLocalMedia - when storage is not available", () => {
+    async function exercise() {
+        const { result, requests } = setup();
+        await act(() => result.current.requestAccess());
+        expect(result.current.status).toEqual({ audio: "live", video: "live" });
+        await act(() => result.current.toggleMic());
+        expect(result.current.micOn).toBe(false);
+        act(() => result.current.setFilters({ effect: "bw" }));
+        expect(result.current.filters.effect).toBe("bw");
+        await act(() => result.current.selectDevice("video", "cam-2"));
+        expect(constraint(requests[requests.length - 1].video).deviceId).toEqual({ exact: "cam-2" });
+        expect(result.current.cameraOn).toBe(true);
+    }
+
+    it("carries on when there is no storage at all", async () => {
+        vi.stubGlobal("localStorage", undefined);
+        await exercise();
+    });
+
+    it("carries on when storage refuses every read and write", async () => {
+        vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+            throw new Error("blocked");
+        });
+        vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+            throw new Error("quota");
+        });
+        await exercise();
+    });
+});
+
+describe("useLocalMedia - video filters", () => {
+    it("sends the filtered picture in place of the camera's while a filter is on", async () => {
+        const { result } = await setupLive({ effectsAssetsUrl: "https://cdn.example.com/models" });
+        const camera = result.current.videoTrack!;
+        expect(fake.instances).toHaveLength(0);
+
+        act(() => result.current.setFilters({ background: "blur" }));
+
+        expect(fake.instances).toHaveLength(1);
+        const processor = fake.instances[0];
+        expect(processor.options.source).toBe(camera);
+        expect(processor.options.filters).toEqual(BLUR);
+        expect(processor.options.backgroundImage).toBeNull();
+        expect(processor.options.assetsUrl).toBe("https://cdn.example.com/models");
+        expect(result.current.videoTrack).toBe(processor.track);
+        expect(result.current.videoStream?.getVideoTracks()).toEqual([processor.track]);
+        // The camera itself is unaffected: still running, still the one that is "on" and selected.
+        expect(camera.stop).not.toHaveBeenCalled();
+        expect(result.current.cameraOn).toBe(true);
+        expect(result.current.selectedDeviceIds.video).toBe(camera.getSettings().deviceId);
+        expect(result.current.status.video).toBe("live");
+    });
+
+    it("has no picture yet while filters are on but there is no camera to filter", async () => {
+        const { result } = setup();
+        act(() => result.current.setFilters({ effect: "bw" }));
+        expect(fake.instances).toHaveLength(0);
+        expect(result.current.videoTrack).toBeNull();
+        expect(result.current.videoStream).toBeNull();
+
+        await act(() => result.current.requestAccess());
+        expect(fake.instances).toHaveLength(1);
+        expect(result.current.videoTrack).toBe(fake.instances[0].track);
+    });
+
+    it("sends no video at all, rather than an unfiltered one, when the filtered picture can't be made", async () => {
+        const { result } = await setupLive();
+        const camera = result.current.videoTrack!;
+        fake.throwOnCreate = true;
+
+        act(() => result.current.setFilters({ background: "blur" }));
+
+        expect(fake.instances).toHaveLength(0);
+        expect(result.current.videoTrack).toBeNull();
+        expect(result.current.videoStream).toBeNull();
+        expect(result.current.filterStatus.error).toMatch(/aren't supported/);
+        expect(result.current.filterStatus.loading).toBe(false);
+        expect(result.current.cameraOn).toBe(true);
+        expect(camera.stop).not.toHaveBeenCalled();
+
+        act(() => result.current.setFilters({ background: "none" }));
+        expect(result.current.videoTrack).toBe(camera);
+        // The "not supported" message goes away with the filters that caused it.
+        expect(result.current.filterStatus).toEqual({ loading: false, error: null });
+    });
+
+    it("goes back to the camera's own track, and stops the processor, when the filters are turned off", async () => {
+        const { result } = await setupLive();
+        const camera = result.current.videoTrack!;
+        act(() => result.current.setFilters({ background: "blur", effect: "sepia" }));
+        const processor = fake.instances[0];
+        act(() => processor.options.onStatus({ loading: true, error: "half working" }));
+        expect(result.current.filterStatus).toEqual({ loading: true, error: "half working" });
+
+        act(() => result.current.setFilters({ background: "none" }));
+        // Still filtered - sepia is left on.
+        expect(processor.stop).not.toHaveBeenCalled();
+        expect(result.current.videoTrack).toBe(processor.track);
+
+        act(() => result.current.setFilters({ effect: "none" }));
+        expect(processor.stop).toHaveBeenCalledTimes(1);
+        expect(result.current.videoTrack).toBe(camera);
+        expect(result.current.videoStream?.getVideoTracks()).toEqual([camera]);
+        expect(result.current.filterStatus).toEqual({ loading: false, error: null });
+        expect(camera.stop).not.toHaveBeenCalled();
+    });
+
+    it("passes a change of filters on to the running processor without making another", async () => {
+        const { result } = await setupLive();
+        act(() => result.current.setFilters({ background: "blur" }));
+        const processor = fake.instances[0];
+
+        act(() => result.current.setFilters({ effect: "bw" }));
+
+        expect(fake.instances).toHaveLength(1);
+        expect(processor.update).toHaveBeenLastCalledWith({ background: "blur", effect: "bw", accessory: "none" }, null);
+    });
+
+    it("reports the processor's status", async () => {
+        const { result } = await setupLive();
+        act(() => result.current.setFilters({ accessory: "crown" }));
+        act(() => fake.instances[0].options.onStatus({ loading: true, error: null }));
+        expect(result.current.filterStatus).toEqual({ loading: true, error: null });
+    });
+
+    it("filters the new camera, and lets go of the old one's processor, when the camera is switched", async () => {
+        const { result } = await setupLive();
+        act(() => result.current.setFilters({ effect: "sepia" }));
+        const first = fake.instances[0];
+        const oldCamera = first.options.source;
+
+        await act(() => result.current.selectDevice("video", "cam-2"));
+
+        expect(first.stop).toHaveBeenCalledTimes(1);
+        expect(oldCamera.stop).toHaveBeenCalled();
+        expect(fake.instances).toHaveLength(2);
+        const second = fake.instances[1];
+        expect(second.options.source).not.toBe(oldCamera);
+        expect(second.options.source.kind).toBe("video");
+        expect(result.current.videoTrack).toBe(second.track);
+        expect(second.stop).not.toHaveBeenCalled();
+    });
+
+    it("stops the processor when the camera is turned off, and starts another when it is back on", async () => {
+        const { result } = await setupLive();
+        act(() => result.current.setFilters({ effect: "sepia" }));
+        await act(() => result.current.toggleCamera());
+        expect(fake.instances[0].stop).toHaveBeenCalled();
+        expect(result.current.videoTrack).toBeNull();
+
+        await act(() => result.current.toggleCamera());
+        expect(fake.instances).toHaveLength(2);
+        expect(result.current.videoTrack).toBe(fake.instances[1].track);
+    });
+
+    it("stops the processor on release()", async () => {
+        const { result } = await setupLive();
+        act(() => result.current.setFilters({ effect: "sepia" }));
+        act(() => result.current.release());
+        expect(fake.instances[0].stop).toHaveBeenCalled();
+        expect(result.current.videoTrack).toBeNull();
+    });
+
+    it("stops the processor when its owner unmounts", async () => {
+        const { result, unmount } = await setupLive();
+        act(() => result.current.setFilters({ effect: "sepia" }));
+        unmount();
+        expect(fake.instances[0].stop).toHaveBeenCalled();
+    });
+
+    it("builds a processor with the saved background picture once it has loaded", async () => {
+        seed({ filters: { ...BLUR, background: "image" } }, BACKGROUND_URL);
+        const { result } = await setupLive();
+        await waitFor(() => expect(result.current.hasBackgroundImage).toBe(true));
+
+        await act(() => result.current.selectDevice("video", "cam-2"));
+        expect(fake.instances[fake.instances.length - 1].options.backgroundImage).toBe(PICTURE);
+    });
+});
+
+describe("useLocalMedia - choosing a background image", () => {
+    const file = () => new File(["x"], "room.png", { type: "image/png" });
+
+    it("uses the picture, remembers it, and switches to the image background", async () => {
+        bg.prepareBackgroundImage.mockResolvedValue({ ok: true, dataUrl: BACKGROUND_URL, picture: PICTURE });
+        const { result } = await setupLive();
+        expect(result.current.hasBackgroundImage).toBe(false);
+
+        let outcome: string | null = "unset";
+        await act(async () => {
+            outcome = await result.current.chooseBackgroundImage(file());
+        });
+
+        expect(outcome).toBeNull();
+        expect(result.current.hasBackgroundImage).toBe(true);
+        expect(result.current.filters.background).toBe("image");
+        expect(localStorage.getItem(BACKGROUND_KEY)).toBe(BACKGROUND_URL);
+        expect(saved().filters).toMatchObject({ background: "image" });
+        // The filters start with the picture already in hand.
+        expect(fake.instances).toHaveLength(1);
+        expect(fake.instances[0].options.backgroundImage).toBe(PICTURE);
+    });
+
+    it("says why a file can't be used, and changes nothing", async () => {
+        bg.prepareBackgroundImage.mockResolvedValue({ ok: false, message: "Not an image." });
+        const { result } = await setupLive();
+
+        let outcome: string | null = null;
+        await act(async () => {
+            outcome = await result.current.chooseBackgroundImage(file());
+        });
+
+        expect(outcome).toBe("Not an image.");
+        expect(result.current.hasBackgroundImage).toBe(false);
+        expect(result.current.filters.background).toBe("none");
+        expect(localStorage.getItem(BACKGROUND_KEY)).toBeNull();
+        expect(fake.instances).toHaveLength(0);
+    });
+
+    it("does nothing with a picture that is ready after its owner has gone", async () => {
+        let finish!: (result: unknown) => void;
+        bg.prepareBackgroundImage.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+        const { result, unmount } = await setupLive();
+
+        let pending!: Promise<string | null>;
+        act(() => {
+            pending = result.current.chooseBackgroundImage(file());
+        });
+        unmount();
+        finish({ ok: true, dataUrl: BACKGROUND_URL, picture: PICTURE });
+
+        await expect(pending).resolves.toBeNull();
+        expect(localStorage.getItem(BACKGROUND_KEY)).toBeNull();
+        expect(fake.instances).toHaveLength(0);
     });
 });

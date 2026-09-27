@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Add video filters to the lobby and the in-call controls: a blurred or custom background (a picture picked from the participant's own device), black and white, sepia, night vision and pixelate looks, and face accessories (sunglasses, cat ears, party hat, crown, mustache). The three kinds combine, and the filtered picture is what every media path sends
+- Remember, on the participant's device, the camera and microphone they picked, whether each was on, and their video filters (including the custom background), and apply them the next time they join
+- Add the `mail:videoconf:effects:assets_url` setting, and `effectsAssetsUrl` in the join response, to host the filters' machine-learning runtime and models on the administrator's own server instead of fetching them from jsDelivr and Google's model bucket
+- Depend on `@mediapipe/tasks-vision`, loaded only when a participant turns on a filter that needs it
+
+### Changed
+- A saved camera or microphone is asked for as a preference, so one that has been unplugged falls back to the default device instead of failing
+
 ## [0.7.0] - 2026-09-27
 
 ### Added

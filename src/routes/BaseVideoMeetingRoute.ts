@@ -19,6 +19,7 @@ import {
     type AccessControlList,
 } from "@rapidrest/service-core";
 import { CalendarEventAttendeeLink, Mailbox } from "@rapidmx/restapi";
+import { parseEffectsAssetsUrl } from "../util/EffectsUtils.js";
 import { buildIceServers, IceServerConfig } from "../util/IceServerUtils.js";
 import { buildBaseUrl } from "../util/PublicUrlUtils.js";
 import { RedisRelayBus } from "../util/RedisRelayBus.js";
@@ -187,6 +188,9 @@ export interface VideoMeetingJoinResult {
      * TURN) is enabled on this server (`mail:videoconf:relay:enabled`). A client only falls back to it when this is
      * `true`; connecting to a disabled relay is refused anyway. */
     relayEnabled: boolean;
+    /** Where the video filters' machine-learning runtime and models are hosted, when the administrator hosts them
+     * (`mail:videoconf:effects:assets_url`). Omitted when unset, in which case clients use the public CDNs. */
+    effectsAssetsUrl?: string;
 }
 
 /**
@@ -396,6 +400,11 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
      * set from an environment variable arrives as a string. */
     @Config("mail:videoconf:relay:enabled", true)
     private relayEnabledSetting: boolean | string | number = true;
+
+    /** The base URL the video filters' models are hosted under, when not on the public CDNs - read through
+     * `parseEffectsAssetsUrl()`, which drops anything that isn't a plain URL or path. */
+    @Config("mail:videoconf:effects:assets_url", "")
+    private effectsAssetsUrlSetting: string = "";
 
     /** The deployment's `events` datastore (`datastores:events`) - the Redis the framework's push system publishes
      * across replicas on; `null` when the deployment has none. Decides how `initRelayBus()` carries relay frames. */
@@ -1011,6 +1020,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         }
 
         const relayEnabled: boolean = this.isRelayEnabled();
+        const effectsAssetsUrl: string | undefined = parseEffectsAssetsUrl(this.effectsAssetsUrlSetting);
         const publicMeeting: PublicVideoMeeting = {
             uid: meeting.uid,
             title: meeting.title,
@@ -1030,7 +1040,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         // prefix check is a safe, cheap discriminator - see this class's doc comment and GUEST_UID_PREFIX).
         if (user && !user.uid.startsWith(GUEST_UID_PREFIX)) {
             await this.ensureChannelGrant(meeting.uid, user.uid);
-            return { meeting: publicMeeting, iceServers, authenticated: true, selfUid: user.uid, relayEnabled };
+            return { meeting: publicMeeting, iceServers, authenticated: true, selfUid: user.uid, relayEnabled, ...(effectsAssetsUrl && { effectsAssetsUrl }) };
         }
 
         const { guestUid, token: guestToken, expiresAt } = this.mintGuestToken();
@@ -1043,6 +1053,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             token: guestToken,
             expiresAt: expiresAt.toISOString(),
             relayEnabled,
+            ...(effectsAssetsUrl && { effectsAssetsUrl }),
         };
     }
 

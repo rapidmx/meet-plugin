@@ -6,17 +6,21 @@
  * The in-call control bar, fixed to the bottom of the call (`_CallView.tsx` lays it out below the tiles, never over
  * them). Its menus open upward, centered on the whole bar on a phone (where the bar wraps onto two rows and a menu
  * hung from its own button would run off the edge) and from their own button on a wider window: microphone and camera (each a mute/unmute or on/off button next to a menu that picks the device), share
- * screen, reactions, raise hand, grid/focus and leave.
+ * screen, reactions, raise hand, grid/focus and leave. The effects button opens the video filter picker
+ * (`_EffectsPanel.tsx`) and lights up while any filter is on.
  *
  * The microphone button shows a live level while it is unmuted - bars that move with the sound the microphone is
  * picking up, so a participant can see their audio is being sent - and the camera button shows a green dot while a
  * camera is sending. Both are driven by `LocalMedia` (`apps/shared/media/useLocalMedia.ts`).
  */
 import React, { useEffect, useRef, useState } from "react";
+import { filtersActive } from "../shared/media/filters/filterTypes.js";
 import type { LocalMedia, MediaKind } from "../shared/media/useLocalMedia.js";
 import { REACTION_EMOJIS } from "../shared/webrtc/types.js";
+import EffectsPanel from "./_EffectsPanel.js";
 import {
     ChevronUpIcon,
+    EffectsIcon,
     EmojiIcon,
     FocusIcon,
     GridIcon,
@@ -45,7 +49,7 @@ export interface CallControlsProps {
     onLeave: () => void;
 }
 
-type OpenMenu = MediaKind | "emoji" | null;
+type OpenMenu = MediaKind | "emoji" | "effects" | null;
 
 const BUTTON = "flex items-center justify-center h-12 rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80";
 const NEUTRAL = "bg-[#3c4043] text-white hover:bg-[#4b4f53]";
@@ -164,6 +168,28 @@ export default function CallControls({
                     )}
                 </button>
                 {openMenu === "video" && <DeviceMenu kind="video" media={media} onClose={() => setOpenMenu(null)} />}
+            </div>
+
+            <div className="sm:relative">
+                <button
+                    type="button"
+                    className={`${BUTTON} w-12 ${filtersActive(media.filters) ? ACTIVE : NEUTRAL}`}
+                    aria-label="Video effects"
+                    aria-haspopup="dialog"
+                    aria-expanded={openMenu === "effects"}
+                    onClick={() => toggleMenu("effects")}
+                >
+                    <EffectsIcon />
+                </button>
+                {openMenu === "effects" && (
+                    <div
+                        role="dialog"
+                        aria-label="Video effects"
+                        className="absolute bottom-full mb-3 left-1/2 -translate-x-1/2 w-96 max-w-[calc(100vw-1rem)] max-h-[60vh] overflow-y-auto p-3 rounded-2xl bg-[#2b2d30] text-white shadow-xl"
+                    >
+                        <EffectsPanel media={media} tone="dark" />
+                    </div>
+                )}
             </div>
 
             <button

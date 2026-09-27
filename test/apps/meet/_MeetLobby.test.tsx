@@ -100,6 +100,41 @@ describe("MeetLobby - preview and buttons", () => {
     });
 });
 
+describe("MeetLobby - effects", () => {
+    it("shows the effects panel only once the toggle is pressed, and hides it again", () => {
+        renderLobby();
+        const toggle = screen.getByRole("button", { name: "Effects" });
+        expect(toggle).toHaveAttribute("aria-expanded", "false");
+        expect(screen.queryByRole("group", { name: "Background" })).toBeNull();
+
+        fireEvent.click(toggle);
+        expect(toggle).toHaveAttribute("aria-expanded", "true");
+        expect(screen.getByRole("group", { name: "Background" })).toBeInTheDocument();
+        expect(screen.getByRole("group", { name: "Look" })).toBeInTheDocument();
+        expect(screen.getByRole("group", { name: "Fun" })).toBeInTheDocument();
+
+        fireEvent.click(toggle);
+        expect(screen.queryByRole("group", { name: "Background" })).toBeNull();
+    });
+
+    it("applies a filter chosen in the panel", () => {
+        const { media } = renderLobby();
+        fireEvent.click(screen.getByRole("button", { name: "Effects" }));
+        fireEvent.click(screen.getByRole("button", { name: /Sepia/ }));
+        expect(media.setFilters).toHaveBeenCalledWith({ effect: "sepia" });
+    });
+
+    it("says so on the toggle while a filter is on", () => {
+        const { unmount } = renderLobby();
+        expect(screen.queryByRole("button", { name: "Effects (on)" })).toBeNull();
+        unmount();
+
+        renderLobby({ filters: { background: "none", effect: "none", accessory: "cat-ears" } });
+        expect(screen.getByRole("button", { name: "Effects (on)" })).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Effects" })).toBeNull();
+    });
+});
+
 describe("MeetLobby - permission", () => {
     it("explains an unsupported browser, and that the participant can still join", () => {
         renderLobby({ supported: false, audioTrack: null, ...NO_PICTURE, status: { audio: "pending", video: "pending" } });

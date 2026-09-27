@@ -53,10 +53,10 @@ export default function MeetJoinPage({ params }: { params: { token: string } }) 
  * window instead (see `_CallView.tsx`). */
 function MeetJoinContent({ token, branding }: { token: string; branding: Branding | null }) {
     const [phase, setPhase] = useState<Phase>("loading");
-    const [joinResult, setJoinResult] = useState<VideoMeetingJoinResult | null>(null);
     const [name, setName] = useState("");
     const [loadError, setLoadError] = useState<string | null>(null);
-    const media = useLocalMedia();
+    const [joinResult, setJoinResult] = useState<VideoMeetingJoinResult | null>(null);
+    const media = useLocalMedia({ effectsAssetsUrl: joinResult?.effectsAssetsUrl });
     const { release } = media;
 
     React.useEffect(() => {

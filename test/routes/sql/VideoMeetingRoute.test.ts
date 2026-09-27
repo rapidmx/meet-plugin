@@ -19,6 +19,7 @@ import { VideoMeetingInviteeSQL } from "../../../src/models/sql/VideoMeetingInvi
 import { VideoMeetingStatus, VideoMeetingVisibility } from "../../../src/models/types.js";
 import { GUEST_JWT_TTL_SECONDS, GUEST_UID_PREFIX } from "../../../src/routes/BaseVideoMeetingRoute.js";
 import { turnRestCredential } from "../../../src/util/IceServerUtils.js";
+import { effectsSuite } from "../effectsSuite.js";
 import { relaySuite } from "../relaySuite.js";
 import { videoMeetingSecuritySuite } from "../videoMeetingSecuritySuite.js";
 
@@ -590,6 +591,10 @@ describe("Route:VideoMeetingSQL Tests", () => {
     relaySuite({
         ...suiteContext,
         wsPort: () => (server.getApplication() as any).listenPort,
+        route: () => objectFactory.getInstance("routes.VideoMeetingRoute"),
+    });
+    effectsSuite({
+        ...suiteContext,
         route: () => objectFactory.getInstance("routes.VideoMeetingRoute"),
     });
 

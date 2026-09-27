@@ -7,6 +7,7 @@ import React from "react";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import CallControls, { LevelBars, type CallControlsProps } from "../../../apps/meet/_CallControls.js";
+import { NO_FILTERS } from "../../../apps/shared/media/filters/filterTypes.js";
 import { REACTION_EMOJIS } from "../../../apps/shared/webrtc/types.js";
 import { fakeDeviceInfo, fakeLocalMedia } from "../testUtils.js";
 
@@ -156,6 +157,80 @@ describe("CallControls - microphone and camera", () => {
         fireEvent.click(screen.getByRole("button", { name: "Choose camera" }));
         expect(screen.getAllByRole("menu")).toHaveLength(1);
         expect(screen.getByRole("menu", { name: "Cameras" })).toBeInTheDocument();
+    });
+});
+
+describe("CallControls - video effects", () => {
+    it("opens the effects panel from its button, and closes it from the same button", () => {
+        renderControls();
+        const button = screen.getByRole("button", { name: "Video effects" });
+        expect(button).toHaveAttribute("aria-haspopup", "dialog");
+        expect(button).toHaveAttribute("aria-expanded", "false");
+        expect(screen.queryByRole("dialog")).toBeNull();
+
+        fireEvent.click(button);
+        expect(button).toHaveAttribute("aria-expanded", "true");
+        const dialog = screen.getByRole("dialog", { name: "Video effects" });
+        expect(within(dialog).getByRole("group", { name: "Background" })).toBeInTheDocument();
+        expect(within(dialog).getByRole("group", { name: "Look" })).toBeInTheDocument();
+        expect(within(dialog).getByRole("group", { name: "Fun" })).toBeInTheDocument();
+
+        fireEvent.click(button);
+        expect(screen.queryByRole("dialog")).toBeNull();
+        expect(button).toHaveAttribute("aria-expanded", "false");
+    });
+
+    it("lights the button while a filter is on", () => {
+        const idle = renderControls({ media: fakeLocalMedia({ filters: NO_FILTERS }) });
+        const idleClass = screen.getByRole("button", { name: "Video effects" }).className;
+        idle.unmount();
+
+        for (const filters of [
+            { ...NO_FILTERS, background: "blur" as const },
+            { ...NO_FILTERS, effect: "sepia" as const },
+            { ...NO_FILTERS, accessory: "crown" as const },
+        ]) {
+            const active = renderControls({ media: fakeLocalMedia({ filters }) });
+            const activeClass = screen.getByRole("button", { name: "Video effects" }).className;
+            expect(activeClass).toContain("bg-[#a8c7fa]");
+            expect(idleClass).not.toContain("bg-[#a8c7fa]");
+            active.unmount();
+        }
+    });
+
+    it("closes on Escape and on a press outside the bar, but not on a press inside the panel", () => {
+        renderControls();
+        const button = screen.getByRole("button", { name: "Video effects" });
+
+        fireEvent.click(button);
+        fireEvent.pointerDown(within(screen.getByRole("dialog")).getByRole("button", { name: /Blur/ }));
+        fireEvent.pointerDown(screen.getByRole("dialog"));
+        expect(screen.getByRole("dialog")).toBeInTheDocument();
+        fireEvent.keyDown(document, { key: "Escape" });
+        expect(screen.queryByRole("dialog")).toBeNull();
+
+        fireEvent.click(button);
+        fireEvent.pointerDown(document.body);
+        expect(screen.queryByRole("dialog")).toBeNull();
+    });
+
+    it("stays open while a filter is chosen, and applies it", () => {
+        const media = fakeLocalMedia();
+        renderControls({ media });
+        fireEvent.click(screen.getByRole("button", { name: "Video effects" }));
+
+        fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /Blur/ }));
+
+        expect(media.setFilters).toHaveBeenCalledWith({ background: "blur" });
+        expect(screen.getByRole("dialog")).toBeInTheDocument();
+    });
+
+    it("opens one menu at a time, alongside the device menus", () => {
+        renderControls();
+        fireEvent.click(screen.getByRole("button", { name: "Choose camera" }));
+        fireEvent.click(screen.getByRole("button", { name: "Video effects" }));
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(screen.getByRole("dialog")).toBeInTheDocument();
     });
 });
 

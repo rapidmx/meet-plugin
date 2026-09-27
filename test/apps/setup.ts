@@ -14,6 +14,9 @@ if (typeof document !== "undefined") {
     const { cleanup } = await import("@testing-library/react");
     afterEach(() => {
         cleanup();
+        // What a participant chose is remembered in the browser's storage (`mediaPreferences.ts`), which jsdom keeps for
+        // the whole file - so one test's choices must not become the next one's starting point.
+        window.localStorage.clear();
     });
 
     if (typeof window.matchMedia !== "function") {

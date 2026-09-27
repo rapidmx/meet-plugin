@@ -16,6 +16,7 @@ import { VideoMeetingInviteeMongo } from "../../../src/models/mongo/VideoMeeting
 import { VideoMeetingStatus, VideoMeetingVisibility } from "../../../src/models/types.js";
 import { GUEST_JWT_TTL_SECONDS, GUEST_UID_PREFIX } from "../../../src/routes/BaseVideoMeetingRoute.js";
 import { turnRestCredential } from "../../../src/util/IceServerUtils.js";
+import { effectsSuite } from "../effectsSuite.js";
 import { relaySuite } from "../relaySuite.js";
 import { videoMeetingSecuritySuite } from "../videoMeetingSecuritySuite.js";
 
@@ -698,6 +699,10 @@ describe("Route:VideoMeetingMongo Tests", () => {
     relaySuite({
         ...suiteContext,
         wsPort: () => (server.getApplication() as any).listenPort,
+        route: () => objectFactory.getInstance("routes.VideoMeetingRoute"),
+    });
+    effectsSuite({
+        ...suiteContext,
         route: () => objectFactory.getInstance("routes.VideoMeetingRoute"),
     });
 
