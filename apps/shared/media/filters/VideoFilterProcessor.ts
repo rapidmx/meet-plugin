@@ -18,6 +18,12 @@
  * - **Timing.** Frames are driven by a timer rather than `requestAnimationFrame`, which stops entirely in a
  * background tab - the call would freeze for everyone else the moment the participant switched to another window.
  * Browsers still slow a background tab's timers, so a filtered picture can drop to a low frame rate there.
+ * - **The models run at a lower rate than the picture does** (`ML_HOLD_TICKS`), each frame in between reusing the
+ * last mask/landmarks rather than asking again. Segmentation and face tracking are synchronous, main-thread calls,
+ * and can each take tens of milliseconds - asking on every rendered frame can starve the main thread badly enough to
+ * make the WebSocket relay's audio stutter (`AudioSender`/`AudioPlayer` use `ScriptProcessorNode`, which runs its
+ * callback on the very same thread and glitches audibly if it misses its deadline) - the mask and the face barely
+ * change from one frame to the next, so asking less often costs nothing anyone can see.
  *
  * Everything browser-facing (canvases, the video element, the models) comes in through `deps`, so the tests drive a
  * processor with fakes.
@@ -67,8 +73,13 @@ const BLUR_DIVISOR = 12;
 /** The picture is pixelated into about this many blocks across. */
 const PIXEL_BLOCKS = 80;
 /** How many frames in a row without a detected face before the accessory is taken off - a face is briefly lost when
- * the head turns, and the accessory shouldn't flicker for that. */
+ * the head turns, and the accessory shouldn't flicker for that. Counts actual detection attempts, not rendered
+ * frames - see `ML_HOLD_TICKS`. */
 const FACE_HOLD_FRAMES = 6;
+/** Segmentation and face tracking actually run on one rendered frame out of this many, reusing the previous
+ * mask/landmarks the rest of the time - see this module's doc comment. Counted in rendered frames, not wall-clock
+ * time, so it behaves the same regardless of the configured frame rate or how slow a tick actually runs. */
+const ML_HOLD_TICKS = 3;
 
 const SEGMENTATION_ERROR =
     "The background effect couldn't be loaded, so your background stays hidden. Turn the effect off to show your camera.";
@@ -124,6 +135,9 @@ export class VideoFilterProcessor {
     private faceState: ModelState = "idle";
     private lastFace: FaceLandmark[] | null = null;
     private framesWithoutFace = 0;
+    private lastMask: PersonMask | null = null;
+    private segmentTicks = 0;
+    private faceTicks = 0;
     private maskImage: ImageData | null = null;
     private renderFailed = false;
     private status: FilterStatus = { loading: false, error: null };
@@ -324,8 +338,14 @@ export class VideoFilterProcessor {
         if (!this.segmenter) {
             return null;
         }
+        const due = this.segmentTicks % ML_HOLD_TICKS === 0;
+        this.segmentTicks++;
+        if (!due) {
+            return this.lastMask;
+        }
         try {
-            return this.segmenter.segment(this.video, now);
+            this.lastMask = this.segmenter.segment(this.video, now);
+            return this.lastMask;
         } catch {
             this.segmenter = null;
             this.segmenterState = "failed";
@@ -362,6 +382,11 @@ export class VideoFilterProcessor {
     private trackFace(now: number): FaceLandmark[] | null {
         if (!this.faceTracker) {
             return null;
+        }
+        const due = this.faceTicks % ML_HOLD_TICKS === 0;
+        this.faceTicks++;
+        if (!due) {
+            return this.lastFace;
         }
         let found: FaceLandmark[] | null = null;
         try {

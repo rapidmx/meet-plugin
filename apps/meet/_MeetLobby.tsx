@@ -17,6 +17,10 @@
  * there is no camera or microphone, the lobby says so and why, and joining is still allowed - a participant with
  * nothing to send can still see and hear the call, and turn a camera or microphone on later from the call controls.
  *
+ * The preview is mirrored, like a real mirror, so it feels natural - except with a custom background image, a fixed
+ * picture rather than a live reflection: mirroring it would show it backwards to no one but the participant
+ * themselves (see `_ParticipantTile.tsx`'s doc comment, which the in-call tile follows for the same reason).
+ *
  * Per this plugin's Phase 2 spec, the name field is always editable - it is only ever *prefilled* when a session is
  * genuinely known (see this component's `initialName` prop and `[token].tsx`'s own doc comment on why that never
  * actually happens on this page today).
@@ -101,7 +105,13 @@ export default function MeetLobby({ meeting, media, initialName, onJoin }: MeetL
                 <div>
                     <div className="relative aspect-video bg-[#202124] rounded-lg overflow-hidden flex items-center justify-center">
                         {media.videoStream ? (
-                            <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover [transform:scaleX(-1)]" />
+                            <video
+                                ref={videoRef}
+                                autoPlay
+                                playsInline
+                                muted
+                                className={`w-full h-full object-cover ${media.filters.background !== "image" ? "[transform:scaleX(-1)]" : ""}`}
+                            />
                         ) : (
                             <p className="px-4 text-center text-white/70 text-sm">{previewMessage(media)}</p>
                         )}

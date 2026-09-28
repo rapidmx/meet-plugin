@@ -65,6 +65,16 @@ describe("MeetLobby - preview and buttons", () => {
         expect(video.srcObject).toBe(media.videoStream);
     });
 
+    it("mirrors the preview, like a real mirror - except with a custom background image", () => {
+        const { container } = renderLobby();
+        expect(container.querySelector("video")!.className).toContain("scaleX(-1)");
+
+        const { container: withImage } = renderLobby({ filters: { background: "image", effect: "none", accessory: "none" } });
+        // A picture the participant chose is a fixed reference, not a live reflection - mirroring it would show it
+        // backwards to no one but themselves.
+        expect(withImage.querySelector("video")!.className).not.toContain("scaleX(-1)");
+    });
+
     it("says what is wrong instead of a picture", () => {
         const cases: [Partial<LocalMedia>, string][] = [
             [{ supported: false }, "This browser can't use a camera or microphone here."],

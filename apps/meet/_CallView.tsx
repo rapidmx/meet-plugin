@@ -354,6 +354,9 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
             micMuted={!media.micOn}
             handRaised={handRaised}
             status={selfConnecting ? "Connecting…" : undefined}
+            // A custom background is a fixed picture, not a live reflection - mirroring it would show it backwards
+            // to no one but the participant themselves (see `_ParticipantTile.tsx`'s doc comment).
+            mirrored={media.filters.background !== "image"}
             className={className}
         />
     );

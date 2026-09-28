@@ -19,6 +19,9 @@ const SEGMENTATION_ERROR =
     "The background effect couldn't be loaded, so your background stays hidden. Turn the effect off to show your camera.";
 const FACE_ERROR = "The face effect couldn't be loaded.";
 const RENDER_ERROR = "Video effects stopped working.";
+// Mirrors VideoFilterProcessor.ts's own constants (not exported - internal pacing, not part of its public contract).
+const FACE_HOLD_FRAMES = 6;
+const ML_HOLD_TICKS = 3;
 
 /** Frame rate used by most tests: a 100 ms interval, so `frames(n)` is exactly n ticks. */
 const FRAME_RATE = 10;
@@ -580,9 +583,11 @@ describe("person compositing", () => {
         const h = await ready();
         h.frames();
         h.mask = mask(2, 2, 1, 1, 1, 1);
-        h.frames();
+        // Segmentation only actually runs on every ML_HOLD_TICKS'th frame (the rest reuse the last mask), so the new
+        // size is only picked up once that next real attempt comes around.
+        h.frames(ML_HOLD_TICKS);
         h.mask = mask(2, 4, 1, 1, 1, 1);
-        h.frames();
+        h.frames(ML_HOLD_TICKS);
         expect(h.ops("c2").filter((op) => op[0] === "createImageData")).toEqual([
             ["createImageData", 4, 2],
             ["createImageData", 2, 2],
@@ -713,35 +718,38 @@ describe("accessories", () => {
         expect(h.faceTracker.detect).not.toHaveBeenCalled();
     });
 
-    it("holds the accessory for 6 frames after the face is lost, then takes it off", async () => {
+    it("holds the accessory for 6 real misses after the face is lost, then takes it off", async () => {
         const h = await withFace();
-        h.frames(); // face found
+        h.frames(); // face found (tick 0, always a real attempt)
         expect(translates(h)).toHaveLength(1);
         h.face = null;
-        for (let lost = 1; lost <= 6; lost++) {
-            h.frames();
-            expect(translates(h)).toHaveLength(1 + lost);
-        }
-        h.frames(); // the 7th frame without a face
-        expect(translates(h)).toHaveLength(7);
-        h.frames();
-        expect(translates(h)).toHaveLength(7);
+        // Only every ML_HOLD_TICKS'th tick is a real detection attempt - the accessory is redrawn from the last
+        // known face on every tick regardless, so it's still drawn right up to (and including) the tick of the 6th
+        // real miss in a row.
+        const dropsAt = (FACE_HOLD_FRAMES + 1) * ML_HOLD_TICKS;
+        h.frames(dropsAt - 1);
+        expect(translates(h)).toHaveLength(dropsAt);
+        h.frames(); // the 7th real miss in a row - taken off
+        expect(translates(h)).toHaveLength(dropsAt);
+        h.frames(3);
+        expect(translates(h)).toHaveLength(dropsAt); // stays off
     });
 
     it("draws again as soon as the face comes back, and restarts the hold", async () => {
         const h = await withFace();
-        h.frames();
+        h.frames(ML_HOLD_TICKS); // found
         h.face = null;
-        h.frames(7);
-        const before = translates(h).length;
-        h.face = faceMesh();
-        h.frames();
-        expect(translates(h)).toHaveLength(before + 1);
+        // Right up to the limit (6 real misses) without dropping it yet.
+        h.frames(ML_HOLD_TICKS * FACE_HOLD_FRAMES);
+        const stillHeld = translates(h).length;
+        h.face = faceMesh(); // comes back - the next real attempt should reset the miss count to 0...
+        h.frames(ML_HOLD_TICKS);
+        expect(translates(h)).toHaveLength(stillHeld + ML_HOLD_TICKS); // ...never dropped in between
         h.face = null;
-        h.frames(6);
-        expect(translates(h)).toHaveLength(before + 7);
-        h.frames();
-        expect(translates(h)).toHaveLength(before + 7);
+        // If the count had NOT reset, this second loss would push the total past the limit partway through and
+        // drop it early, so the picture would fall short of every one of these ticks having drawn it.
+        h.frames(ML_HOLD_TICKS * FACE_HOLD_FRAMES);
+        expect(translates(h)).toHaveLength(stillHeld + ML_HOLD_TICKS + ML_HOLD_TICKS * FACE_HOLD_FRAMES);
     });
 
     it("draws nothing for landmarks that are not a full face mesh", async () => {
@@ -758,13 +766,17 @@ describe("accessories", () => {
         h.faceTracker.detect.mockImplementation(() => {
             throw new Error("boom");
         });
-        h.frames();
+        // The mock throws only once detect() is actually called again - the next real attempt, not the next tick.
+        h.frames(ML_HOLD_TICKS);
         expect(h.statuses().slice(-1)[0]).toEqual({ loading: false, error: FACE_ERROR });
         const calls = h.faceTracker.detect.mock.calls.length;
         h.frames(3);
         expect(h.faceTracker.detect.mock.calls.length).toBe(calls);
-        // The picture itself carries on.
-        expect(translates(h)).toHaveLength(1);
+        // The picture itself carries on - drawn from the held face for the two ticks before the throw, then not at
+        // all once the tracker is gone.
+        expect(translates(h)).toHaveLength(ML_HOLD_TICKS);
+        h.frames(3);
+        expect(translates(h)).toHaveLength(ML_HOLD_TICKS); // still gone
         expect(h.frameDraws()).toBeGreaterThan(3);
     });
 

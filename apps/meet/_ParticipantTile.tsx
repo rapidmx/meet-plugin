@@ -8,7 +8,13 @@
  *
  * A tile never plays sound: its `<video>` is always muted, and what a participant says is played by the call view's
  * own `<audio>` elements (`_CallView.tsx`'s `RemoteAudio`), so a tile that isn't showing video - or isn't on screen
- * in the current layout - can never silence anyone. */
+ * in the current layout - can never silence anyone.
+ *
+ * The local tile is shown mirrored (`scaleX(-1)`), like a real mirror, so a participant's own movements feel
+ * natural - this is a local display transform only, never applied to the video actually sent to anyone, so
+ * everyone else always sees the participant the right way round. `mirrored={false}` (`_CallView.tsx`, when a custom
+ * background image is on) turns that off: the picture the participant chose is a fixed reference, not a live
+ * reflection, and mirroring it would show it backwards to no one but themselves. */
 import React, { useEffect, useRef } from "react";
 import type { MediaTransport } from "../shared/webrtc/types.js";
 import { MicOffIcon } from "./_icons.js";
@@ -57,6 +63,9 @@ export interface ParticipantTileProps {
     isFocused?: boolean;
     /** Fits the whole picture inside the tile instead of filling it - a shared screen must not be cropped. */
     contain?: boolean;
+    /** Whether the local tile is shown mirrored, like a real mirror - ignored for a remote tile, which is never
+     * mirrored. Default `true`; see this module's doc comment. */
+    mirrored?: boolean;
     onClick?: () => void;
     className?: string;
 }
@@ -76,6 +85,7 @@ export default function ParticipantTile({
     status,
     isFocused,
     contain,
+    mirrored = true,
     onClick,
     className,
 }: ParticipantTileProps) {
@@ -107,7 +117,7 @@ export default function ParticipantTile({
                         autoPlay
                         playsInline
                         muted
-                        className={`w-full h-full ${contain ? "object-contain bg-black" : "object-cover"} ${isLocal && !contain ? "[transform:scaleX(-1)]" : ""}`}
+                        className={`w-full h-full ${contain ? "object-contain bg-black" : "object-cover"} ${isLocal && !contain && mirrored ? "[transform:scaleX(-1)]" : ""}`}
                     />
                     {status && <StatusPill status={status} className="absolute top-2 left-1/2 -translate-x-1/2 whitespace-nowrap" />}
                 </>

@@ -51,6 +51,11 @@ describe("ParticipantTile", () => {
         expect(container.querySelector("video")!.className).toContain("scaleX(-1)");
     });
 
+    it("does not mirror the local picture when mirrored is turned off (a custom background image)", () => {
+        const { container } = render(<ParticipantTile name="Me" isLocal mirrored={false} stream={fakeMediaStream([fakeTrack("video")])} />);
+        expect(container.querySelector("video")!.className).not.toContain("scaleX");
+    });
+
     it("fits a shared screen inside the tile rather than cropping it, and never mirrors it", () => {
         const { container } = render(<ParticipantTile name="Me" isLocal contain stream={fakeMediaStream([fakeTrack("video")])} />);
         const video = container.querySelector("video")!;

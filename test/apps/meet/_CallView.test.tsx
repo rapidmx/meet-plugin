@@ -530,6 +530,19 @@ describe("CallView - reactions", () => {
     });
 });
 
+describe("CallView - mirroring the local tile", () => {
+    it("mirrors the self tile normally, but not with a custom background image", async () => {
+        const { container, rerender, props } = await connected({ media: fakeLocalMedia() });
+        expect(container.querySelector("video")!.className).toContain("scaleX(-1)");
+
+        const withImage = fakeLocalMedia({ filters: { background: "image", effect: "none", accessory: "none" } });
+        rerender(<CallView {...props} media={withImage} />);
+        // The picture the participant chose is a fixed reference, not a live reflection - mirroring it would show
+        // it backwards to no one but themselves (see `_ParticipantTile.tsx`'s doc comment).
+        expect(container.querySelector("video")!.className).not.toContain("scaleX(-1)");
+    });
+});
+
 describe("CallView - what is sent follows the local media", () => {
     it("swaps a new microphone or camera onto every connection, and announces a change of mute or camera", async () => {
         const media = fakeLocalMedia();
