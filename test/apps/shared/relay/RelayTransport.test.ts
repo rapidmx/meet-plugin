@@ -8,7 +8,7 @@ import { createRelayTransport, relayUrl } from "../../../../apps/shared/relay/Re
 import { createFakeRelayEnv, FakeAudioData, fakeChunk, FakeVideoFrame, relayed, track, type FakeRelayEnv, last } from "./relayFakes.js";
 
 const api = vi.hoisted(() => ({ origin: "" }));
-vi.mock("@rapidmx/react-shared/util/api.js", () => ({ apiOrigin: () => api.origin }));
+vi.mock("@rapidmx/web-client/lib/util/api.js", () => ({ apiOrigin: () => api.origin }));
 
 beforeEach(() => {
     api.origin = "";

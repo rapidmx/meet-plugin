@@ -945,7 +945,6 @@ __metadata:
   resolution: "@rapidmx/meet-plugin@workspace:."
   dependencies:
     "@mediapipe/tasks-vision": "npm:^1.0.1"
-    "@rapidmx/react-shared": "npm:^0.22.0"
     "@rapidmx/restapi": "npm:^0.24.0"
     "@rapidmx/web-client": "npm:^0.21.0"
     "@rapidrest/core": "npm:^6.0.0"
@@ -991,7 +990,6 @@ __metadata:
     vitest: "npm:^5.0.0"
     winston: "npm:^3.19.0"
   peerDependencies:
-    "@rapidmx/react-shared": ">=0.19.0 <1"
     "@rapidmx/restapi": ">=0.23.0 <1"
     "@rapidmx/web-client": ">=0.17.0 <1"
     "@rapidrest/core": 5.x

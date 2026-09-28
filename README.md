@@ -42,9 +42,9 @@ infrastructure and no UI yet - see `.claude/NOTES.md`'s dated entry for the full
 ## Development
 
 Same layout and tooling as this project's other plugins (`@rapidmx/booking-plugin`, `@rapidmx/mapi-plugin`,
-`@rapidmx/autodiscover-plugin`): `yarn install`, `yarn test:prod`, `yarn build`. `@rapidmx/restapi`,
-`@rapidmx/react-shared` and `@rapidmx/web-client` are portal-linked in `package.json`'s `resolutions` during local
-development against a matching working tree of those repos.
+`@rapidmx/autodiscover-plugin`): `yarn install`, `yarn test:prod`, `yarn build`. `@rapidmx/restapi` and
+`@rapidmx/web-client` are portal-linked in `package.json`'s `resolutions` during local development against a
+matching working tree of those repos.
 
 ## License
 

@@ -7,7 +7,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { jsonResponse, mockFetch } from "../testUtils.js";
 import PersonalRoomCard, { PERSONAL_ROOM_TITLE } from "../../../apps/settings-video-conferencing/_PersonalRoomCard.js";
-import type { VideoMeetingDetail } from "@rapidmx/react-shared/videoconf/videoMeetingsApi.js";
+import type { VideoMeetingDetail } from "@rapidmx/web-client/lib/videoconf/videoMeetingsApi.js";
 
 function room(overrides: Partial<VideoMeetingDetail> = {}): VideoMeetingDetail {
     return {

@@ -6,8 +6,8 @@
  * lives at `apps/meet/[token].tsx`, `GET /meet/:token`. Mirrors `booking-plugin`'s identical `apps/book/index.tsx`.
  * Replaces this plugin's Phase 1 one-line placeholder page (see `.claude/NOTES.md`). */
 import React from "react";
-import useBranding from "@rapidmx/react-shared/branding/useBranding.js";
-import Alert from "@rapidmx/react-shared/components/feedback/Alert.js";
+import useBranding from "@rapidmx/web-client/lib/branding/useBranding.js";
+import Alert from "@rapidmx/web-client/lib/components/feedback/Alert.js";
 import { MeetCard, MeetPageShell } from "./_MeetChrome.js";
 
 export default function NoMeetingTokenPage() {

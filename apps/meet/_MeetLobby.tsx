@@ -22,9 +22,9 @@
  * actually happens on this page today).
  */
 import React, { useEffect, useRef, useState } from "react";
-import Alert from "@rapidmx/react-shared/components/feedback/Alert.js";
-import Button from "@rapidmx/react-shared/components/buttons/Button.js";
-import FormField from "@rapidmx/react-shared/components/forms/FormField.js";
+import Alert from "@rapidmx/web-client/lib/components/feedback/Alert.js";
+import Button from "@rapidmx/web-client/lib/components/buttons/Button.js";
+import FormField from "@rapidmx/web-client/lib/components/forms/FormField.js";
 import type { LocalMedia, TrackStatus } from "../shared/media/useLocalMedia.js";
 import type { PublicVideoMeeting } from "./_meetApi.js";
 import { LevelBars } from "./_CallControls.js";

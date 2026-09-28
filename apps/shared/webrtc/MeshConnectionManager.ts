@@ -32,7 +32,7 @@
  * ## Join announcement and roster discovery
  *
  * The channel has no history (a push event published while a socket was down is never replayed - see
- * `@rapidmx/react-shared`'s `pushClient.ts` doc comment for the identical guarantee on the mail push channel this
+ * `@rapidmx/web-client`'s `lib/mail/pushClient.ts` doc comment for the identical guarantee on the mail push channel this
  * one shares its transport with), so a newcomer's `hello` would only reach participants who happened to already be
  * subscribed *and* who joined before them - never the other way around. Every participant who learns of a
  * genuinely new peer (from any message, not just `hello`) therefore echoes its own `hello` right back, once, the

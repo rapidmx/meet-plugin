@@ -16,7 +16,7 @@
  * There is one transport (one socket) per meeting, however many peers use it, and the codecs are fixed - there is no
  * negotiation, because both ends are this same code.
  */
-import { apiOrigin } from "@rapidmx/react-shared/util/api.js";
+import { apiOrigin } from "@rapidmx/web-client/lib/util/api.js";
 import { PLAYBACK_SAMPLE_RATE } from "./AudioPlayer.js";
 import { resumeAudioContext } from "./audioResume.js";
 import { RelayClient } from "./RelayClient.js";

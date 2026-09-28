@@ -9,7 +9,7 @@
  * own `tsconfig.apps.json` (bundler resolution, DOM-facing), independent of the backend's `tsconfig.json` (NodeNext),
  * and every other plugin app in this codebase keeps that boundary the same way.
  */
-import { apiFetch } from "@rapidmx/react-shared/util/api.js";
+import { apiFetch } from "@rapidmx/web-client/lib/util/api.js";
 
 export type VideoMeetingVisibility = "private" | "public";
 export type VideoMeetingStatus = "scheduled" | "active" | "ended" | "cancelled";

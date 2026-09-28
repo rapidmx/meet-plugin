@@ -172,18 +172,21 @@ describe("plugin manifest", () => {
 });
 
 describe("package.json dependency consistency", () => {
-    // Regression test for a real cross-repo bug: `apps/settings-video-conferencing/*.tsx` import
-    // `@rapidmx/react-shared/videoconf/videoMeetingsApi.js`, a module react-shared's own CHANGELOG.md shows was
-    // only added in 0.13.0. A `peerDependencies` floor below that version is a lie - anyone installing this plugin
-    // against the bottom of its own claimed-supported range gets a hard module-resolution failure at import time,
-    // not a type error caught at compile time (a plugin's `apps/` compile against this repo's own `devDependencies`
-    // version, never the peer range's floor). Every source file under `apps/` that imports from
-    // `@rapidmx/react-shared/videoconf/` is walked here, rather than hardcoding the one module currently known to
-    // need it, so a future addition to that surface can't silently regress this floor again.
-    it("declares a react-shared peer floor high enough for every '@rapidmx/react-shared/videoconf/*' import apps/ makes", () => {
-        const REQUIRED_REACT_SHARED_FLOOR = "0.13.0";
+    // Regression test for a real cross-repo bug, updated 2026-09-27 for the `@rapidmx/react-shared` -> `@rapidmx/web-client`
+    // merge: `apps/settings-video-conferencing/*.tsx` now import `@rapidmx/web-client/lib/videoconf/videoMeetingsApi.js`
+    // (react-shared's entire `src/` tree, `videoconf/` included, moved into web-client's new `lib/` unchanged). The
+    // original test asserted `peerDependencies["@rapidmx/react-shared"]`'s floor was high enough for the version of
+    // react-shared that first shipped that module (0.13.0, per react-shared's own CHANGELOG.md) - a floor below that
+    // was a lie, since a plugin's `apps/` compile against this repo's own `devDependencies` version, never the peer
+    // range's floor, so a hard module-resolution failure at import time would only show up for an installer at the
+    // bottom of the claimed-supported range. The walk below still confirms the import surface exists at its new
+    // `@rapidmx/web-client/lib/videoconf/` path; the numeric floor assertion itself is `it.todo` below because the
+    // web-client release that first actually carries the merged `lib/videoconf/videoMeetingsApi.js` module is not
+    // yet known (the web-client-side merge was still in progress as of this edit) - inventing a semver floor here
+    // would just be a guess, and this repo's convention is that JP sets version numbers/ranges himself.
+    it("still imports '@rapidmx/web-client/lib/videoconf/*' somewhere under apps/", () => {
         const appsDir = new URL("../apps/", import.meta.url);
-        const importPattern = /@rapidmx\/react-shared\/videoconf\//;
+        const importPattern = /@rapidmx\/web-client\/lib\/videoconf\//;
         function walk(dirUrl: URL): string[] {
             const dir = fileURLToPath(dirUrl);
             let matches: string[] = [];
@@ -203,13 +206,12 @@ describe("package.json dependency consistency", () => {
         // Sanity check on the test itself: if this ever finds nothing, the regex/walk broke silently rather than
         // the import having been removed - `videoMeetingsApi.js` is imported by Phase 4's settings page today.
         expect(filesNeedingTheFloor.length).toBeGreaterThan(0);
-
-        const peerRange: string = pkg.peerDependencies["@rapidmx/react-shared"];
-        const floorMatch: RegExpMatchArray | null = peerRange.match(/>=(\d+\.\d+\.\d+)/);
-        expect(floorMatch).not.toBeNull();
-        const declaredFloor: string = floorMatch![1];
-        expect(semverGte(declaredFloor, REQUIRED_REACT_SHARED_FLOOR)).toBe(true);
     });
+
+    it.todo(
+        "declares a web-client peer floor high enough for every '@rapidmx/web-client/lib/videoconf/*' import apps/ makes " +
+            "- pending the web-client release that first ships the merged react-shared videoconf module; see the comment above",
+    );
 
     // `BaseVideoMeetingRoute` writes `CalendarEventAttendeeLink` rows (the per-invitee calendar invite links
     // `MeetingSchedulingJob` reads), a model `@rapidmx/restapi` only added in 0.19.0 - a lower peer floor would let
@@ -226,7 +228,7 @@ describe("package.json dependency consistency", () => {
     });
 
     it("pins every 'resolutions' entry to exactly its own 'peerDependencies' floor, matching booking-plugin's convention", () => {
-        for (const name of ["@rapidmx/react-shared", "@rapidmx/restapi", "@rapidmx/web-client"]) {
+        for (const name of ["@rapidmx/restapi", "@rapidmx/web-client"]) {
             const peerFloor: string = pkg.peerDependencies[name].match(/>=(\d+\.\d+\.\d+)/)[1];
             expect(pkg.resolutions[name]).toBe(`^${peerFloor}`);
         }

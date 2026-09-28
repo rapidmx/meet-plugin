@@ -4,7 +4,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 /**
  * A standalone `SignalingChannel` (`../webrtc/types.js`) over `@rapidrest/service-core`'s `/push` WebSocket -
- * built from scratch rather than reusing `@rapidmx/react-shared`'s `PushClient`/`getPushClient()`.
+ * built from scratch rather than reusing `@rapidmx/web-client`'s `PushClient`/`getPushClient()` (`lib/mail/pushClient.js`).
  *
  * ## Why not `PushClient`
  *
@@ -63,8 +63,8 @@
  * absent, as described above - the browser's real cookie was always going to win that write anyway, so the
  * correct behavior is to not fight it and let it authenticate normally instead.
  */
-import { apiOrigin } from "@rapidmx/react-shared/util/api.js";
-import { pushUrl } from "@rapidmx/react-shared/mail/pushClient.js";
+import { apiOrigin } from "@rapidmx/web-client/lib/util/api.js";
+import { pushUrl } from "@rapidmx/web-client/lib/mail/pushClient.js";
 import type { SignalMessage, SignalingChannel } from "../webrtc/types.js";
 
 /** The subset of the browser's `WebSocket` this client uses - matches `PushClient`'s own identical seam, so a
@@ -99,7 +99,7 @@ export interface GuestSignalingClientOptions {
      * `Authorization` header at all, relying entirely on the browser's own already-existing `jwt` session cookie
      * for both the WebSocket upgrade and each `POST /push/:id` publish - see this module's doc comment. */
     token?: string;
-    /** Defaults to `@rapidmx/react-shared`'s `pushUrl()` - the exact URL `PushClient` itself connects to. */
+    /** Defaults to `@rapidmx/web-client`'s `pushUrl()` (`lib/mail/pushClient.js`) - the exact URL `PushClient` itself connects to. */
     url?: () => string | undefined;
     createSocket?: PushSocketFactory;
     fetchImpl?: typeof fetch;

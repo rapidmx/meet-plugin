@@ -653,3 +653,54 @@ Asked for: background blur, a custom background (a file from the user's machine)
 - **Not tried on a real face**: the fake camera has no person, so the person mask and the accessories' placement on a real face (they anchor on landmark 10, the forehead top, so the hat/ears/crown may sit a little high or low on some faces) were only checked with synthetic data. Not tried on Firefox/Safari/phones. Filtering costs CPU (two models at 30 fps on the main thread); a hidden tab's timers are throttled by the browser, so a filtered picture can drop to a low frame rate there (a Worker-driven timer would fix it).
 - The self view is mirrored with CSS, so a custom background *picture* looks flipped to the person themselves (everyone else sees it correctly).
 - No speaker (output device) picker exists in the plugin, so there is no speaker choice to remember.
+
+## 2026-09-27: `@rapidmx/react-shared` merged away - every import moved to `@rapidmx/web-client/lib/*`
+
+`@rapidmx/react-shared` is being folded into `@rapidmx/web-client` (a parallel effort in those two repos, not this
+one): react-shared's entire `src/` tree (same internal layout - `admin/`, `appearance/`, `auth/`, `branding/`,
+`calendar/`, `components/`, `contacts/`, `crypto/`, `mail/`, `search/`, `tasks/`, `util/`, `videoconf/`) moves
+unchanged into a new `lib/` directory inside web-client, exported at `./lib/*.js`. This plugin depended on both
+packages and imported directly from `@rapidmx/react-shared/...` in several `apps/` pages, so it needed the same
+mechanical update every other react-shared consumer in this project needs.
+
+- **Every `@rapidmx/react-shared/<subpath>.js` import became `@rapidmx/web-client/lib/<subpath>.js`**, one-for-one,
+  across `apps/meet/{index,_layout,_MeetChrome,_MeetLobby,[token]}.tsx`, `apps/meet/_meetApi.ts`,
+  `apps/settings-video-conferencing/{index,_layout,_PersonalRoomCard}.tsx`, `apps/shared/push/GuestSignalingClient.ts`,
+  `apps/shared/relay/RelayTransport.ts`, the doc comment in `apps/shared/webrtc/MeshConnectionManager.ts`, the three
+  test files that imported types/mocked that module (`test/apps/settings-video-conferencing/{index,_PersonalRoomCard}.test.tsx`,
+  `test/apps/shared/relay/RelayTransport.test.ts`), `vitest.config.ts`'s dedupe/`ssr.noExternal` lists, and `README.md`'s
+  dev-setup paragraph. `@rapidmx/web-client`'s own pre-existing export paths (e.g.
+  `@rapidmx/web-client/shared/components/settings/layout/SettingsShell.js`, already used in
+  `apps/settings-video-conferencing/index.tsx`) are untouched - only the react-shared-derived subpaths move under `lib/`.
+- **`package.json`**: removed `@rapidmx/react-shared` from `peerDependencies`, `devDependencies` and `resolutions`.
+  Left every `@rapidmx/web-client` version constraint exactly as declared (`peerDependencies: ">=0.17.0 <1"`,
+  `devDependencies: "^0.21.0"`, `resolutions: "^0.17.0"`) - not bumped, per this repo's convention that JP sets
+  version numbers/ranges himself. Ran `yarn install` to refresh `yarn.lock`; `@rapidmx/react-shared` still appears
+  there as a transitive dependency of the currently-published `@rapidmx/web-client@0.17.0`/`0.21.0` (that published
+  version still depends on it) - expected until web-client itself publishes a release that no longer needs it.
+- **`test/plugin.test.ts`**: the "declares a react-shared peer floor high enough for every
+  `@rapidmx/react-shared/videoconf/*` import" regression test (added because a peer floor below the react-shared
+  version that first shipped `videoMeetingsApi.js` would silently ship a broken install) no longer has a package of
+  its own to check a floor against. Split it in two: a still-passing structural check that
+  `@rapidmx/web-client/lib/videoconf/` is still imported somewhere under `apps/`, and an `it.todo(...)` placeholder
+  for the numeric floor assertion, since the web-client release that will first actually carry the merged
+  `lib/videoconf/videoMeetingsApi.js` module isn't known yet (the web-client-side half of this merge was still in
+  progress when this was written) - a guessed semver floor here would just be wrong later. Also dropped
+  `"@rapidmx/react-shared"` from the `pins every 'resolutions' entry to exactly its own 'peerDependencies' floor` test's
+  package list.
+- **Verification**: `yarn lint` - clean except two pre-existing-shape `no-unnecessary-type-assertion` errors in
+  `_PersonalRoomCard.tsx`/`index.tsx` on `room.publicJoinUrl!`/`meeting.publicJoinUrl!`, caused by `VideoMeetingDetail`
+  resolving to `any` (see next point) rather than by anything wrong with the assertions themselves.
+  `tsc -p tsconfig.json --noEmit` (the backend, `src/`) is clean - nothing under `src/` ever imported react-shared.
+  `tsc -p tsconfig.apps.json --noEmit` and `yarn test` **fail**, and are expected to until the web-client side of this
+  merge ships: the installed `@rapidmx/web-client` (0.21.0, from npm - `D:\github\rapidmx\web-client\lib\` does not
+  exist locally either, confirming the other repo's migration hadn't landed yet) has no `lib/` export at all, so every
+  new `@rapidmx/web-client/lib/*` import fails to resolve (`TS2307` under `tsc`, `Failed to resolve import`/`Cannot
+  find package` under Vitest's Vite transform). 9 of 54 test files fail this way; the other 45 files (1155 tests, plus
+  the new `it.todo`) pass. This is not a bug introduced here - it is exactly the expected race the task anticipated;
+  once web-client publishes (or this repo's local checkout gets) a version with `lib/videoconf/videoMeetingsApi.js`
+  etc., re-run `yarn install` / `tsc -p tsconfig.apps.json --noEmit` / `yarn test` to confirm green, and then decide
+  whether `peerDependencies`/`devDependencies`/`resolutions`' `@rapidmx/web-client` floor needs raising to that release
+  (see the `it.todo` above - fill in its real floor at the same time).
+- Not touched: `CHANGELOG.md`/`RELEASE_NOTES.md` (generated by `yarn release` from commit messages, not hand-edited -
+  see this repo's other NOTES entries and the top-level convention), and no `version` field was bumped.

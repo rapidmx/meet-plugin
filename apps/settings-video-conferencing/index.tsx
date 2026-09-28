@@ -3,10 +3,10 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import React, { useEffect, useState } from "react";
-import { ApiRequestError } from "@rapidmx/react-shared/util/api.js";
-import { VideoMeetingDetail, listVideoMeetings, updateVideoMeeting } from "@rapidmx/react-shared/videoconf/videoMeetingsApi.js";
+import { ApiRequestError } from "@rapidmx/web-client/lib/util/api.js";
+import { VideoMeetingDetail, listVideoMeetings, updateVideoMeeting } from "@rapidmx/web-client/lib/videoconf/videoMeetingsApi.js";
 import SettingsShell, { SettingsShellProps, useSettingsShell } from "@rapidmx/web-client/shared/components/settings/layout/SettingsShell.js";
-import Alert from "@rapidmx/react-shared/components/feedback/Alert.js";
+import Alert from "@rapidmx/web-client/lib/components/feedback/Alert.js";
 import PersonalRoomCard from "./_PersonalRoomCard.js";
 
 /** However many of a mailbox's meetings this page ever needs to see at once - generous enough that a real user's

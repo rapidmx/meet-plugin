@@ -12,7 +12,7 @@ export default defineConfig({
                 "node_modules/@rapidrest/service-core/dist/lib/test/requestws.js",
             ),
         },
-        // `@rapidmx/restapi`, `@rapidmx/react-shared` and `@rapidmx/web-client` are portal-linked during development (see
+        // `@rapidmx/restapi` and `@rapidmx/web-client` are portal-linked during development (see
         // package.json `resolutions`), and each keeps its own node_modules. Without deduping, their imports would resolve
         // their own copies: a second React breaks every hook with "Invalid hook call", and a second service-core or core
         // breaks the `instanceof`-based dependency injection and datastore lookups the test servers rely on.
@@ -23,7 +23,6 @@ export default defineConfig({
             "@rapidrest/service-core",
             "@rapidrest/core",
             "@rapidmx/restapi",
-            "@rapidmx/react-shared",
             "@rapidmx/web-client",
         ],
     },

@@ -6,7 +6,7 @@
  * same `booking-plugin`'s `_BookingChrome.tsx` shell-component pattern this plugin's Phase 2 spec calls for. Not a
  * page itself: `_`-prefixed files in `apps/` aren't routed. */
 import React, { PropsWithChildren } from "react";
-import { Branding } from "@rapidmx/react-shared/branding/brandingApi.js";
+import { Branding } from "@rapidmx/web-client/lib/branding/brandingApi.js";
 import { BrandingFooter, BrandingHeader } from "@rapidmx/web-client/shared/components/layout/BrandingChrome.js";
 
 export function MeetPageShell({ branding, children }: PropsWithChildren<{ branding: Branding | null }>) {

@@ -10,14 +10,14 @@
  * ## Session-based name prefill - NOT implemented, and why
  *
  * The spec asks this page to prefill the name field from `Profile.givenName` when the visiting browser already
- * holds a RapidMX session (investigating `@rapidmx/react-shared`'s `profileApi.ts`/`session.ts` was part of this
- * plugin's Phase 2 work). That turned out not to be wireable from here: `profileApi.ts`'s `getMyProfile()` needs
+ * holds a RapidMX session (investigating `@rapidmx/web-client`'s `lib/profileApi.ts`/`lib/session.ts` was part of
+ * this plugin's Phase 2 work). That turned out not to be wireable from here: `profileApi.ts`'s `getMyProfile()` needs
  * an `authServerUrl` to call auth-server (a *different* origin) with, and `session.ts`'s own doc comment confirms
  * `userUid`/`authServerUrl` are supplied only via server-side `fetchProps` on the `www`/admin console hosts
  * (`wwwRoute`/`AdminConsoleRoute` in `@rapidmx/server`) - never on the `public` host this page is mounted on.
  * `PublicPageRoute` (`@rapidmx/server`, this page's actual host route) returns only branding props; it has no
  * concept of the caller's session at all. There is, today, no public-host plugin page anywhere in this codebase
- * that does this, so there was no convention to extend - only two, cross-repo (`@rapidmx/server`/`react-shared`)
+ * that does this, so there was no convention to extend - only two, cross-repo (`@rapidmx/server`/`web-client`)
  * ways to add one (flagged in this plugin's Phase 2 report rather than built here, both out of this frontend-only
  * phase's scope):
  *
@@ -30,11 +30,11 @@
  * invitees have no RapidMX account at all), just never prefilled even for a mailbox owner testing their own link.
  */
 import React, { useState } from "react";
-import useBranding from "@rapidmx/react-shared/branding/useBranding.js";
-import { Branding } from "@rapidmx/react-shared/branding/brandingApi.js";
-import { ApiRequestError } from "@rapidmx/react-shared/util/api.js";
-import Button from "@rapidmx/react-shared/components/buttons/Button.js";
-import Alert from "@rapidmx/react-shared/components/feedback/Alert.js";
+import useBranding from "@rapidmx/web-client/lib/branding/useBranding.js";
+import { Branding } from "@rapidmx/web-client/lib/branding/brandingApi.js";
+import { ApiRequestError } from "@rapidmx/web-client/lib/util/api.js";
+import Button from "@rapidmx/web-client/lib/components/buttons/Button.js";
+import Alert from "@rapidmx/web-client/lib/components/feedback/Alert.js";
 import { MeetCard, MeetPageShell } from "./_MeetChrome.js";
 import { useLocalMedia } from "../shared/media/useLocalMedia.js";
 import MeetLobby from "./_MeetLobby.js";

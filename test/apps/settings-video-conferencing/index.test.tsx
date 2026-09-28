@@ -7,7 +7,7 @@ import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { jsonResponse, mockFetch } from "../testUtils.js";
 import SettingsVideoConferencingPage, { findPersonalRoom } from "../../../apps/settings-video-conferencing/index.js";
-import type { VideoMeetingDetail } from "@rapidmx/react-shared/videoconf/videoMeetingsApi.js";
+import type { VideoMeetingDetail } from "@rapidmx/web-client/lib/videoconf/videoMeetingsApi.js";
 
 const mailbox = {
     uid: "mb1",
