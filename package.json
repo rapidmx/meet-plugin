@@ -34,8 +34,8 @@
         "react-dom": "19.x"
     },
     "devDependencies": {
-        "@rapidmx/restapi": "^0.24.0",
-        "@rapidmx/web-client": "^0.21.0",
+        "@rapidmx/restapi": "^0.25.1",
+        "@rapidmx/web-client": "^0.22.0",
         "@rapidrest/core": "^6.0.0",
         "@rapidrest/react": "^2.1.0",
         "@rapidrest/service-core": "^2.4.0",
@@ -80,8 +80,8 @@
         "winston": "^3.19.0"
     },
     "resolutions": {
-        "@rapidmx/restapi": "^0.23.0",
-        "@rapidmx/web-client": "^0.17.0"
+        "@rapidmx/restapi": "^0.25.1",
+        "@rapidmx/web-client": "^0.22.0"
     },
     "packageManager": "yarn@4.5.3",
     "engines": {

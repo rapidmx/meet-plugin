@@ -945,8 +945,8 @@ __metadata:
   resolution: "@rapidmx/meet-plugin@workspace:."
   dependencies:
     "@mediapipe/tasks-vision": "npm:^1.0.1"
-    "@rapidmx/restapi": "npm:^0.24.0"
-    "@rapidmx/web-client": "npm:^0.21.0"
+    "@rapidmx/restapi": "npm:^0.25.1"
+    "@rapidmx/web-client": "npm:^0.22.0"
     "@rapidrest/core": "npm:^6.0.0"
     "@rapidrest/react": "npm:^2.1.0"
     "@rapidrest/service-core": "npm:^2.4.0"
@@ -1000,30 +1000,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@rapidmx/react-shared@npm:^0.19.0":
-  version: 0.19.0
-  resolution: "@rapidmx/react-shared@npm:0.19.0"
-  dependencies:
-    "@emoji-mart/data": "npm:^1.2.1"
-    "@peculiar/x509": "npm:^2.1.0"
-    asn1js: "npm:^3.0.10"
-    date-fns: "npm:^4.4.0"
-    dompurify: "npm:^3.4.15"
-    hash-wasm: "npm:^4.12.0"
-    pkijs: "npm:^3.4.0"
-    react-icons: "npm:^5.7.0"
-    reflect-metadata: "npm:^0.2.2"
-    rrule: "npm:^2.8.1"
-  peerDependencies:
-    react: 19.x
-    react-dom: 19.x
-  checksum: 10c0/b2b0a9514b43b6d7a7b2f2cc103e51dcd1140326f57a1671bc50ea37a090d836fb06e49d0e2a90d474aee6cea390b43074932aeb8019f011ad03d2e41a799183
-  languageName: node
-  linkType: hard
-
-"@rapidmx/restapi@npm:^0.23.0":
-  version: 0.23.0
-  resolution: "@rapidmx/restapi@npm:0.23.0"
+"@rapidmx/restapi@npm:^0.25.1":
+  version: 0.25.1
+  resolution: "@rapidmx/restapi@npm:0.25.1"
   dependencies:
     "@peculiar/x509": "npm:^2.1.0"
     acme-client: "npm:^5.4.0"
@@ -1056,18 +1035,18 @@ __metadata:
       optional: true
     pdf-parse:
       optional: true
-  checksum: 10c0/ec167670170d7bd88a47ec1a18041628aa317110a1f5121682545536a30968b756763f217450f423910f9ce7e778641ffdb32956f0bb35992325a4b5b77d490c
+  checksum: 10c0/288a436499baf648ad947f50c8ed34671985c6425a84144e08484e87436ec56c62c1cc1bce353f75a70238ba16a98f1afc16c6c5f6189068d6593f746f4d6f68
   languageName: node
   linkType: hard
 
-"@rapidmx/web-client@npm:^0.17.0":
-  version: 0.17.0
-  resolution: "@rapidmx/web-client@npm:0.17.0"
+"@rapidmx/web-client@npm:^0.22.0":
+  version: 0.22.0
+  resolution: "@rapidmx/web-client@npm:0.22.0"
   dependencies:
     "@dnd-kit/core": "npm:^6.3.1"
+    "@emoji-mart/data": "npm:^1.2.1"
     "@journeyapps/wa-sqlite": "npm:^2.0.4"
     "@peculiar/x509": "npm:^2.1.0"
-    "@rapidmx/react-shared": "npm:^0.19.0"
     "@tiptap/core": "npm:^3.31.3"
     "@tiptap/extension-highlight": "npm:^3.31.3"
     "@tiptap/extension-image": "npm:^3.31.3"
@@ -1086,11 +1065,12 @@ __metadata:
     pkijs: "npm:^3.4.0"
     react-icons: "npm:^5.7.0"
     reflect-metadata: "npm:^0.2.2"
+    rrule: "npm:^2.8.1"
   peerDependencies:
     "@rapidrest/react": ">=2.1.0 <3"
     react: 19.x
     react-dom: 19.x
-  checksum: 10c0/5b2893c8a604facdfafe535df0883ceb0fcfcef36a5ce7a257bb261e2a29e7336f71790a1f9158bc4e67a19c07104ab8c732e45ad4a47e20612d719db049c261
+  checksum: 10c0/fa375f0f35e0067d87928703f6b7965755b02944234d76cb346bc91332ec91bc86704f6ef90dedd57560aad9534a40ddf2385e4d07b3df7bbab336ff682d4b63
   languageName: node
   linkType: hard
 
