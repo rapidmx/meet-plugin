@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-29
+
+### Added
+- Added the missing "Enable corepack" step to the validate job - every other job already has it, and without it yarn runs the container's stock Yarn 1.22.22 instead of the packageManager-pinned version, which refuses to run at all against a packageManager field, so validate's yarn npm audit never actually ran regardless of real findings. Confirmed on rapidmx/server's identical job via a real CI log; this repo's validate job is the same template and shares the same latent gap even where it happened not to manifest yet
+
+### Changed
+- Rewrite every @rapidmx/react-shared import to @rapidmx/web-client's new lib/ path, and drop the now-unused dependency from peerDependencies, devDependencies and resolutions
+- Replace plugin.test.ts's react-shared version-floor assertion with a structural check and a todo, since there is no released web-client version yet to compare against
+- Drop react-shared from vitest's ssr.noExternal list and update the README's dev-setup mentions
+- Document the change in NOTES
+- The local self-view is mirrored with CSS (scaleX(-1)) for a natural, real-mirror
+- feel - always local-only, so it never affected what anyone else saw. But that
+- mirror flips the whole composited frame, including a chosen background picture,
+- which reads backwards to no one but the participant who picked it. _ParticipantTile
+- now takes a mirrored prop (default true, unchanged everywhere else); _CallView and
+- _MeetLobby turn it off for the local view specifically when the background is a
+- custom image.
+- VideoFilterProcessor asked the segmentation and face models every rendered frame
+- (up to 30/sec), each a synchronous, main-thread call that can take tens of
+- milliseconds - long enough to make the WebSocket relay's ScriptProcessorNode-based
+- audio miss its buffer deadline and glitch. It now asks on only one rendered frame
+- in three (ML_HOLD_TICKS), reusing the last mask/landmarks otherwise; neither
+- changes enough between three frames to be visible.
+- Reported choppy audio also happens with no filters on, so this alone isn't the
+- by-design drop points in the relay's audio pipeline, none related to filters) and
+- what to check next.
+- Document the standing wait-for-green-CI-before-releasing rule in NOTES, per JP
+- Bump the @rapidmx/restapi and @rapidmx/web-client development dependencies (and their resolutions pins) to ^0.25.1/^0.22.0, now that both are published
+
+### Fixed
+- Fixed a custom background image showing backwards to its own participant, and cut the video filters' main-thread cost
+- Fixed a self-inconsistency the previous commit introduced: revert the @rapidmx/restapi resolutions pin back to ^0.23.0 (its unchanged peerDependencies floor), and raise the @rapidmx/web-client peerDependencies floor to >=0.22.0, matching what this repo's own apps/ sources have actually required since importing @rapidmx/web-client/lib/*.js directly (confirmed via a real CI failure this revealed: the previous commit's floor-matching resolutions revert forced an old web-client without lib/, breaking every page under apps/meet and apps/settings-video-conferencing) - the resolutions pin now correctly matches the real floor either way
+
 ## [0.8.0] - 2026-09-27
 
 ### Added
@@ -162,7 +195,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/rapidmx/meet-plugin/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/rapidmx/meet-plugin/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/rapidmx/meet-plugin/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/rapidmx/meet-plugin/compare/v0.5.0...v0.6.0
