@@ -26,7 +26,7 @@
     },
     "peerDependencies": {
         "@rapidmx/restapi": ">=0.23.0 <1",
-        "@rapidmx/web-client": ">=0.17.0 <1",
+        "@rapidmx/web-client": ">=0.22.0 <1",
         "@rapidrest/core": "5.x",
         "@rapidrest/react": ">=2.1.0 <3",
         "@rapidrest/service-core": "2.x",
@@ -80,7 +80,7 @@
         "winston": "^3.19.0"
     },
     "resolutions": {
-        "@rapidmx/restapi": "^0.25.1",
+        "@rapidmx/restapi": "^0.23.0",
         "@rapidmx/web-client": "^0.22.0"
     },
     "packageManager": "yarn@4.5.3",
