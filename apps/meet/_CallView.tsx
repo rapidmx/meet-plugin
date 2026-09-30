@@ -39,6 +39,7 @@ import { playRaisedHandChime } from "../shared/media/chime.js";
 import { pickActiveSpeaker } from "../shared/media/activeSpeaker.js";
 import { startLevelMeter, type LevelMeterHandle } from "../shared/media/levelMeter.js";
 import { requestDisplayMedia, stopStream } from "../shared/media/deviceMedia.js";
+import { NO_SCREEN_TRANSFORM, ScreenTransformProcessor, rotateClockwise, type ScreenTransformState } from "../shared/media/filters/ScreenTransform.js";
 import type { LocalMedia } from "../shared/media/useLocalMedia.js";
 import { createBrowserPeerConnection } from "../shared/webrtc/realPeerConnection.js";
 import { MeshConnectionManager } from "../shared/webrtc/MeshConnectionManager.js";
@@ -112,6 +113,7 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
     const [levels, setLevels] = useState<Record<string, number>>({});
     const [presenterUid, setPresenterUid] = useState<string | undefined>(undefined);
     const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
+    const [screenTransform, setScreenTransform] = useState<ScreenTransformState>(NO_SCREEN_TRANSFORM);
     const [handRaised, setHandRaised] = useState(false);
     const [viewMode, setViewMode] = useState<CallViewMode>("grid");
     const [pinnedUid, setPinnedUid] = useState<string | undefined>(undefined);
@@ -123,7 +125,11 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
     const [signalingReady, setSignalingReady] = useState(false);
 
     const managerRef = useRef<MeshConnectionManager | null>(null);
+    /** The raw capture from `getDisplayMedia()` - only ever used to stop it (releasing the OS's own share
+     * indicator) and to notice the participant ending the share from the browser's own UI (`track.onended`). What's
+     * actually shown and sent is `screenTransformRef`'s output (`screenStream` state) - see `handleToggleShare()`. */
     const screenStreamRef = useRef<MediaStream | null>(null);
+    const screenTransformRef = useRef<ScreenTransformProcessor | null>(null);
     const levelMetersRef = useRef<Record<string, LevelMeterHandle>>({});
     const reactionSeqRef = useRef(0);
     const reactionTimersRef = useRef(new Set<ReturnType<typeof setTimeout>>());
@@ -234,6 +240,7 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
             // Only the screen capture is this view's to stop - the camera and microphone belong to the page, which
             // releases them when the participant leaves.
             stopStream(screenStreamRef.current);
+            screenTransformRef.current?.stop();
             for (const timer of timers) {
                 clearTimeout(timer);
             }
@@ -266,8 +273,12 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
         }
         stopStream(screenStreamRef.current);
         screenStreamRef.current = null;
-        // The sync effect above swaps the camera back in as the outgoing video track.
+        screenTransformRef.current?.stop();
+        screenTransformRef.current = null;
+        // The sync effect above swaps the camera back in as the outgoing video track. The rotation/flip is reset
+        // for the next share - each share starts from the capture the browser hands back, not the last one's fix.
         setScreenStream(null);
+        setScreenTransform(NO_SCREEN_TRANSFORM);
     }
 
     async function handleToggleShare() {
@@ -286,8 +297,35 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
             return;
         }
         screenStreamRef.current = result.value;
-        setScreenStream(result.value);
-        result.value.getVideoTracks()[0].onended = () => stopLocalPresentation(true);
+        const rawTrack = result.value.getVideoTracks()[0];
+        rawTrack.onended = () => stopLocalPresentation(true);
+        try {
+            // Runs the capture through the rotate/flip processor before anyone (presenter included) sees it - see
+            // ScreenTransform.ts's doc comment on why window capture sometimes needs this correction.
+            const processor = new ScreenTransformProcessor({ source: rawTrack, state: screenTransform });
+            screenTransformRef.current = processor;
+            setScreenStream(new MediaStream([processor.track]));
+        } catch {
+            // This browser can't draw the correction - share the raw capture rather than not sharing at all; the
+            // rotate/flip buttons simply won't do anything (screenTransformRef stays null).
+            setScreenStream(result.value);
+        }
+    }
+
+    function handleRotateScreen() {
+        setScreenTransform((prev) => {
+            const next = rotateClockwise(prev);
+            screenTransformRef.current?.setState(next);
+            return next;
+        });
+    }
+
+    function handleFlipScreen() {
+        setScreenTransform((prev) => {
+            const next = { ...prev, flipped: !prev.flipped };
+            screenTransformRef.current?.setState(next);
+            return next;
+        });
     }
 
     function handleToggleHand() {
@@ -443,6 +481,9 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
                     isPresenting={isPresenting}
                     presentingElsewhereName={presenterUid && presenterUid !== peerId ? presenterName : undefined}
                     onToggleShare={() => void handleToggleShare()}
+                    screenTransform={screenTransform}
+                    onRotateScreen={handleRotateScreen}
+                    onFlipScreen={handleFlipScreen}
                     handRaised={handRaised}
                     onToggleHand={handleToggleHand}
                     onReaction={handleReaction}

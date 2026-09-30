@@ -8,6 +8,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import CallControls, { LevelBars, type CallControlsProps } from "../../../apps/meet/_CallControls.js";
 import { NO_FILTERS } from "../../../apps/shared/media/filters/filterTypes.js";
+import { NO_SCREEN_TRANSFORM } from "../../../apps/shared/media/filters/ScreenTransform.js";
 import { REACTION_EMOJIS } from "../../../apps/shared/webrtc/types.js";
 import { fakeDeviceInfo, fakeLocalMedia } from "../testUtils.js";
 
@@ -16,6 +17,9 @@ function renderControls(overrides: Partial<CallControlsProps> = {}) {
         media: fakeLocalMedia(),
         isPresenting: false,
         onToggleShare: vi.fn(),
+        screenTransform: NO_SCREEN_TRANSFORM,
+        onRotateScreen: vi.fn(),
+        onFlipScreen: vi.fn(),
         handRaised: false,
         onToggleHand: vi.fn(),
         onReaction: vi.fn(),
@@ -254,6 +258,30 @@ describe("CallControls - the rest", () => {
     it("still lets the presenter stop their own share while someone else's name is set", () => {
         renderControls({ isPresenting: true, presentingElsewhereName: "Bob" });
         expect(screen.getByRole("button", { name: "Stop sharing" })).toBeEnabled();
+    });
+
+    it("offers the rotate/flip buttons only while presenting", () => {
+        renderControls({ isPresenting: false });
+        expect(screen.queryByRole("button", { name: "Rotate shared screen" })).toBeNull();
+        expect(screen.queryByRole("button", { name: /flip shared screen/i })).toBeNull();
+
+        renderControls({ isPresenting: true });
+        expect(screen.getByRole("button", { name: "Rotate shared screen" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Flip shared screen" })).toBeInTheDocument();
+    });
+
+    it("rotates and flips the shared screen, the flip button lighting up while it's on", () => {
+        const { props, rerender } = renderControls({ isPresenting: true });
+        fireEvent.click(screen.getByRole("button", { name: "Rotate shared screen" }));
+        expect(props.onRotateScreen).toHaveBeenCalledTimes(1);
+
+        const flip = screen.getByRole("button", { name: "Flip shared screen" });
+        expect(flip).toHaveAttribute("aria-pressed", "false");
+        fireEvent.click(flip);
+        expect(props.onFlipScreen).toHaveBeenCalledTimes(1);
+
+        rerender(<CallControls {...props} isPresenting screenTransform={{ rotation: 90, flipped: true }} />);
+        expect(screen.getByRole("button", { name: "Unflip shared screen" })).toHaveAttribute("aria-pressed", "true");
     });
 
     it("sends a reaction from the emoji menu and closes it", () => {

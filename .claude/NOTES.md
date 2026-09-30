@@ -881,3 +881,34 @@ Not a fix for the latency itself - there isn't one available at this layer - but
 turns "can you fix it?" into something actionable: if the badge shows `turn-tcp` for a participant, the actual
 next step is checking the coturn deployment's UDP reachability (firewall/security group rules, whether its UDP
 listener is actually up) - infrastructure, not this repo.
+
+## 2026-10-01 (Phase A1 of the 7-item batch): presenter screen rotate/flip
+
+First of seven requested features (see the approved plan for the full batch and its two-phase split - additive UI
+first, host-authority features after). This one doubles as the fix for the earlier "screen sharing a window
+displays upside down, locally and for everyone" report, confirmed back then to be the browser's own window-capture
+bug (upside down in the presenter's own raw local preview, before any of this app's code ever touched it) - there
+was nothing to patch in this app at the time, only a manual correction to offer.
+
+New `apps/shared/media/filters/ScreenTransform.ts`: `ScreenTransformProcessor`, the exact shape
+`VideoFilterProcessor.ts` already established for the camera pipeline (a hidden `<video>` playing the source
+track, a canvas redrawn on a timer, `captureStream()` exposing the result) but far simpler - no models, no
+per-frame throttling, just `ctx.translate`/`rotate`/`scale` applied once per draw, chosen so the *corrected* track
+is what's actually sent (not a local CSS transform), matching "upside down for everyone" needing a fix everyone
+sees the benefit of. A 90/270 rotation swaps the canvas's own width/height to fit; 180 and a flip don't. Entirely
+independent of the camera/filter pipeline - `_CallView.tsx` owns it the same way `useLocalMedia` owns the camera's
+filter processor: constructed when `screenStream` is set (wrapping the raw `getDisplayMedia()` track), torn down
+when sharing stops (transform resets to identity for the next share - it's a correction for *this* capture, not a
+sticky preference). If this browser can't give it a canvas context, falls back to sharing the raw capture
+untransformed rather than not sharing at all.
+
+`_CallControls.tsx`: two new buttons (rotate, flip) next to Share Screen, visible only while presenting - direct
+click actions, no dropdown, since there's nothing to browse (only two controls, both toggles/cycles).
+
+Verified with `npx vitest run` (100%/98.72%/100%/100%, this repo's enforced floor is 95% branches / 100% the
+rest) - the fake-canvas-and-video harness pattern from `VideoFilterProcessor.test.ts`, simplified for this much
+smaller class. One genuinely hard-to-reach branch (a `stop()`-then-still-ticks defensive guard, protecting against
+a real but fake-timer-unreproducible race - the engine can already have queued a timer callback before
+`clearTimeout()` reaches it) is exercised by calling the private `tick()` directly rather than contorted through
+the public API, since unlike `VideoFilterProcessor`'s equivalent guard (reachable via its `onStatus` callback) this
+simpler class has no re-entrant callback of its own.

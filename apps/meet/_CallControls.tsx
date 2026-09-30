@@ -15,6 +15,7 @@
  */
 import React, { useEffect, useRef, useState } from "react";
 import { filtersActive } from "../shared/media/filters/filterTypes.js";
+import type { ScreenTransformState } from "../shared/media/filters/ScreenTransform.js";
 import type { LocalMedia, MediaKind } from "../shared/media/useLocalMedia.js";
 import { REACTION_EMOJIS } from "../shared/webrtc/types.js";
 import EffectsPanel from "./_EffectsPanel.js";
@@ -22,12 +23,14 @@ import {
     ChevronUpIcon,
     EffectsIcon,
     EmojiIcon,
+    FlipIcon,
     FocusIcon,
     GridIcon,
     HandIcon,
     LeaveIcon,
     MicIcon,
     MicOffIcon,
+    RotateIcon,
     ScreenShareIcon,
     VideoIcon,
     VideoOffIcon,
@@ -41,6 +44,10 @@ export interface CallControlsProps {
     /** Someone else is presenting - the share button is disabled and explains why. */
     presentingElsewhereName?: string;
     onToggleShare: () => void;
+    /** The current presenter's own rotate/flip correction - shown (and changeable) only while `isPresenting`. */
+    screenTransform: ScreenTransformState;
+    onRotateScreen: () => void;
+    onFlipScreen: () => void;
     handRaised: boolean;
     onToggleHand: () => void;
     onReaction: (emoji: string) => void;
@@ -76,6 +83,9 @@ export default function CallControls({
     isPresenting,
     presentingElsewhereName,
     onToggleShare,
+    screenTransform,
+    onRotateScreen,
+    onFlipScreen,
     handRaised,
     onToggleHand,
     onReaction,
@@ -203,6 +213,29 @@ export default function CallControls({
             >
                 <ScreenShareIcon />
             </button>
+
+            {isPresenting && (
+                <>
+                    <button
+                        type="button"
+                        className={`${BUTTON} w-12 ${NEUTRAL}`}
+                        aria-label="Rotate shared screen"
+                        title="If your shared window looks sideways or upside down to everyone, rotate it here - this is a correction for your own capture, not a browser bug this app can fix automatically."
+                        onClick={onRotateScreen}
+                    >
+                        <RotateIcon />
+                    </button>
+                    <button
+                        type="button"
+                        className={`${BUTTON} w-12 ${screenTransform.flipped ? ACTIVE : NEUTRAL}`}
+                        aria-label={screenTransform.flipped ? "Unflip shared screen" : "Flip shared screen"}
+                        aria-pressed={screenTransform.flipped}
+                        onClick={onFlipScreen}
+                    >
+                        <FlipIcon />
+                    </button>
+                </>
+            )}
 
             <div className="sm:relative">
                 <button

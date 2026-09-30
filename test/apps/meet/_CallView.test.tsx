@@ -579,6 +579,30 @@ describe("CallView - what is sent follows the local media", () => {
         expect(screenTrack.stop).toHaveBeenCalled();
     });
 
+    it("offers rotate/flip only while presenting, and resets them for the next share", async () => {
+        await withParticipant({ media: fakeLocalMedia() });
+        expect(screen.queryByRole("button", { name: "Rotate shared screen" })).toBeNull();
+
+        displayMediaMock.mockResolvedValueOnce({ ok: true, value: fakeMediaStream([fakeTrack("video", "screen")]) });
+        fireEvent.click(screen.getByRole("button", { name: "Share screen" }));
+        await screen.findByRole("button", { name: "Stop sharing" });
+
+        const flip = screen.getByRole("button", { name: "Flip shared screen" });
+        expect(flip).toHaveAttribute("aria-pressed", "false");
+        // Neither throws, even though jsdom's canvas has no real 2D context to draw the correction with - the
+        // processor falls back to sharing the raw capture, and these just become no-ops rather than errors.
+        expect(() => fireEvent.click(screen.getByRole("button", { name: "Rotate shared screen" }))).not.toThrow();
+        fireEvent.click(flip);
+        expect(screen.getByRole("button", { name: "Unflip shared screen" })).toHaveAttribute("aria-pressed", "true");
+
+        fireEvent.click(screen.getByRole("button", { name: "Stop sharing" }));
+        displayMediaMock.mockResolvedValueOnce({ ok: true, value: fakeMediaStream([fakeTrack("video", "screen")]) });
+        fireEvent.click(screen.getByRole("button", { name: "Share screen" }));
+        await screen.findByRole("button", { name: "Stop sharing" });
+        // The flip from the previous share doesn't carry over to this one.
+        expect(screen.getByRole("button", { name: "Flip shared screen" })).toHaveAttribute("aria-pressed", "false");
+    });
+
     it("counts a shared screen as sending video even with the camera off", async () => {
         const { client } = await connected({ media: fakeLocalMedia({ cameraOn: false, videoTrack: null, videoStream: null }) });
         expect(client.sent[0].state!.videoOn).toBe(false);
