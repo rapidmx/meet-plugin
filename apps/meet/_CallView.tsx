@@ -48,6 +48,7 @@ import { createRelayTransport } from "../shared/relay/RelayTransport.js";
 import { GuestSignalingClient } from "../shared/push/GuestSignalingClient.js";
 import CallControls, { type CallViewMode } from "./_CallControls.js";
 import ParticipantTile from "./_ParticipantTile.js";
+import ParticipantsDrawer from "./_ParticipantsDrawer.js";
 
 export interface CallViewProps {
     channel: string;
@@ -123,6 +124,7 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
     const [audioBlocked, setAudioBlocked] = useState(false);
     const [audioNonce, setAudioNonce] = useState(0);
     const [signalingReady, setSignalingReady] = useState(false);
+    const [drawerOpen, setDrawerOpen] = useState(false);
 
     const managerRef = useRef<MeshConnectionManager | null>(null);
     /** The raw capture from `getDisplayMedia()` - only ever used to stop it (releasing the OS's own share
@@ -450,9 +452,16 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
                             ✋ {raisedNames.join(", ")}
                         </span>
                     )}
-                    <span className="px-3 py-1.5 rounded-full bg-[#3c4043] text-sm" aria-label={`${participants.length + 1} participants`}>
+                    <button
+                        type="button"
+                        className="px-3 py-1.5 rounded-full bg-[#3c4043] hover:bg-[#4b4f53] text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                        aria-label={`${participants.length + 1} participants`}
+                        aria-haspopup="dialog"
+                        aria-expanded={drawerOpen}
+                        onClick={() => setDrawerOpen((prev) => !prev)}
+                    >
                         {participants.length + 1}
-                    </span>
+                    </button>
                 </div>
             </header>
             {connectError && (
@@ -525,6 +534,16 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
             <div role="status" aria-live="polite" className="sr-only">
                 {announcement}
             </div>
+
+            {drawerOpen && (
+                <ParticipantsDrawer
+                    selfName={selfName}
+                    micOn={media.micOn}
+                    handRaised={handRaised}
+                    participants={participants}
+                    onClose={() => setDrawerOpen(false)}
+                />
+            )}
         </div>
     );
 }

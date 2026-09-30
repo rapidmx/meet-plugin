@@ -940,3 +940,23 @@ already had both.
 
 Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
 clean at 100%/98.62%/100%/100% (1351 tests, this repo's enforced floor is 95% branches / 100% the rest).
+
+## 2026-09-30 (Phase A3 of the 7-item batch): participants drawer
+
+Third and last of Phase A (the additive, no-new-authority half of the batch - see .claude/NOTES.md's Phase A2
+entry for the full seven-item context). Display-only, as the plan called for: mute/kick controls arrive later
+once Phase B gives the client a "host" identity to gate them on, added to these same rows rather than a new list.
+
+The header's participant-count chip (`_CallView.tsx`) is now a button toggling `drawerOpen`; new
+`_ParticipantsDrawer.tsx` renders a right-side sliding panel over a click-through backdrop, listing "you" first
+(from `media.micOn`/`handRaised`, both already in `CallView`'s own state) then everyone else
+(`participants: MeshParticipant[]`, likewise already there) - one row each, reusing the exact
+mic-muted/hand-raised/transport-badge treatment `_ParticipantTile.tsx` already established (the same
+`TRANSPORT_BADGES` export Phase A2's diagnostics panel also reuses, so a connection's badge reads identically in
+all three places: tile, diagnostics, drawer). Closes on Escape, a click on the backdrop, or its own close button -
+never on a click inside the drawer, the same outside-click convention `_CallControls.tsx`'s own menus use.
+
+Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
+clean at 100%/98.63%/100%/100% (1356 tests). This closes Phase A - screen rotate/flip, diagnostics, and the
+participants drawer are all in; Phase B (host identity, mute/kick, force-mute-on-join, password, waiting room)
+is next, per the approved plan's sequencing.

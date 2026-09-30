@@ -778,3 +778,67 @@ describe("CallView - connection status", () => {
         expect(screen.queryByText("Connecting…")).toBeNull();
     });
 });
+
+describe("CallView - participants drawer", () => {
+    it("opens the drawer from the participant chip, listing self and everyone else, and closes from its own button", async () => {
+        await withParticipant();
+        const chip = screen.getByRole("button", { name: "2 participants" });
+        expect(chip).toHaveAttribute("aria-expanded", "false");
+        expect(screen.queryByRole("dialog", { name: "Participants" })).toBeNull();
+
+        fireEvent.click(chip);
+        expect(chip).toHaveAttribute("aria-expanded", "true");
+        const drawer = screen.getByRole("dialog", { name: "Participants" });
+        expect(within(drawer).getByText("Alice (you)")).toBeInTheDocument();
+        expect(within(drawer).getByText("Zed")).toBeInTheDocument();
+
+        fireEvent.click(within(drawer).getByRole("button", { name: "Close participants" }));
+        expect(screen.queryByRole("dialog", { name: "Participants" })).toBeNull();
+    });
+
+    it("closes the drawer again from the same chip, on Escape, and on a click on the backdrop", async () => {
+        await connected();
+        const chip = screen.getByRole("button", { name: "1 participants" });
+
+        fireEvent.click(chip);
+        fireEvent.click(chip);
+        expect(screen.queryByRole("dialog")).toBeNull();
+
+        fireEvent.click(chip);
+        fireEvent.keyDown(document, { key: "Enter" });
+        expect(screen.getByRole("dialog")).toBeInTheDocument();
+        fireEvent.keyDown(document, { key: "Escape" });
+        expect(screen.queryByRole("dialog")).toBeNull();
+
+        fireEvent.click(chip);
+        fireEvent.click(screen.getByRole("dialog").previousSibling as Element);
+        expect(screen.queryByRole("dialog")).toBeNull();
+    });
+
+    it("shows a muted microphone and a raised hand for self and for others in the drawer", async () => {
+        await withParticipant({ media: fakeLocalMedia({ micOn: false }) }, "zzz", "Zed", { ...STATE, audioOn: false, handRaised: true });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        const drawer = screen.getByRole("dialog", { name: "Participants" });
+        expect(within(drawer).getAllByLabelText("Muted")).toHaveLength(2);
+        expect(within(drawer).getByLabelText("Hand raised")).toBeInTheDocument();
+    });
+
+    it("shows a participant's transport badge in the drawer", async () => {
+        await withParticipant();
+        pcs()[0].type = "turn";
+        pcs()[0].connectionState = "connected";
+        await act(async () => pcs()[0].onconnectionstatechange!());
+
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        expect(within(screen.getByRole("dialog", { name: "Participants" })).getByText("Relayed")).toBeInTheDocument();
+    });
+
+    it("marks a failed connection's badge distinctly from a merely relayed one", async () => {
+        await withParticipant();
+        pcs()[0].connectionState = "failed";
+        await act(async () => pcs()[0].onconnectionstatechange!());
+
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        expect(within(screen.getByRole("dialog", { name: "Participants" })).getByText("Can't connect")).toHaveClass("bg-[#601410]");
+    });
+});
