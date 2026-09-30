@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-09-30
+
+### Changed
+- Name which device is missing, and fade in audio after a discontinuity
+- "No camera or microphone was found" showed even when only one was
+- actually missing. classifyMediaError() now takes the failed call's own
+- constraints and names just the microphone, just the camera, or both
+- (notFoundError(), exported from deviceMedia.ts).
+- acquire("audio") then acquire("video") when the combined request fails,
+- and each independently called setError() - so the camera's later success
+- could silently clear a real microphone error, and if both were missing,
+- only whichever ran last (the camera) was ever shown. acquire() now
+- returns the classified error (or null) instead of a boolean, and
+- acquireBoth() combines both outcomes into one message that's actually
+- true, rather than letting either call's own setError() decide alone.
+- Also gave AudioPlayer.play() a short (4ms) linear fade-in through a
+- GainNode for a block that doesn't pick up exactly where the last one left
+- off - the first block, or the one after a gap - to mask the click a
+- decoder-state mismatch at that seam can produce (the shared Opus decoder
+- is reused across packets so its predictive state carries over between
+- them, and is never told when one was dropped). An ordinary contiguous
+- block gets no fade. Based on analyzing a recording of reported audio
+- "blipping"; see NOTES for what the analysis did and didn't show.
+
+### Fixed
+- Fixed a real bug on the way: useLocalMedia's acquireBoth() falls back to
+
 ## [0.9.2] - 2026-09-30
 
 ### Changed
@@ -254,7 +281,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/rapidmx/meet-plugin/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/rapidmx/meet-plugin/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/rapidmx/meet-plugin/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/rapidmx/meet-plugin/compare/v0.8.1...v0.9.0
