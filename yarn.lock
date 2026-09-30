@@ -945,8 +945,8 @@ __metadata:
   resolution: "@rapidmx/meet-plugin@workspace:."
   dependencies:
     "@mediapipe/tasks-vision": "npm:^1.0.1"
-    "@rapidmx/restapi": "npm:^0.25.1"
-    "@rapidmx/web-client": "npm:^0.22.0"
+    "@rapidmx/restapi": "npm:^0.26.0"
+    "@rapidmx/web-client": "npm:^0.26.0"
     "@rapidrest/core": "npm:^6.0.0"
     "@rapidrest/react": "npm:^2.1.0"
     "@rapidrest/service-core": "npm:^2.4.0"
