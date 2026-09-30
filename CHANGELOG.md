@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-09-30
+
+### Changed
+- A HAR capture from a still-failing device (0.9.1, with the earlier keepalive
+- {"code":"api-105","status":403,"level":"debug",
+- "message":"This request is missing a valid CSRF token."}
+- Not an ACL permission failure - a CSRF double-submit check
+- (@rapidrest/service-core's verifyCsrfRequest()), enforced only for a
+- cookie-authenticated request (req.auth.source === "cookie"). The captured
+- request was the authenticated path (real jwt/refresh cookies, no
+- Authorization header) - GuestSignalingClient.send() builds its own fetch()
+- instead of going through @rapidmx/web-client's apiFetch() (it needs to
+- choose bearer vs. cookie auth conditionally), and never echoed the csrf
+- cookie back as the required x-csrf-token header the way apiFetch() already
+- does via withCsrfHeader(). Every signaling message sent while relying on
+- the cookie 403'd and, since send() is fire-and-forget, silently vanished -
+- matching "stuck connecting, then no audio or video" exactly.
+- cookie - harmless on the bearer (guest) branch, since the server only
+- enforces the check for the cookie case.
+- This also means the earlier "keepalive" fix was not the actual cause,
+- though it remains a correct, low-risk improvement on its own terms - see
+
+### Fixed
+- Fixed the real cause: send() never attached the CSRF header the server requires
+- Fixed already deployed) finally showed the 403's actual response body:
+- Fixed by calling web-client's withCsrfHeader() on every send(), bearer or
+
 ## [0.9.1] - 2026-09-30
 
 ### Changed
@@ -227,7 +254,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/rapidmx/meet-plugin/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/rapidmx/meet-plugin/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/rapidmx/meet-plugin/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/rapidmx/meet-plugin/compare/v0.8.0...v0.8.1
