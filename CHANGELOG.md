@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-30
+
+### Changed
+- Stop marking every signaling POST keepalive - only a bye needs to survive unload
+- GuestSignalingClient.send() sets `keepalive: true` on every POST to
+- /push/:id (hello, offer, answer, ICE candidates, bye), not only the bye
+- sent from pagehide - the one message that actually needs to survive the
+- page unloading, which is what the existing comment already said.
+- A guest behind a restrictive/corporate firewall could never actually
+- connect: every signaling POST 403'd, and since send() is fire-and-forget,
+- each one just silently vanished - matching "stuck on Awaiting connection,
+- then no audio/video" exactly. A guest on an unrestricted network (tested
+- two phones on cellular data) always connected fine. `keepalive: true`
+- signals to the browser (and to any inspecting proxy watching the
+- connection) that a request may outlive the page - the same signal
+- sendBeacon()/an unload handler's own fetch give off - and is a plausible
+- thing for a restrictive network's proxy to single out for extra scrutiny
+- or drop, well under the browser's own keepalive quota. Scoping it to only
+- the bye removes that signal from the messages that actually need to get
+- through to connect at all.
+- Not a confirmed root cause - the most plausible, lowest-risk explanation
+- what to check next if it recurs.
+
 ## [0.9.0] - 2026-09-30
 
 ### Added
@@ -204,7 +227,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/rapidmx/meet-plugin/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/rapidmx/meet-plugin/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/rapidmx/meet-plugin/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/rapidmx/meet-plugin/compare/v0.7.0...v0.8.0
