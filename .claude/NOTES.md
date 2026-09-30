@@ -742,3 +742,35 @@ Two things JP reported from a real call.
 ### 2026-09-28 - Always wait for CI to go green before releasing
 
 Standing process rule, applies to every rapidmx/rapidrest repo: push pending commits, wait for the GitHub Actions **Build** workflow on that push to report `success` (`https://api.github.com/repos/<org>/<repo>/actions/runs`, or ask JP for the downloaded log archive if API log access needs auth - it 403s without a token), and only then run `npx @rapidrest/cli release ...`. Do not tag/release first and diagnose CI failures afterward. During a 2026-09-28 multi-repo release wave, restapi was released immediately after pushing pending commits without waiting for CI; CI then failed on a real coverage-threshold regression the pending changes introduced (a missing test for `BasePluginRoute.newestSearchResult()`'s catch branch) - not a flake, as an incomplete local-only reproduction first suggested. Because the release commit/tag were already pushed, the fix had to land as a follow-up commit on top of an already-tagged release instead of before it.
+
+## 2026-09-30: guests behind a restrictive firewall could never actually connect
+
+JP's report: a guest saw a 403 in devtools on `POST /push/<meeting-uid>` and never connected; a second device (not a
+guest) sat on "Awaiting connection..." then showed no audio/video. Narrowed down with JP: single server instance (no
+multi-replica ACL cache race possible), and reliably reproducible - every guest behind a restrictive/corporate
+firewall fails, while guests on an unrestricted network (two phones on cellular data, tested against each other)
+always connect fine.
+
+Traced `POST /push/:id`'s 403 to `BasePushRoute.send()` (`@rapidrest/service-core`): `ACLAction.CREATE` failing
+`hasPermission()`. This plugin's own grant (`ensureChannelGrant()`, `mintGuestToken()`) looks correct by inspection
+and is the same mechanism a passing integration test already covers - not an obvious code bug, and not something a
+network conditional could plausibly change server-side (the same grant is minted the same way regardless of the
+guest's own network). `GuestSignalingClient.send()` is what POSTs there (`hello`/offer/answer/ICE/`bye`), and it's
+fire-and-forget - a dropped POST is a signaling message that silently never arrives, which is exactly "connecting
+forever, no media" from the other side.
+
+What's different about a restrictive network: `send()` set `keepalive: true` unconditionally on every POST, not only
+the `bye` sent from `pagehide` (the one case that actually needs to survive the page unloading - the comment already
+said so, the code just didn't match it). A `keepalive` fetch tells the browser this request may outlive the page -
+the same signal `navigator.sendBeacon()`/an `unload` handler's own fetch give off - and a restrictive network's
+inspecting proxy singling that out (extra scrutiny, or dropping it outright) well short of the browser's own 64
+KiB/several-MB keepalive quota is a known, plausible failure mode; an unrestricted network (cellular, no corporate
+proxy) would never trip it. Fixed: `keepalive` is now `message.kind === "bye"` - every other send (the ones that
+matter for actually connecting) no longer carries that signal at all.
+
+Not proven with certainty (no access to a reproduction behind such a firewall, and the deployed server's exact code
+wasn't directly inspectable from here) - it's the most plausible, lowest-risk, zero-downside explanation that fits
+every symptom and the code's own stated intent, not a confirmed root cause. If it recurs after this ships, the next
+most useful thing to grab is the 403 response's actual body/headers (ours vs. a middlebox's own block page would
+look very different) - that would either confirm this fix or redirect the investigation toward the server's own ACL
+check instead.

@@ -192,8 +192,16 @@ export class GuestSignalingClient implements SignalingChannel {
             method: "POST",
             headers,
             body: JSON.stringify(message),
-            // Lets a `bye` sent as the page unloads still go out.
-            keepalive: true,
+            // Only a `bye` needs to survive the page unloading - every other message is sent while the page (and
+            // the rest of this call's signaling) is very much alive. `keepalive` is a real-world liability to set
+            // unconditionally: some restrictive networks' inspecting proxies single out a `keepalive` fetch (it
+            // tells the browser the request may outlive the page - the same signal `navigator.sendBeacon()` and an
+            // `unload` handler's own fetch give off) for extra scrutiny or drop it outright, well short of Chrome's
+            // documented 64 KiB-per-request/several-MB-total keepalive quota. A participant behind such a network
+            // was seen stuck signaling forever - every `hello`/offer/answer/ICE candidate sent with `keepalive` and
+            // silently going nowhere (`send()` is fire-and-forget) - while an identical join from an unrestricted
+            // network connected normally.
+            keepalive: message.kind === "bye",
         }).catch(() => {
             // Best-effort - see this method's doc comment.
         });

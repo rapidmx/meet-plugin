@@ -341,22 +341,19 @@ describe("GuestSignalingClient message handling", () => {
 });
 
 describe("GuestSignalingClient.send", () => {
-    it("POSTs the message with a bearer token, targeting the meeting's own channel", async () => {
+    it("POSTs the message with a bearer token, targeting the meeting's own channel, keepalive since it's a bye", async () => {
         const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
         const client = new GuestSignalingClient({ channel: "meeting-1", token: "guest-token", fetchImpl });
         const message: SignalMessage = { type: "video-meeting-signal", kind: "bye", from: "g1" };
         client.send(message);
         await Promise.resolve();
-        expect(fetchImpl).toHaveBeenCalledWith(
-            "/push/meeting-1",
-            expect.objectContaining({
-                method: "POST",
-                headers: { "Content-Type": "application/json", Authorization: "Bearer guest-token" },
-                body: JSON.stringify(message),
-                // So a `bye` sent as the page unloads still goes out.
-                keepalive: true,
-            }),
-        );
+        expect(fetchImpl).toHaveBeenCalledWith("/push/meeting-1", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: "Bearer guest-token" },
+            body: JSON.stringify(message),
+            // So a `bye` sent as the page unloads still goes out.
+            keepalive: true,
+        });
     });
 
     it("POSTs with no Authorization header at all when token is omitted, relying on the browser's own cookie", async () => {
@@ -373,6 +370,17 @@ describe("GuestSignalingClient.send", () => {
                 body: JSON.stringify(message),
             }),
         );
+    });
+
+    it("does not mark an ordinary signal keepalive - only a bye needs to survive the page unloading", async () => {
+        const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+        const client = new GuestSignalingClient({ channel: "meeting-1", token: "guest-token", fetchImpl });
+        for (const kind of ["hello", "offer", "answer", "ice-candidate", "presenter-claim", "presenter-release", "state", "reaction", "relay-fallback"] as const) {
+            fetchImpl.mockClear();
+            client.send({ type: "video-meeting-signal", kind, from: "g1" });
+            await Promise.resolve();
+            expect(fetchImpl).toHaveBeenCalledWith("/push/meeting-1", expect.objectContaining({ keepalive: false }));
+        }
     });
 
     it("swallows a failed publish", async () => {
