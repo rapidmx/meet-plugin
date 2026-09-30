@@ -811,3 +811,45 @@ on the bearer branch since the server only enforces the check for `req.auth.sour
 The `keepalive` fix (immediately above) stays: it's still correct on its own terms (matches the code's stated
 intent, zero downside) and no longer claims to be the reason anything connects - this entry supersedes that claim,
 not the change itself.
+
+## 2026-10-01: name which device is missing, and fade in after an audio discontinuity
+
+Two more things JP reported once connections were working.
+
+- **"No camera or microphone was found" showed even when only one was actually missing.** `classifyMediaError()`
+  (`deviceMedia.ts`) always used that one combined message for `NotFoundError`/`OverconstrainedError`, regardless
+  of what was actually being asked for. It now takes the failed call's own constraints and picks one of "No
+  microphone was found", "No camera was found", or the combined phrasing, via a new exported `notFoundError()`
+  helper. Fixed a real (if invisible until now, since every message read the same) bug on the way: `useLocalMedia`'s
+  `acquireBoth()` falls back to `acquire("audio")` then `acquire("video")` when the combined request fails, and each
+  independently called `setError()` - so if only the microphone was missing, the camera's later *success* silently
+  cleared that error, and if both were missing, whichever ran second (the camera) was the only one ever shown.
+  `acquire()` now returns the classified error (or `null`) instead of a bare boolean, and `acquireBoth()` combines
+  both outcomes into the one message that's actually true (`combineErrors()`) rather than letting either call's own
+  `setError()` decide alone.
+- **Occasional audio "blipping" from other participants**, recorded and sent over. Extracted and analyzed the
+  recording (no numpy/matplotlib in this environment - pure-Python `wave`/`array`: a 5ms high-passed envelope,
+  autocorrelation of it out to 2s, and a strict single-sample-discontinuity scan). No periodic component at any
+  lag (rules out anything clock-driven, e.g. the ML throttling or a fixed frame rate), no clean silence gaps, and no
+  large single-sample splices - so if this is the same artifact, it's subtle, not a hard dropout or a clock-periodic
+  bug in this plugin's own code. It fits the relay's own already-known lossy points (`AudioSender`/`AudioPlayer`
+  dropping blocks under backpressure - see the CSRF entry above) in a way I hadn't considered: the decoder is one
+  long-lived instance reused across packets *specifically so Opus's own predictive state carries over between them*
+  (its own doc comment already said so) - so a packet it was never told was lost leaves that state out of sync with
+  what it decodes next, which can click right at that seam, not just leave silence where the loss was. Rather than
+  touch the drop thresholds themselves (still no way to measure whether retuning them would actually help, and they
+  read as deliberate - see the CSRF entry), gave `AudioPlayer.play()` a short (4 ms) linear fade-in through a
+  `GainNode`, applied only to a block that doesn't pick up exactly where the last one left off - the first block, or
+  the one after a gap - which is exactly where a decoder-state mismatch (or, for the very first block, nothing
+  having played yet at all) would be audible. An ordinary contiguous block gets no fade at all, since fading every
+  single packet boundary would itself be audible (a faint tremolo at the packet rate). `GainLike.gain` in
+  `relayEnv.ts` gained `setValueAtTime()`/`linearRampToValueAtTime()` (a real `GainNode`'s `AudioParam` already has
+  them - this is a type-level change only, `AudioSender`'s own static `gain.gain.value = 0` mute is unaffected).
+
+  This is a standard, well-established technique for exactly this class of artifact (any concatenative,
+  block-based audio playback), and directly targets the reported symptom regardless of what's actually causing the
+  seam mismatch - but it's not a confirmed fix for this specific complaint, since I can't fully verify "blipping"
+  from a static analysis of one recording without being able to listen to it. If it recurs, the next useful thing
+  is confirming whether it still happens on a **direct** (non-relay) connection - if so, this fade (relay-only)
+  isn't it, and the search moves to the native WebRTC audio path instead, which this plugin's own code has no
+  influence over.

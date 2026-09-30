@@ -16,6 +16,10 @@ export const JITTER_BUFFER_SECONDS = 0.08;
 export const MAX_AHEAD_SECONDS = 0.4;
 /** Skip a packet instead of queueing it when the decoder is this far behind. */
 export const AUDIO_MAX_DECODE_QUEUE = 16;
+/** The length of the fade-in `play()` gives a block that doesn't pick up exactly where the last one left off (the
+ * first block, or the one after a gap) - long enough to mask the click such a discontinuity would otherwise
+ * produce, short enough that it is never heard as an actual fade. */
+export const DISCONTINUITY_FADE_SECONDS = 0.004;
 
 /**
  * Decodes one sender's Opus packets and schedules them for playback into a `MediaStreamAudioDestinationNode`.
@@ -23,8 +27,16 @@ export const AUDIO_MAX_DECODE_QUEUE = 16;
  * Each decoded block is copied into an `AudioBuffer` and started on its own `AudioBufferSourceNode` at
  * `max(currentTime + jitter, nextTime)`, where `nextTime` is when the previous block ends - so consecutive blocks
  * join seamlessly, and after a gap in the stream playback restarts with the jitter buffer's worth of headroom.
- * Opus packets are independently decodable, so a lost packet costs only its own 20 ms and needs no recovery step;
- * the decoder is created lazily and discarded on any error, and replaced by the next packet.
+ * Opus packets are independently decodable, so a lost packet costs only its own 20 ms and needs no recovery step
+ * *in terms of content* - but the shared decoder (reused across packets so it keeps its normal state between them,
+ * not recreated per packet) is never told a packet was skipped, so its internal prediction state no longer matches
+ * what it decodes next. Audibly this can be a click right at that seam, not just silence where the lost packet
+ * would have been - the same is true of the very first block (nothing at all came before it) and of the block
+ * after a stall long enough to need the jitter buffer's full headroom again. `play()` gives exactly those blocks a
+ * few milliseconds' fade-in (`DISCONTINUITY_FADE_SECONDS`) through a `GainNode` to mask it; an ordinary block that
+ * picks up exactly where the last one ended gets none - fading *every* block would itself be audible, a faint
+ * tremolo at the packet rate. The decoder is created lazily and discarded on any error, and replaced by the next
+ * packet.
  */
 export class AudioPlayer {
     private decoder: DecoderLike | undefined;
@@ -97,9 +109,23 @@ export class AudioPlayer {
             buffer.copyToChannel(pcm, 0);
             const source = this.ctx.createBufferSource();
             source.buffer = buffer;
-            source.connect(this.destination);
-            source.onended = () => source.disconnect();
             const start = Math.max(now + JITTER_BUFFER_SECONDS, this.nextTime);
+            if (start > this.nextTime) {
+                // A gap, not a continuation - the decoder's state no longer matches what it's about to decode (see
+                // this class's doc comment), so fade this block in rather than let it start abruptly.
+                const gain = this.ctx.createGain();
+                gain.gain.setValueAtTime(0, start);
+                gain.gain.linearRampToValueAtTime(1, start + DISCONTINUITY_FADE_SECONDS);
+                source.connect(gain);
+                gain.connect(this.destination);
+                source.onended = () => {
+                    source.disconnect();
+                    gain.disconnect();
+                };
+            } else {
+                source.connect(this.destination);
+                source.onended = () => source.disconnect();
+            }
             source.start(start);
             this.nextTime = start + buffer.duration;
         } catch {

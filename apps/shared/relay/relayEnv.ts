@@ -74,7 +74,14 @@ export interface ScriptProcessorLike extends AudioNodeLike {
 }
 
 export interface GainLike extends AudioNodeLike {
-    gain: { value: number };
+    gain: {
+        value: number;
+        /** `AudioParam.setValueAtTime()` - used to schedule a fade (`AudioPlayer`'s discontinuity fade-in), not
+         * needed for `AudioSender`'s own static, unscheduled mute (a plain `.value = 0` assignment). */
+        setValueAtTime(value: number, startTime: number): unknown;
+        /** `AudioParam.linearRampToValueAtTime()`. */
+        linearRampToValueAtTime(value: number, endTime: number): unknown;
+    };
 }
 
 export interface AudioBufferLike {

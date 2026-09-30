@@ -50,10 +50,28 @@ const UNSUPPORTED_ERROR: MediaAccessError = {
     message: "This browser (or this page's connection) doesn't support camera/microphone access. Try a modern browser over HTTPS.",
 };
 
+/** A "no such device" error naming exactly what was missing: just the microphone, just the camera, or - when
+ * both were asked for (or a caller doesn't say, e.g. `listDevices()`/`requestDisplayMedia()`'s own failures, which
+ * have no single "kind" to name) - both. Exported so `useLocalMedia.ts`'s `acquireBoth()` can build the same
+ * "both missing" message after finding out separately that neither device exists, rather than only being able to
+ * report whichever one it happened to ask about last. */
+export function notFoundError(wantsAudio: boolean, wantsVideo: boolean): MediaAccessError {
+    const message =
+        wantsAudio && !wantsVideo
+            ? "No microphone was found on this device."
+            : wantsVideo && !wantsAudio
+              ? "No camera was found on this device."
+              : "No camera or microphone was found on this device.";
+    return { kind: "not-found", message };
+}
+
 /** Maps a `getUserMedia()`/`getDisplayMedia()`/`enumerateDevices()` rejection to a friendly, already-complete
  * message - the handful of `DOMException` names a browser actually raises for these calls, matched by name rather
- * than `instanceof DOMException` (a test's fake rejection need not be a real `DOMException`). */
-export function classifyMediaError(err: unknown): MediaAccessError {
+ * than `instanceof DOMException` (a test's fake rejection need not be a real `DOMException`). `requested` is the
+ * constraints the failed call actually asked for, so a "not found" error can name just the camera or just the
+ * microphone rather than always blaming both - omitted (by `listDevices()`/`requestDisplayMedia()`, neither of
+ * which asks for one kind specifically) it's treated as having asked for both. */
+export function classifyMediaError(err: unknown, requested?: MediaStreamConstraints): MediaAccessError {
     const name: string = err instanceof Error ? err.name : "";
     switch (name) {
         case "NotAllowedError":
@@ -61,7 +79,7 @@ export function classifyMediaError(err: unknown): MediaAccessError {
             return { kind: "permission-denied", message: "Camera/microphone access was denied. Allow access in your browser and try again." };
         case "NotFoundError":
         case "OverconstrainedError":
-            return { kind: "not-found", message: "No camera or microphone was found on this device." };
+            return notFoundError(requested ? !!requested.audio : true, requested ? !!requested.video : true);
         default:
             return { kind: "unknown", message: "Could not access your camera or microphone. Please try again." };
     }
@@ -107,7 +125,7 @@ export async function requestUserMedia(
     try {
         return { ok: true, value: await devices.getUserMedia(constraints) };
     } catch (err) {
-        return { ok: false, error: classifyMediaError(err) };
+        return { ok: false, error: classifyMediaError(err, constraints) };
     }
 }
 

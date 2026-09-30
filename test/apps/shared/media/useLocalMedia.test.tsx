@@ -219,7 +219,27 @@ describe("useLocalMedia - requesting access", () => {
         expect(result.current.status).toEqual({ audio: "live", video: "unavailable" });
         expect(result.current.micOn).toBe(true);
         expect(result.current.cameraOn).toBe(false);
-        expect(result.current.error?.kind).toBe("not-found");
+        expect(result.current.error).toEqual({ kind: "not-found", message: "No camera was found on this device." });
+    });
+
+    it("names the microphone specifically when it's the camera that's found, not the other way around", async () => {
+        // Regression: the microphone's own failure must not be silently cleared by the camera's later success -
+        // the two fallback requests used to share one `error`, and whichever ran second (the camera) always won.
+        installMediaDevices(
+            fakeMediaDevices({ userMediaStream: streamsFor([], { fail: (c) => (c.audio ? domError("NotFoundError") : undefined) }) }),
+        );
+        const { result } = renderHook(() => useLocalMedia());
+        await act(() => result.current.requestAccess());
+        expect(result.current.status).toEqual({ audio: "unavailable", video: "live" });
+        expect(result.current.error).toEqual({ kind: "not-found", message: "No microphone was found on this device." });
+    });
+
+    it("names both when neither the camera nor the microphone can be found", async () => {
+        installMediaDevices(fakeMediaDevices({ userMediaError: domError("NotFoundError") }));
+        const { result } = renderHook(() => useLocalMedia());
+        await act(() => result.current.requestAccess());
+        expect(result.current.status).toEqual({ audio: "unavailable", video: "unavailable" });
+        expect(result.current.error).toEqual({ kind: "not-found", message: "No camera or microphone was found on this device." });
     });
 
     it("maps any other failure to an error status", async () => {

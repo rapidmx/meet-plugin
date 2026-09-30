@@ -8,6 +8,7 @@ import {
     defaultMediaDevices,
     isMediaDevicesSupported,
     listDevices,
+    notFoundError,
     requestDisplayMedia,
     requestUserMedia,
     stopStream,
@@ -69,6 +70,51 @@ describe("classifyMediaError", () => {
     it("maps a non-Error rejection to unknown", () => {
         expect(classifyMediaError("nope").kind).toBe("unknown");
     });
+
+    describe("not-found message, by what was actually requested", () => {
+        function notFound(): Error {
+            const err = new Error("boom");
+            err.name = "NotFoundError";
+            return err;
+        }
+
+        it("names just the microphone when only audio was requested", () => {
+            expect(classifyMediaError(notFound(), { audio: true })).toEqual({ kind: "not-found", message: "No microphone was found on this device." });
+        });
+
+        it("names just the camera when only video was requested", () => {
+            expect(classifyMediaError(notFound(), { video: { facingMode: "user" } })).toEqual({
+                kind: "not-found",
+                message: "No camera was found on this device.",
+            });
+        });
+
+        it("names both when both were requested", () => {
+            expect(classifyMediaError(notFound(), { audio: true, video: true })).toEqual({
+                kind: "not-found",
+                message: "No camera or microphone was found on this device.",
+            });
+        });
+
+        it("names both when the caller doesn't say what it asked for (listDevices/requestDisplayMedia)", () => {
+            expect(classifyMediaError(notFound())).toEqual({ kind: "not-found", message: "No camera or microphone was found on this device." });
+        });
+
+        it("falls back to naming both when neither was actually truthy in the constraints", () => {
+            expect(classifyMediaError(notFound(), { audio: false, video: false })).toEqual({
+                kind: "not-found",
+                message: "No camera or microphone was found on this device.",
+            });
+        });
+    });
+});
+
+describe("notFoundError", () => {
+    it("names just the microphone, just the camera, or both", () => {
+        expect(notFoundError(true, false)).toEqual({ kind: "not-found", message: "No microphone was found on this device." });
+        expect(notFoundError(false, true)).toEqual({ kind: "not-found", message: "No camera was found on this device." });
+        expect(notFoundError(true, true)).toEqual({ kind: "not-found", message: "No camera or microphone was found on this device." });
+    });
 });
 
 describe("listDevices", () => {
@@ -105,11 +151,11 @@ describe("requestUserMedia", () => {
         expect(result).toEqual({ ok: true, value: fakeStream });
     });
 
-    it("classifies a rejected call", async () => {
+    it("classifies a rejected call, naming the device it actually asked for", async () => {
         const err = new Error("nope");
         err.name = "NotFoundError";
         const result = await requestUserMedia({ video: true }, { getUserMedia: async () => Promise.reject(err) });
-        expect(result).toEqual({ ok: false, error: { kind: "not-found", message: expect.any(String) } });
+        expect(result).toEqual({ ok: false, error: { kind: "not-found", message: "No camera was found on this device." } });
     });
 });
 

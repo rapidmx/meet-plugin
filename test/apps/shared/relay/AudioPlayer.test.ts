@@ -3,7 +3,13 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import { describe, expect, it } from "vitest";
-import { AUDIO_MAX_DECODE_QUEUE, AudioPlayer, JITTER_BUFFER_SECONDS, MAX_AHEAD_SECONDS } from "../../../../apps/shared/relay/AudioPlayer.js";
+import {
+    AUDIO_MAX_DECODE_QUEUE,
+    AudioPlayer,
+    DISCONTINUITY_FADE_SECONDS,
+    JITTER_BUFFER_SECONDS,
+    MAX_AHEAD_SECONDS,
+} from "../../../../apps/shared/relay/AudioPlayer.js";
 import { KIND_AUDIO, type Frame } from "../../../../apps/shared/relay/frames.js";
 import { createFakeRelayEnv, FakeAudioContext, FakeAudioData, last } from "./relayFakes.js";
 
@@ -118,12 +124,15 @@ describe("AudioPlayer scheduling", () => {
         expect(block.copyCalls).toEqual([{ planeIndex: 0, format: "f32-planar" }]);
         const source = s.ctx.sources[0];
         expect(source.buffer).toBe(s.ctx.buffers[0]);
-        expect(source.connections).toEqual([s.destination]);
+        // The first block is a discontinuity (nothing played before it) - faded in through a gain node, not
+        // connected to the destination directly. See the "fades in" tests below for the fade itself.
+        expect(source.connections).toEqual([s.ctx.gains[0]]);
+        expect(s.ctx.gains[0].connections).toEqual([s.destination]);
         expect(source.startedAt).toBeCloseTo(10 + JITTER_BUFFER_SECONDS, 10);
         expect(block.closed).toBe(true);
     });
 
-    it("chains consecutive blocks back to back", () => {
+    it("chains consecutive blocks back to back, with no fade between them", () => {
         const s = setup();
         s.ctx.currentTime = 10;
         play(s);
@@ -132,15 +141,37 @@ describe("AudioPlayer scheduling", () => {
         const [a, b, c] = s.ctx.sources.map((x) => x.startedAt as number);
         expect(b).toBeCloseTo(a + 0.02, 10);
         expect(c).toBeCloseTo(a + 0.04, 10);
+        // Only the first (discontinuous) block got a gain node - the two that pick up exactly where the last one
+        // left off connect straight to the destination, and disconnect on their own when they finish.
+        expect(s.ctx.gains).toHaveLength(1);
+        expect(s.ctx.sources[1].connections).toEqual([s.destination]);
+        expect(s.ctx.sources[2].connections).toEqual([s.destination]);
+        s.ctx.sources[1].onended?.();
+        expect(s.ctx.sources[1].disconnected).toBe(true);
     });
 
-    it("restarts with the jitter headroom after an underrun", () => {
+    it("fades in a block that doesn't pick up where the last one left off - the first one, or one after a gap", () => {
+        const s = setup();
+        s.ctx.currentTime = 10;
+        play(s);
+        const start = s.ctx.sources[0].startedAt as number;
+        const gain = s.ctx.gains[0];
+        expect(gain.ramps).toEqual([
+            { method: "setValueAtTime", value: 0, time: start },
+            { method: "linearRampToValueAtTime", value: 1, time: start + DISCONTINUITY_FADE_SECONDS },
+        ]);
+    });
+
+    it("restarts with the jitter headroom after an underrun, fading the block that resumes playback", () => {
         const s = setup();
         s.ctx.currentTime = 10;
         play(s);
         s.ctx.currentTime = 20;
         play(s);
         expect(s.ctx.sources[1].startedAt).toBeCloseTo(20 + JITTER_BUFFER_SECONDS, 10);
+        // Both the first block and the one after the gap are discontinuities.
+        expect(s.ctx.gains).toHaveLength(2);
+        expect(s.ctx.sources[1].connections).toEqual([s.ctx.gains[1]]);
     });
 
     it("drops blocks while the queue runs more than 400 ms ahead, and resumes once it drains", () => {
@@ -161,11 +192,12 @@ describe("AudioPlayer scheduling", () => {
         expect(s.ctx.sources).toHaveLength(scheduled + 1);
     });
 
-    it("disconnects a source when it finishes", () => {
+    it("disconnects a source (and its gain node, faded in as the first block) when it finishes", () => {
         const s = setup();
         play(s);
         s.ctx.sources[0].onended?.();
         expect(s.ctx.sources[0].disconnected).toBe(true);
+        expect(s.ctx.gains[0].disconnected).toBe(true);
     });
 
     it("drops a block the browser will not take, still closing it, and keeps going", () => {

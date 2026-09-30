@@ -251,7 +251,18 @@ export class FakeProcessor extends FakeNode implements ScriptProcessorLike {
 }
 
 export class FakeGain extends FakeNode implements GainLike {
-    gain = { value: 1 };
+    /** `ramps` records every `setValueAtTime()`/`linearRampToValueAtTime()` call, in order, for a test to assert a
+     * fade's shape against - `.value` alone (as `AudioSender`'s static mute uses) never touches it. */
+    ramps: { method: "setValueAtTime" | "linearRampToValueAtTime"; value: number; time: number }[] = [];
+    gain = {
+        value: 1,
+        setValueAtTime: (value: number, startTime: number) => {
+            this.ramps.push({ method: "setValueAtTime", value, time: startTime });
+        },
+        linearRampToValueAtTime: (value: number, endTime: number) => {
+            this.ramps.push({ method: "linearRampToValueAtTime", value, time: endTime });
+        },
+    };
 }
 
 export class FakeBufferSource extends FakeNode implements BufferSourceLike {

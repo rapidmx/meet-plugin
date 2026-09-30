@@ -38,6 +38,7 @@ import {
     defaultMediaDevices,
     isMediaDevicesSupported,
     listDevices,
+    notFoundError,
     requestUserMedia,
 } from "./deviceMedia.js";
 import { startLevelMeter } from "./levelMeter.js";
@@ -113,6 +114,25 @@ function statusFor(error: MediaAccessError): TrackStatus {
         default:
             return "error";
     }
+}
+
+/** After asking for the camera and the microphone separately (`acquireBoth()`'s fallback, one at a time rather
+ * than together), the one error to show for both attempts together - naming both devices when both are actually
+ * missing, rather than just whichever of the two happened to be asked about last (which would otherwise say "no
+ * camera" even when the microphone is *also* missing, or say nothing at all when only the microphone is missing,
+ * since the camera's own success would otherwise clear the error the microphone's failure had just set). `null`
+ * when both succeeded. */
+function combineErrors(audio: MediaAccessError | null, video: MediaAccessError | null): MediaAccessError | null {
+    if (!audio || !video) {
+        return audio ?? video;
+    }
+    if (audio.kind === "not-found" && video.kind === "not-found") {
+        return notFoundError(true, true);
+    }
+    // Different reasons - unusual (e.g. permission denied for one, missing hardware for the other). Permission is
+    // the more actionable of the two, so it's what's shown; otherwise there's no single message that honestly
+    // describes both, so this just picks one.
+    return audio.kind === "permission-denied" ? audio : video;
 }
 
 export interface LocalMediaOptions {
@@ -245,7 +265,7 @@ export function useLocalMedia({ effectsAssetsUrl }: LocalMediaOptions = {}): Loc
 
     /** Asks for one kind on its own - a specific device when `deviceId` is given, else the one used last time. */
     const acquire = useCallback(
-        async (kind: MediaKind, deviceId?: string): Promise<boolean> => {
+        async (kind: MediaKind, deviceId?: string): Promise<MediaAccessError | null> => {
             const base = kind === "audio" ? AUDIO_CONSTRAINTS : VIDEO_CONSTRAINTS;
             const prefs = ensurePrefs();
             const constraint: MediaTrackConstraints = deviceId
@@ -257,13 +277,13 @@ export function useLocalMedia({ effectsAssetsUrl }: LocalMediaOptions = {}): Loc
                     setError(result.error);
                     setStatus((prev) => ({ ...prev, [kind]: statusFor(result.error) }));
                 }
-                return false;
+                return result.error;
             }
             adoptStream(result.value);
             if (mountedRef.current) {
                 setError(null);
             }
-            return true;
+            return null;
         },
         [adoptStream, ensurePrefs],
     );
@@ -292,9 +312,13 @@ export function useLocalMedia({ effectsAssetsUrl }: LocalMediaOptions = {}): Loc
             }
         } else {
             // No camera, no microphone, or the two together couldn't be satisfied: ask for each on its own, so one
-            // missing device doesn't cost the participant the other.
-            await acquire("audio");
-            await acquire("video");
+            // missing device doesn't cost the participant the other - then combine what each found into one
+            // message (see `combineErrors()`) rather than showing whichever of the two ran last.
+            const audioError = await acquire("audio");
+            const videoError = await acquire("video");
+            if (mountedRef.current) {
+                setError(combineErrors(audioError, videoError));
+            }
         }
     }, [acquire, adoptStream, ensurePrefs]);
 
@@ -359,7 +383,7 @@ export function useLocalMedia({ effectsAssetsUrl }: LocalMediaOptions = {}): Loc
                     setTracks(tracksRef.current);
                 }
             }
-            if (await acquire(kind, deviceId)) {
+            if ((await acquire(kind, deviceId)) === null) {
                 remember(kind === "audio" ? { microphoneId: deviceId } : { cameraId: deviceId });
             }
             await refreshDevices();
