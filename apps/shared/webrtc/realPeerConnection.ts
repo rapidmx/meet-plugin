@@ -7,7 +7,7 @@
  * this factory's only real caller. `createBrowserPeerConnection` is a plain function value, never invoked at
  * module scope, so importing this file is safe during this plugin's page SSR, where `RTCPeerConnection` does not
  * exist at all - it would only throw if actually *called* outside a browser. */
-import type { RTCPeerConnectionFactory, RTCPeerConnectionLike } from "./types.js";
+import type { ConnectionDiagnostics, RTCPeerConnectionFactory, RTCPeerConnectionLike, RtpStreamDiagnostics } from "./types.js";
 
 /**
  * Whether the pair ICE settled on goes through a TURN relay, and - when it's our own end that's relayed - whether
@@ -42,6 +42,33 @@ export async function selectedConnectionType(pc: Pick<RTCPeerConnection, "getSta
     return relayProtocol === "tcp" || relayProtocol === "tls" ? "turn-tcp" : "turn";
 }
 
+function streamDiagnostics(reports: Map<string, Record<string, unknown>>, kind: "audio" | "video"): RtpStreamDiagnostics {
+    const inbound = [...reports.values()].find((report) => report.type === "inbound-rtp" && report.kind === kind);
+    const outbound = [...reports.values()].find((report) => report.type === "outbound-rtp" && report.kind === kind);
+    const num = (value: unknown): number | undefined => (typeof value === "number" ? value : undefined);
+    return {
+        packetsLost: num(inbound?.packetsLost),
+        jitter: num(inbound?.jitter),
+        bytesSent: num(outbound?.bytesSent),
+        bytesReceived: num(inbound?.bytesReceived),
+    };
+}
+
+/** One point-in-time sample of this connection's own quality stats, for the diagnostics panel - a single
+ * `getStats()` walk, independent of (and in addition to) `selectedConnectionType()`'s own call, since this is
+ * polled periodically at a much lower priority than the one-time transport check and there's no value in coupling
+ * the two together. */
+export async function collectDiagnostics(pc: Pick<RTCPeerConnection, "getStats">): Promise<ConnectionDiagnostics> {
+    const reports = new Map<string, Record<string, unknown>>();
+    (await pc.getStats()).forEach((report: Record<string, unknown>) => reports.set(String(report.id), report));
+    const transport = [...reports.values()].find((report) => report.type === "transport" && report.selectedCandidatePairId);
+    const pair =
+        (transport ? reports.get(String(transport.selectedCandidatePairId)) : undefined) ??
+        [...reports.values()].find((report) => report.type === "candidate-pair" && (report.selected || (report.nominated && report.state === "succeeded")));
+    const roundTripTimeSeconds = typeof pair?.currentRoundTripTime === "number" ? pair.currentRoundTripTime : undefined;
+    return { roundTripTimeSeconds, audio: streamDiagnostics(reports, "audio"), video: streamDiagnostics(reports, "video") };
+}
+
 export const createBrowserPeerConnection: RTCPeerConnectionFactory = (config) => {
     const pc = new RTCPeerConnection(config);
     const like: RTCPeerConnectionLike = {
@@ -67,6 +94,7 @@ export const createBrowserPeerConnection: RTCPeerConnectionFactory = (config) =>
         addIceCandidate: (candidate) => pc.addIceCandidate(candidate),
         close: () => pc.close(),
         connectionType: () => selectedConnectionType(pc),
+        collectDiagnostics: () => collectDiagnostics(pc),
         onicecandidate: null,
         ontrack: null,
         onconnectionstatechange: null,

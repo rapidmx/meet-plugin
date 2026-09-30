@@ -9,6 +9,7 @@
 import { vi, type Mock } from "vitest";
 import { NO_FILTERS } from "../../apps/shared/media/filters/filterTypes.js";
 import type { LocalMedia } from "../../apps/shared/media/useLocalMedia.js";
+import type { ConnectionDiagnostics, MeshParticipant } from "../../apps/shared/webrtc/types.js";
 
 /** Builds a real `Response` with a JSON body and `content-type: application/json`. */
 export function jsonResponse(status: number, body: unknown, init: ResponseInit = {}): Response {
@@ -169,8 +170,11 @@ export interface FakeRTCPeerConnection {
     onconnectionstatechange: (() => void) | null;
     connectionState: string;
     /** What `connectionType()` resolves to - a test sets it to script a direct or a TURN-relayed pair. */
-    type: "p2p" | "turn" | "unknown";
+    type: "p2p" | "turn" | "turn-tcp" | "unknown";
     connectionType: Mock;
+    /** What `collectDiagnostics()` resolves to - a test sets it to script a particular quality sample. */
+    diagnostics: ConnectionDiagnostics;
+    collectDiagnostics: Mock;
 }
 
 /** A fake `RTCPeerConnectionLike` (`apps/shared/webrtc/types.ts`) with scriptable offer/answer SDP and no real ICE
@@ -202,6 +206,8 @@ export function fakeRTCPeerConnection(claimKinds: ("audio" | "video")[] = ["audi
         connectionState: "new",
         type: "p2p",
         connectionType: vi.fn(async () => pc.type),
+        diagnostics: { audio: {}, video: {} },
+        collectDiagnostics: vi.fn(async () => pc.diagnostics),
     };
     return pc;
 }
@@ -279,6 +285,20 @@ export function fakeLocalMedia(overrides: Partial<LocalMedia> = {}): LocalMedia 
         toggleCamera: vi.fn(async () => undefined),
         selectDevice: vi.fn(async () => undefined),
         release: vi.fn(),
+        ...overrides,
+    };
+}
+
+/** A connected, camera-and-mic-on `MeshParticipant` - override whatever a test cares about (e.g. `transport`,
+ * `diagnostics`). */
+export function fakeMeshParticipant(overrides: Partial<MeshParticipant> = {}): MeshParticipant {
+    return {
+        uid: "peer-1",
+        name: "Participant",
+        audioOn: true,
+        videoOn: true,
+        handRaised: false,
+        transport: "p2p",
         ...overrides,
     };
 }

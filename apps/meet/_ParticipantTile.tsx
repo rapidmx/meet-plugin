@@ -20,8 +20,10 @@ import type { MediaTransport } from "../shared/webrtc/types.js";
 import { MicOffIcon } from "./_icons.js";
 
 /** What a tile says about how its participant's media is arriving, for the paths that are not the ordinary direct one
- * (which needs no comment). Text rather than only an icon, so the reason a picture is degraded is never a guess. */
-const TRANSPORT_BADGES: Partial<Record<MediaTransport, { label: string; title: string }>> = {
+ * (which needs no comment). Text rather than only an icon, so the reason a picture is degraded is never a guess.
+ * Exported so `_DiagnosticsPanel.tsx` shows the identical label/title rather than describing the same paths in
+ * slightly different words. */
+export const TRANSPORT_BADGES: Partial<Record<MediaTransport, { label: string; title: string }>> = {
     turn: { label: "Relayed", title: "Connected through the relay server, because a direct connection was not possible." },
     "turn-tcp": {
         label: "Relayed (TCP)",

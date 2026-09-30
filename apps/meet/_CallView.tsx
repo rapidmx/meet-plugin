@@ -478,6 +478,8 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
             <footer className="shrink-0 pt-1 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
                 <CallControls
                     media={media}
+                    selfName={selfName}
+                    participants={participants}
                     isPresenting={isPresenting}
                     presentingElsewhereName={presenterUid && presenterUid !== peerId ? presenterName : undefined}
                     onToggleShare={() => void handleToggleShare()}

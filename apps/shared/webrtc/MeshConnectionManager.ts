@@ -115,6 +115,11 @@ export const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 /** How long a connection may stay `disconnected` (ICE lost the path but may still recover) before giving up on it. */
 export const DEFAULT_DISCONNECTED_GRACE_MS = 8_000;
 
+/** How often a connected pair's quality stats (the diagnostics panel) are refreshed - low frequency on purpose:
+ * this is for a participant occasionally checking why a call feels off, not a live chart, and `getStats()` is not
+ * free to call every frame. */
+export const DEFAULT_DIAGNOSTICS_POLL_MS = 3_000;
+
 type MediaKind = "audio" | "video";
 
 interface PeerState extends MeshParticipant {
@@ -128,6 +133,9 @@ interface PeerState extends MeshParticipant {
     connectTimer: ReturnType<typeof setTimeout> | undefined;
     /** Gives up on WebRTC when the connection has stayed `disconnected` for `disconnectedGraceMs`. */
     disconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    /** Refreshes `diagnostics` (`MeshParticipant`) while this pair is on a real `RTCPeerConnection` - started once
+     * it first connects, stopped the moment it leaves WebRTC for the relay or the pair ends. */
+    diagnosticsTimer: ReturnType<typeof setInterval> | undefined;
 }
 
 export interface MeshConnectionManagerOptions {
@@ -156,6 +164,8 @@ export interface MeshConnectionManagerOptions {
     connectTimeoutMs?: number;
     /** Defaults to `DEFAULT_DISCONNECTED_GRACE_MS`. */
     disconnectedGraceMs?: number;
+    /** Defaults to `DEFAULT_DIAGNOSTICS_POLL_MS`. */
+    diagnosticsPollMs?: number;
 }
 
 export class MeshConnectionManager {
@@ -222,6 +232,7 @@ export class MeshConnectionManager {
         this.unsubscribe = undefined;
         for (const peer of this.peers.values()) {
             this.clearTimers(peer);
+            this.stopDiagnosticsPolling(peer);
             peer.pc.close();
         }
         this.peers.clear();
@@ -408,6 +419,7 @@ export class MeshConnectionManager {
             return;
         }
         this.clearTimers(peer);
+        this.stopDiagnosticsPolling(peer);
         peer.pc.close();
         this.peers.delete(uid);
         if (peer.transport === "websocket") {
@@ -440,6 +452,7 @@ export class MeshConnectionManager {
             transport: "connecting",
             connectTimer: undefined,
             disconnectTimer: undefined,
+            diagnosticsTimer: undefined,
         };
         this.orphanCandidates.delete(uid);
         this.peers.set(uid, peer);
@@ -496,6 +509,38 @@ export class MeshConnectionManager {
         // The pair may have moved on (fallen back, left, or dropped again) while the stats were being read.
         if (peer.transport !== "websocket" && this.peers.get(peer.uid) === peer && peer.pc.connectionState === "connected") {
             this.setTransport(peer, type === "turn" || type === "turn-tcp" ? type : "p2p");
+            this.startDiagnosticsPolling(peer);
+        }
+    }
+
+    /** Idempotent - a pair that reconnects without ever leaving WebRTC (`connected` -> `disconnected` -> `connected`
+     * again) does not get a second timer. */
+    private startDiagnosticsPolling(peer: PeerState): void {
+        if (peer.diagnosticsTimer !== undefined) {
+            return;
+        }
+        const pollMs = this.options.diagnosticsPollMs ?? DEFAULT_DIAGNOSTICS_POLL_MS;
+        peer.diagnosticsTimer = setInterval(() => void this.pollDiagnostics(peer), pollMs);
+        void this.pollDiagnostics(peer); // the first sample doesn't wait a full interval
+    }
+
+    private stopDiagnosticsPolling(peer: PeerState): void {
+        clearInterval(peer.diagnosticsTimer);
+        peer.diagnosticsTimer = undefined;
+    }
+
+    private async pollDiagnostics(peer: PeerState): Promise<void> {
+        let diagnostics: MeshParticipant["diagnostics"];
+        try {
+            diagnostics = await peer.pc.collectDiagnostics();
+        } catch {
+            // Leaves whatever was last polled in place rather than blanking a momentary failure.
+            return;
+        }
+        // The pair may have moved on (fallen back, left, or dropped again) while the stats were being read.
+        if (this.peers.get(peer.uid) === peer && peer.diagnosticsTimer !== undefined) {
+            peer.diagnostics = diagnostics;
+            this.emit({ type: "participant-updated", participant: toParticipant(peer) });
         }
     }
 
@@ -523,6 +568,8 @@ export class MeshConnectionManager {
             return;
         }
         this.clearTimers(peer);
+        this.stopDiagnosticsPolling(peer);
+        peer.diagnostics = undefined;
         const relay = this.options.relay;
         if (!relay?.supported) {
             this.setTransport(peer, "failed");
@@ -668,7 +715,15 @@ export class MeshConnectionManager {
 }
 
 function toParticipant(peer: PeerState): MeshParticipant {
-    return { uid: peer.uid, name: peer.name, audioOn: peer.audioOn, videoOn: peer.videoOn, handRaised: peer.handRaised, transport: peer.transport };
+    return {
+        uid: peer.uid,
+        name: peer.name,
+        audioOn: peer.audioOn,
+        videoOn: peer.videoOn,
+        handRaised: peer.handRaised,
+        transport: peer.transport,
+        diagnostics: peer.diagnostics,
+    };
 }
 
 function sameState(a: ParticipantState, b: ParticipantState): boolean {

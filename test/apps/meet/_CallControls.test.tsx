@@ -10,11 +10,13 @@ import CallControls, { LevelBars, type CallControlsProps } from "../../../apps/m
 import { NO_FILTERS } from "../../../apps/shared/media/filters/filterTypes.js";
 import { NO_SCREEN_TRANSFORM } from "../../../apps/shared/media/filters/ScreenTransform.js";
 import { REACTION_EMOJIS } from "../../../apps/shared/webrtc/types.js";
-import { fakeDeviceInfo, fakeLocalMedia } from "../testUtils.js";
+import { fakeDeviceInfo, fakeLocalMedia, fakeMeshParticipant } from "../testUtils.js";
 
 function renderControls(overrides: Partial<CallControlsProps> = {}) {
     const props: CallControlsProps = {
         media: fakeLocalMedia(),
+        selfName: "Me",
+        participants: [],
         isPresenting: false,
         onToggleShare: vi.fn(),
         screenTransform: NO_SCREEN_TRANSFORM,
@@ -317,5 +319,30 @@ describe("CallControls - the rest", () => {
         const { props } = renderControls();
         fireEvent.click(screen.getByRole("button", { name: "Leave call" }));
         expect(props.onLeave).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe("CallControls - diagnostics", () => {
+    it("opens the diagnostics panel from its button, and closes it from the same button", () => {
+        renderControls({ participants: [fakeMeshParticipant({ name: "Zed" })] });
+        const button = screen.getByRole("button", { name: "Call diagnostics" });
+        expect(button).toHaveAttribute("aria-expanded", "false");
+        expect(screen.queryByRole("dialog")).toBeNull();
+
+        fireEvent.click(button);
+        expect(button).toHaveAttribute("aria-expanded", "true");
+        const dialog = screen.getByRole("dialog", { name: "Call diagnostics" });
+        expect(within(dialog).getByText("Zed")).toBeInTheDocument();
+
+        fireEvent.click(button);
+        expect(screen.queryByRole("dialog")).toBeNull();
+    });
+
+    it("opens one menu at a time, alongside the other dialogs", () => {
+        renderControls();
+        fireEvent.click(screen.getByRole("button", { name: "Video effects" }));
+        fireEvent.click(screen.getByRole("button", { name: "Call diagnostics" }));
+        expect(screen.getAllByRole("dialog")).toHaveLength(1);
+        expect(screen.getByRole("dialog", { name: "Call diagnostics" })).toBeInTheDocument();
     });
 });

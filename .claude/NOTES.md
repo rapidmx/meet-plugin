@@ -912,3 +912,31 @@ a real but fake-timer-unreproducible race - the engine can already have queued a
 `clearTimeout()` reaches it) is exercised by calling the private `tick()` directly rather than contorted through
 the public API, since unlike `VideoFilterProcessor`'s equivalent guard (reachable via its `onStatus` callback) this
 simpler class has no re-entrant callback of its own.
+
+## 2026-09-30 (Phase A2 of the 7-item batch): built-in diagnostics panel
+
+Second of seven. Everything a participant needs to self-diagnose a bad call, entirely local - nothing here is
+sent anywhere, it only reads what the browser and the existing mesh already know.
+
+Backend/manager plumbing (done first, landed clean on its own before this UI layer): `collectDiagnostics()`
+(`realPeerConnection.ts`) walks the same `getStats()` report set `selectedConnectionType()` already parses,
+extracting the selected candidate-pair's `currentRoundTripTime` plus each media kind's `inbound-rtp`/`outbound-rtp`
+`packetsLost`/`jitter`/`bytesSent`/`bytesReceived`. `MeshConnectionManager` polls this every few seconds
+(`DEFAULT_DIAGNOSTICS_POLL_MS`, 3s) per connected peer once its transport is known, attaching the result to
+`MeshParticipant.diagnostics` and re-emitting `participant-updated` - stops polling on bye/fallback/manager
+shutdown, same lifecycle as the existing per-peer timers. Deliberately never polled for a `"websocket"`-relayed
+participant (there is no `RTCPeerConnection` to ask), and `diagnostics` stays `undefined` until the first poll
+completes - the UI shows "Not available" rather than a blank space for either case, so it never looks like the
+panel forgot to load.
+
+New `_DiagnosticsPanel.tsx`: this browser's own capability flags (WebRTC/screen-sharing/WebCodecs - the last
+gating whether the WebSocket relay fallback tier is even possible on this browser), what the local participant is
+currently sending, then each other participant's connection - the identical transport badge label/title
+`_ParticipantTile.tsx` already shows (now exported as `TRANSPORT_BADGES`, so the two surfaces never describe the
+same path in different words), plus RTT/loss/jitter/bytes once polled. Opened from a new button in
+`_CallControls.tsx`'s row (`DiagnosticsIcon`, extends the `OpenMenu` union, same dialog/outside-click pattern the
+effects panel already uses) - `participants`/`selfName` are threaded down from `CallView`'s own state, which
+already had both.
+
+Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
+clean at 100%/98.62%/100%/100% (1351 tests, this repo's enforced floor is 95% branches / 100% the rest).

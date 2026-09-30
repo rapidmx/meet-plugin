@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createBrowserPeerConnection, selectedConnectionType } from "../../../../apps/shared/webrtc/realPeerConnection.js";
+import { collectDiagnostics, createBrowserPeerConnection, selectedConnectionType } from "../../../../apps/shared/webrtc/realPeerConnection.js";
 
 class FakeSender {
     constructor(public track: unknown) {}
@@ -227,5 +227,60 @@ describe("createBrowserPeerConnection connectionType", () => {
             ]),
         );
         await expect(like.connectionType()).resolves.toBe("turn");
+    });
+});
+
+describe("collectDiagnostics", () => {
+    const diagnosticsOf = (reports: Record<string, unknown>[]) => collectDiagnostics({ getStats: async () => statsOf(reports) });
+
+    it("reads the selected pair's round-trip time, and each kind's inbound/outbound rtp stats", async () => {
+        const result = await diagnosticsOf([
+            { id: "p", type: "candidate-pair", selected: true, localCandidateId: "l", remoteCandidateId: "r", currentRoundTripTime: 0.042 },
+            { id: "l", type: "local-candidate", candidateType: "host" },
+            { id: "r", type: "remote-candidate", candidateType: "host" },
+            { id: "ai", type: "inbound-rtp", kind: "audio", packetsLost: 3, jitter: 0.01, bytesReceived: 1000 },
+            { id: "ao", type: "outbound-rtp", kind: "audio", bytesSent: 2000 },
+            { id: "vi", type: "inbound-rtp", kind: "video", packetsLost: 7, jitter: 0.03, bytesReceived: 30000 },
+            { id: "vo", type: "outbound-rtp", kind: "video", bytesSent: 40000 },
+        ]);
+        expect(result).toEqual({
+            roundTripTimeSeconds: 0.042,
+            audio: { packetsLost: 3, jitter: 0.01, bytesReceived: 1000, bytesSent: 2000 },
+            video: { packetsLost: 7, jitter: 0.03, bytesReceived: 30000, bytesSent: 40000 },
+        });
+    });
+
+    it("finds the selected pair through the transport report too, same as selectedConnectionType", async () => {
+        const result = await diagnosticsOf([
+            { id: "t", type: "transport", selectedCandidatePairId: "p" },
+            { id: "p", type: "candidate-pair", localCandidateId: "l", remoteCandidateId: "r", currentRoundTripTime: 0.1 },
+        ]);
+        expect(result.roundTripTimeSeconds).toBe(0.1);
+    });
+
+    it("omits whatever this browser (or this stream's direction) doesn't report, rather than defaulting to 0", async () => {
+        const result = await diagnosticsOf([]);
+        expect(result).toEqual({ roundTripTimeSeconds: undefined, audio: {}, video: {} });
+    });
+
+    it("ignores a non-numeric stat rather than passing it through", async () => {
+        const result = await diagnosticsOf([
+            { id: "p", type: "candidate-pair", selected: true, localCandidateId: "l", remoteCandidateId: "r", currentRoundTripTime: "soon" },
+            { id: "ai", type: "inbound-rtp", kind: "audio", packetsLost: "none" },
+        ]);
+        expect(result.roundTripTimeSeconds).toBeUndefined();
+        expect(result.audio.packetsLost).toBeUndefined();
+    });
+});
+
+describe("createBrowserPeerConnection collectDiagnostics", () => {
+    it("reads the real connection's stats", async () => {
+        vi.stubGlobal("RTCPeerConnection", FakeRTCPeerConnection);
+        const like = createBrowserPeerConnection({ iceServers: [] });
+        const real = FakeRTCPeerConnection.instances[0];
+        real.getStats.mockResolvedValue(
+            statsOf([{ id: "p", type: "candidate-pair", selected: true, localCandidateId: "l", remoteCandidateId: "r", currentRoundTripTime: 0.05 }]),
+        );
+        await expect(like.collectDiagnostics()).resolves.toEqual({ roundTripTimeSeconds: 0.05, audio: {}, video: {} });
     });
 });

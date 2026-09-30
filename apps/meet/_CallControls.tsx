@@ -17,10 +17,12 @@ import React, { useEffect, useRef, useState } from "react";
 import { filtersActive } from "../shared/media/filters/filterTypes.js";
 import type { ScreenTransformState } from "../shared/media/filters/ScreenTransform.js";
 import type { LocalMedia, MediaKind } from "../shared/media/useLocalMedia.js";
-import { REACTION_EMOJIS } from "../shared/webrtc/types.js";
+import { REACTION_EMOJIS, type MeshParticipant } from "../shared/webrtc/types.js";
+import DiagnosticsPanel from "./_DiagnosticsPanel.js";
 import EffectsPanel from "./_EffectsPanel.js";
 import {
     ChevronUpIcon,
+    DiagnosticsIcon,
     EffectsIcon,
     EmojiIcon,
     FlipIcon,
@@ -40,6 +42,8 @@ export type CallViewMode = "grid" | "focus";
 
 export interface CallControlsProps {
     media: LocalMedia;
+    selfName: string;
+    participants: MeshParticipant[];
     isPresenting: boolean;
     /** Someone else is presenting - the share button is disabled and explains why. */
     presentingElsewhereName?: string;
@@ -56,7 +60,7 @@ export interface CallControlsProps {
     onLeave: () => void;
 }
 
-type OpenMenu = MediaKind | "emoji" | "effects" | null;
+type OpenMenu = MediaKind | "emoji" | "effects" | "diagnostics" | null;
 
 const BUTTON = "flex items-center justify-center h-12 rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80";
 const NEUTRAL = "bg-[#3c4043] text-white hover:bg-[#4b4f53]";
@@ -80,6 +84,8 @@ export function LevelBars({ level }: { level: number }) {
 
 export default function CallControls({
     media,
+    selfName,
+    participants,
     isPresenting,
     presentingElsewhereName,
     onToggleShare,
@@ -291,6 +297,28 @@ export default function CallControls({
             >
                 {viewMode === "grid" ? <FocusIcon /> : <GridIcon />}
             </button>
+
+            <div className="sm:relative">
+                <button
+                    type="button"
+                    className={`${BUTTON} w-12 ${openMenu === "diagnostics" ? ACTIVE : NEUTRAL}`}
+                    aria-label="Call diagnostics"
+                    aria-haspopup="dialog"
+                    aria-expanded={openMenu === "diagnostics"}
+                    onClick={() => toggleMenu("diagnostics")}
+                >
+                    <DiagnosticsIcon />
+                </button>
+                {openMenu === "diagnostics" && (
+                    <div
+                        role="dialog"
+                        aria-label="Call diagnostics"
+                        className="absolute bottom-full mb-3 right-0 w-80 max-w-[calc(100vw-1rem)] max-h-[60vh] overflow-y-auto p-3 rounded-2xl bg-[#2b2d30] text-white shadow-xl"
+                    >
+                        <DiagnosticsPanel selfName={selfName} micOn={media.micOn} cameraOn={media.cameraOn} participants={participants} />
+                    </div>
+                )}
+            </div>
 
             <button type="button" className={`${BUTTON} w-16 bg-[#d93025] text-white hover:bg-[#b3261e]`} aria-label="Leave call" onClick={onLeave}>
                 <LeaveIcon />

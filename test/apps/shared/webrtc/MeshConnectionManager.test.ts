@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
     DEFAULT_CONNECT_TIMEOUT_MS,
+    DEFAULT_DIAGNOSTICS_POLL_MS,
     DEFAULT_DISCONNECTED_GRACE_MS,
     MeshConnectionManager,
     type MeshConnectionManagerOptions,
@@ -911,18 +912,26 @@ describe("MeshConnectionManager - media paths (p2p, then TURN, then the WebSocke
     });
 
     it("announces a path change once, and re-reads the path when ICE reconnects on a different one", async () => {
+        // A connected pair also gets its own diagnostics-driven update (same transport, a fresh stats sample - see
+        // "MeshConnectionManager - diagnostics polling" below), so this counts distinct transport *values* seen in
+        // order rather than raw event counts, which is what "announces a path change once" actually means.
+        const transportSequence = (events: MeshEvent[]): string[] =>
+            events
+                .filter((e): e is MeshEvent & { type: "participant-updated" } => e.type === "participant-updated")
+                .map((e) => e.participant.transport)
+                .filter((transport, i, all) => transport !== all[i - 1]);
         const { pc, events, transportOf } = await setupWithPeer(undefined);
         setState(pc, "connected");
         await flush();
         setState(pc, "connected");
         await flush();
-        expect(events.filter((e) => e.type === "participant-updated")).toHaveLength(1);
+        expect(transportSequence(events)).toEqual(["p2p"]);
 
         pc.type = "turn";
         setState(pc, "connected");
         await flush();
         expect(transportOf()).toBe("turn");
-        expect(events.filter((e) => e.type === "participant-updated")).toHaveLength(2);
+        expect(transportSequence(events)).toEqual(["p2p", "turn"]);
     });
 
     it("drops a path reading that lands after the pair dropped, fell back or left", async () => {
@@ -1151,5 +1160,119 @@ describe("MeshConnectionManager - media paths (p2p, then TURN, then the WebSocke
         manager.stop();
         vi.advanceTimersByTime(5000);
         expect(relay.receiveFrom).not.toHaveBeenCalled();
+    });
+});
+
+describe("MeshConnectionManager - diagnostics polling", () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it("polls once immediately on connecting, without waiting a full interval", async () => {
+        const { pc, events, manager } = await setupWithPeer(undefined);
+        pc.diagnostics = { roundTripTimeSeconds: 0.02, audio: { packetsLost: 0 }, video: {} };
+        setState(pc, "connected");
+        await flush();
+        expect(pc.collectDiagnostics).toHaveBeenCalledTimes(1);
+        expect(manager.participants[0]?.diagnostics).toEqual(pc.diagnostics);
+        expect(events).toContainEqual({
+            type: "participant-updated",
+            participant: expect.objectContaining({ uid: "z", diagnostics: pc.diagnostics }),
+        });
+    });
+
+    it("polls again every DEFAULT_DIAGNOSTICS_POLL_MS, reflecting each new sample", async () => {
+        vi.useFakeTimers();
+        const { pc, manager } = await setupWithPeer(undefined, { diagnosticsPollMs: 3000 });
+        pc.diagnostics = { audio: {}, video: {} };
+        setState(pc, "connected");
+        await flush();
+        expect(pc.collectDiagnostics).toHaveBeenCalledTimes(1);
+
+        pc.diagnostics = { roundTripTimeSeconds: 0.5, audio: {}, video: {} };
+        await vi.advanceTimersByTimeAsync(3000);
+        expect(pc.collectDiagnostics).toHaveBeenCalledTimes(2);
+        expect(manager.participants[0]?.diagnostics).toEqual(pc.diagnostics);
+    });
+
+    it("defaults to DEFAULT_DIAGNOSTICS_POLL_MS when no interval is given", async () => {
+        vi.useFakeTimers();
+        const { pc } = await setupWithPeer(undefined);
+        setState(pc, "connected");
+        await flush();
+        expect(pc.collectDiagnostics).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(DEFAULT_DIAGNOSTICS_POLL_MS);
+        expect(pc.collectDiagnostics).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not start a second timer when the connection merely reconnects without leaving WebRTC", async () => {
+        vi.useFakeTimers();
+        const { pc } = await setupWithPeer(undefined);
+        setState(pc, "connected");
+        await flush();
+        setState(pc, "connected");
+        await flush();
+        expect(vi.getTimerCount()).toBe(1);
+    });
+
+    it("stops polling once the pair falls back to the relay, and clears the stale sample", async () => {
+        vi.useFakeTimers();
+        const relay = fakeRelay();
+        const { pc, manager } = await setupWithPeer(relay);
+        pc.diagnostics = { audio: {}, video: {} };
+        setState(pc, "connected");
+        await flush();
+        expect(manager.participants[0]?.diagnostics).toEqual(pc.diagnostics);
+
+        setState(pc, "failed");
+        expect(manager.participants[0]?.diagnostics).toBeUndefined();
+        expect(vi.getTimerCount()).toBe(0);
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(pc.collectDiagnostics).toHaveBeenCalledTimes(1); // just the one poll from before the fallback
+    });
+
+    it("stops polling once the pair leaves", async () => {
+        vi.useFakeTimers();
+        const { pc, channel } = await setupWithPeer(undefined);
+        setState(pc, "connected");
+        await flush();
+        channel.emit(signal("bye", "z"));
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("stops every peer's polling when the manager itself stops", async () => {
+        vi.useFakeTimers();
+        const { manager, pc } = await setupWithPeer(undefined);
+        setState(pc, "connected");
+        await flush();
+        expect(vi.getTimerCount()).toBeGreaterThan(0);
+        manager.stop();
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("leaves the last sample in place, rather than blanking it, when a poll fails", async () => {
+        vi.useFakeTimers();
+        const { pc, manager } = await setupWithPeer(undefined);
+        pc.diagnostics = { roundTripTimeSeconds: 0.03, audio: {}, video: {} };
+        setState(pc, "connected");
+        await flush();
+        expect(manager.participants[0]?.diagnostics).toEqual(pc.diagnostics);
+
+        pc.collectDiagnostics.mockRejectedValueOnce(new Error("getStats failed"));
+        await vi.advanceTimersByTimeAsync(DEFAULT_DIAGNOSTICS_POLL_MS);
+        expect(manager.participants[0]?.diagnostics).toEqual(pc.diagnostics);
+    });
+
+    it("drops a reading that lands after the pair fell back or left, rather than resurrecting it", async () => {
+        vi.useFakeTimers();
+        const relay = fakeRelay();
+        const { pc, manager } = await setupWithPeer(relay);
+        // The very first poll (fired synchronously by connecting) is made slow, so it is still in flight when the
+        // pair falls back moments later.
+        pc.collectDiagnostics.mockImplementationOnce(() => new Promise((resolve) => setTimeout(() => resolve({ audio: {}, video: {} }), 100)));
+        setState(pc, "connected");
+        setState(pc, "failed");
+        await vi.advanceTimersByTimeAsync(200);
+        expect(manager.participants[0]?.diagnostics).toBeUndefined();
     });
 });

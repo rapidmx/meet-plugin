@@ -81,6 +81,28 @@ export interface SignalingChannel {
     onMessage(handler: (message: SignalMessage) => void): () => void;
 }
 
+/** One kind's RTP stream stats, as of one sample - cumulative counters (`bytesSent`/`bytesReceived`), not a rate,
+ * since a single `getStats()` snapshot has no "since when" to divide by; a caller wanting a bitrate keeps the
+ * previous sample itself and divides the difference by the elapsed time (see `MeshConnectionManager`'s poller).
+ * `undefined` for anything this browser (or this stream's direction - an audio-only connection reports nothing for
+ * video, and vice versa) doesn't report. */
+export interface RtpStreamDiagnostics {
+    packetsLost?: number;
+    /** Seconds. */
+    jitter?: number;
+    bytesSent?: number;
+    bytesReceived?: number;
+}
+
+/** One point-in-time sample of a connection's own quality stats, for the diagnostics panel. */
+export interface ConnectionDiagnostics {
+    /** Seconds - the selected candidate pair's own current round-trip time. `undefined` when this browser doesn't
+     * report one (a connection still connecting, or simply not supported). */
+    roundTripTimeSeconds?: number;
+    audio: RtpStreamDiagnostics;
+    video: RtpStreamDiagnostics;
+}
+
 /** The subset of `RTCRtpSender` `MeshConnectionManager.setLocalTrack()` uses. Every connection carries one audio and
  * one video sender for its whole life (see `MeshConnectionManager`'s doc comment), so turning a camera on or off,
  * switching a device or sharing a screen only ever replaces the track a sender sends - no renegotiation. A real
@@ -116,6 +138,9 @@ export interface RTCPeerConnectionLike {
     /** Which path the connected pair is using - read from the selected candidate pair once `connectionState` is
      * `connected`. `"unknown"` when the browser does not report one (treated as direct by the caller). */
     connectionType(): Promise<"p2p" | "turn" | "turn-tcp" | "unknown">;
+    /** One point-in-time sample of this connection's own quality stats, for the diagnostics panel - polled
+     * periodically and independently of `connectionType()` (see `MeshConnectionManager`'s doc comment). */
+    collectDiagnostics(): Promise<ConnectionDiagnostics>;
 }
 
 /** Which of the three media paths a participant's audio and video currently take, in the order they are tried:
@@ -155,6 +180,10 @@ export interface MeshParticipant extends ParticipantState {
     name: string;
     /** How this participant's media currently reaches the local one - see `MediaTransport`. */
     transport: MediaTransport;
+    /** This connection's most recently polled quality stats, for the diagnostics panel - `undefined` until the
+     * first poll completes (shortly after `transport` first leaves `"connecting"`), and never present at all for
+     * a `"websocket"`-relayed participant (there is no `RTCPeerConnection` to poll). */
+    diagnostics?: ConnectionDiagnostics;
 }
 
 export type MeshEvent =
