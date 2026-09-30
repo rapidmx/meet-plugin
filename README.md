@@ -25,7 +25,11 @@ browser (MediaPipe, loaded only when a filter needs it - from public CDNs by def
 their browser's `localStorage` for next time.
 
 This plugin's `apps/` also ship the public join/lobby/in-call pages and the personal Settings screen - see
-`package.json`'s `rapidmx.plugin.ui` for exactly what's mounted where.
+`package.json`'s `rapidmx.plugin.ui` for exactly what's mounted where. Its `ui.appRail` entry adds a **Meet** button
+to the web client's app rail, shown only for a user who has a personal room: the entry's `resolveFrom`
+(`/mail/video-meetings/personal-room`, i.e. `GET /api/mail/video-meetings/personal-room`) answers
+`{ href: "/meet/<token>", label }` for the caller's personal room (the oldest still-active public meeting of the first
+mailbox they own that has one) or 404 when there is none, in which case the button stays hidden.
 
 ## What it adds
 

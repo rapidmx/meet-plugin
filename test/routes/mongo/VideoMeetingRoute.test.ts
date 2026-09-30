@@ -18,6 +18,7 @@ import { GUEST_JWT_TTL_SECONDS, GUEST_UID_PREFIX } from "../../../src/routes/Bas
 import { turnRestCredential } from "../../../src/util/IceServerUtils.js";
 import { effectsSuite } from "../effectsSuite.js";
 import { relaySuite } from "../relaySuite.js";
+import { personalRoomSuite } from "../personalRoomSuite.js";
 import { videoMeetingSecuritySuite } from "../videoMeetingSecuritySuite.js";
 
 const redis = vi.hoisted(() => ({ createClient: vi.fn() }));
@@ -694,6 +695,56 @@ describe("Route:VideoMeetingMongo Tests", () => {
             await authed(ownerToken).put(`${baseUrl}/${uid}`).send({ status: "cancelled" });
         },
     };
+
+    personalRoomSuite({
+        app: () => server.getApplication(),
+        baseUrl,
+        ownerToken: () => ownerToken,
+        ownerUid: () => owner.uid,
+        strangerToken: () => strangerToken,
+        strangerUid: () => stranger.uid,
+        adminToken: () => adminToken,
+        createMailbox: async (ownerUserUid: string, grantFullTo?: string) => {
+            const created = await mailboxRepo.save(
+                new MailboxMongo({
+                    ownerUserUid,
+                    primarySmtpAddress: `box-${uuid.v4()}@example.com`,
+                    aliasAddresses: [],
+                    displayName: "Personal Room Fixture",
+                    timezone: "UTC",
+                    quotaBytes: 1_000_000_000,
+                    usedBytes: 0,
+                }),
+            );
+            if (grantFullTo) {
+                await aclRepo.save({
+                    uid: created.uid,
+                    dateCreated: new Date(),
+                    dateModified: new Date(),
+                    version: 0,
+                    records: [{ userOrRoleId: grantFullTo, actions: [ACLAction.FULL] }],
+                    parentUid: "Mailbox",
+                });
+            }
+            return created.uid;
+        },
+        createMeeting: async (mailboxUid: string, fields) => {
+            const meeting = new VideoMeetingMongo({
+                mailboxUid,
+                title: fields.title,
+                visibility: fields.visibility as VideoMeetingVisibility,
+                status: (fields.status as VideoMeetingStatus) ?? VideoMeetingStatus.SCHEDULED,
+                publicSlug: fields.publicSlug,
+            });
+            meeting.dateCreated = fields.dateCreated;
+            await meetingRepo.save(meeting);
+        },
+        setMailboxDateCreated: async (mailboxUid: string, dateCreated: Date) => {
+            const doc: any = await mailboxRepo.findOne({ uid: mailboxUid });
+            doc.dateCreated = dateCreated;
+            await mailboxRepo.save(doc);
+        },
+    });
 
     videoMeetingSecuritySuite(suiteContext);
     relaySuite({

@@ -775,6 +775,45 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         return meetings.map((meeting) => this.withJoinUrls(meeting));
     }
 
+    @Summary("Resolves the caller's personal meeting room.")
+    @Description(
+        "Returns { href, label } for the caller's personal room - the oldest still-active (non-cancelled) PUBLIC " +
+            "meeting of the first mailbox the caller OWNS that has one (the same definition the video conferencing " +
+            "settings page uses) - where href is the same-origin path '/meet/<public slug>' and label the room's " +
+            "title. Answers 404 when the caller owns no mailbox with such a meeting, so a web client can use it " +
+            "to decide whether to show a 'Meet' button. Only ever considers mailboxes whose ownerUserUid is the " +
+            "caller (a delegated mailbox, or another user's, is never consulted) on which the caller still holds " +
+            "LIST; trusted roles do not widen this. Requires authentication (401 otherwise). Declared before " +
+            "'/:id' so that path is not captured by it.",
+    )
+    @Get("/personal-room")
+    public async personalRoom(@AuthUser user?: JWTUser): Promise<{ href: string; label: string }> {
+        await this.init();
+        if (!user?.uid) {
+            throw new ApiError(ApiErrors.AUTH_REQUIRED, 401, ApiErrorMessages.AUTH_REQUIRED);
+        }
+        const mailboxes: M[] = await this.mailboxRepo!.find({ ownerUserUid: ModelUtils.literal(user.uid) } as any, { ignoreACL: true });
+        // Oldest mailbox first, so "the first owned mailbox" is the account's original (primary) one.
+        mailboxes.sort((a, b) => new Date(a.dateCreated).getTime() - new Date(b.dateCreated).getTime());
+        for (const mailbox of mailboxes) {
+            if (!(await this.aclUtils!.hasPermission(stripTrustedRoles(user, this.trustedRoles), mailbox.uid, ACLAction.LIST))) {
+                continue;
+            }
+            // Same selection as the settings page's `findPersonalRoom()`, and the same page size it lists with.
+            const meetings: VM[] = await this.meetingRepo!.find(
+                { mailboxUid: ModelUtils.literal(mailbox.uid), visibility: ModelUtils.literal(VideoMeetingVisibility.PUBLIC), limit: 200 } as any,
+                { ignoreACL: true, limit: 200 },
+            );
+            const room: VM | undefined = meetings
+                .filter((m) => m.visibility === VideoMeetingVisibility.PUBLIC && m.status !== VideoMeetingStatus.CANCELLED && !!m.publicSlug)
+                .sort((a, b) => new Date(a.dateCreated).getTime() - new Date(b.dateCreated).getTime())[0];
+            if (room) {
+                return { href: `/meet/${room.publicSlug}`, label: room.title };
+            }
+        }
+        throw new ApiError(ApiErrors.NOT_FOUND, 404, ApiErrorMessages.NOT_FOUND);
+    }
+
     @Summary("Retrieves one of the owner's video meetings.")
     @Description(
         "Returns the meeting, plus 'organizerJoinUrl' when it has an organizerSlug (every private meeting this " +

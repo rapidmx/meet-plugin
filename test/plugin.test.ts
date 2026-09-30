@@ -163,6 +163,14 @@ describe("plugin manifest", () => {
         ]);
     });
 
+    it("declares a Meet app rail entry that is resolved per user from the personal room endpoint", () => {
+        // Read from package.json directly rather than through `parsePluginManifest()`: a restapi that predates
+        // `resolveFrom` may drop or reject the unknown key, and this asserts what the plugin declares.
+        expect(pkg.rapidmx.plugin.ui.appRail).toEqual([
+            { id: "meet", label: "Meet", href: "/meet", icon: "HiOutlineVideoCamera", resolveFrom: "/mail/video-meetings/personal-room" },
+        ]);
+    });
+
     it("ships every UI app's sources (placeholder pages for now - see .claude/NOTES.md) in the package", () => {
         expect(pkg.files).toEqual(expect.arrayContaining(["apps", "dist"]));
         for (const app of pkg.rapidmx.plugin.ui.apps) {

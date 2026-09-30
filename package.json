@@ -183,6 +183,15 @@
                         "dir": "apps/settings-video-conferencing"
                     }
                 ],
+                "appRail": [
+                    {
+                        "id": "meet",
+                        "label": "Meet",
+                        "href": "/meet",
+                        "icon": "HiOutlineVideoCamera",
+                        "resolveFrom": "/mail/video-meetings/personal-room"
+                    }
+                ],
                 "settingsSections": [
                     {
                         "id": "video-conferencing",
