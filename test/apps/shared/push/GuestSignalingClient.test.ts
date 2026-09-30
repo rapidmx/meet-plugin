@@ -342,38 +342,70 @@ describe("GuestSignalingClient message handling", () => {
 
 describe("GuestSignalingClient.send", () => {
     it("POSTs the message with a bearer token, targeting the meeting's own channel, keepalive since it's a bye", async () => {
-        const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+        const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 200 }));
         const client = new GuestSignalingClient({ channel: "meeting-1", token: "guest-token", fetchImpl });
         const message: SignalMessage = { type: "video-meeting-signal", kind: "bye", from: "g1" };
         client.send(message);
         await Promise.resolve();
-        expect(fetchImpl).toHaveBeenCalledWith("/push/meeting-1", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: "Bearer guest-token" },
-            body: JSON.stringify(message),
-            // So a `bye` sent as the page unloads still goes out.
-            keepalive: true,
-        });
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
+        const [url, init] = fetchImpl.mock.calls[0];
+        expect(url).toBe("/push/meeting-1");
+        expect(init.method).toBe("POST");
+        expect(init.body).toBe(JSON.stringify(message));
+        // So a `bye` sent as the page unloads still goes out.
+        expect(init.keepalive).toBe(true);
+        const headers = init.headers as Headers;
+        expect(headers.get("Content-Type")).toBe("application/json");
+        expect(headers.get("Authorization")).toBe("Bearer guest-token");
     });
 
     it("POSTs with no Authorization header at all when token is omitted, relying on the browser's own cookie", async () => {
-        const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+        const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 200 }));
         const client = new GuestSignalingClient({ channel: "meeting-1", fetchImpl });
         const message: SignalMessage = { type: "video-meeting-signal", kind: "bye", from: "real-user-1" };
         client.send(message);
         await Promise.resolve();
-        expect(fetchImpl).toHaveBeenCalledWith(
-            "/push/meeting-1",
-            expect.objectContaining({
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(message),
-            }),
-        );
+        const [url, init] = fetchImpl.mock.calls[0];
+        expect(url).toBe("/push/meeting-1");
+        expect(init.body).toBe(JSON.stringify(message));
+        const headers = init.headers as Headers;
+        expect(headers.get("Content-Type")).toBe("application/json");
+        expect(headers.has("Authorization")).toBe(false);
+    });
+
+    it("echoes the CSRF double-submit cookie as a header - required server-side for the cookie-authenticated case, and the reason every signal from it 403'd before this", async () => {
+        vi.stubGlobal("document", { cookie: "csrf=the-csrf-token" });
+        const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 200 }));
+        const client = new GuestSignalingClient({ channel: "meeting-1", fetchImpl });
+        client.send({ type: "video-meeting-signal", kind: "bye", from: "real-user-1" });
+        await Promise.resolve();
+        const [, init] = fetchImpl.mock.calls[0];
+        expect((init.headers as Headers).get("x-csrf-token")).toBe("the-csrf-token");
+    });
+
+    it("also echoes the CSRF cookie on a bearer-authenticated (guest) send - harmless, since the server only requires it for the cookie case", async () => {
+        vi.stubGlobal("document", { cookie: "csrf=the-csrf-token" });
+        const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 200 }));
+        const client = new GuestSignalingClient({ channel: "meeting-1", token: "guest-token", fetchImpl });
+        client.send({ type: "video-meeting-signal", kind: "hello", from: "g1" });
+        await Promise.resolve();
+        const [, init] = fetchImpl.mock.calls[0];
+        expect((init.headers as Headers).get("x-csrf-token")).toBe("the-csrf-token");
+        expect((init.headers as Headers).get("Authorization")).toBe("Bearer guest-token");
+    });
+
+    it("sends no CSRF header when there is no csrf cookie yet", async () => {
+        vi.stubGlobal("document", { cookie: "" });
+        const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 200 }));
+        const client = new GuestSignalingClient({ channel: "meeting-1", token: "guest-token", fetchImpl });
+        client.send({ type: "video-meeting-signal", kind: "hello", from: "g1" });
+        await Promise.resolve();
+        const [, init] = fetchImpl.mock.calls[0];
+        expect((init.headers as Headers).has("x-csrf-token")).toBe(false);
     });
 
     it("does not mark an ordinary signal keepalive - only a bye needs to survive the page unloading", async () => {
-        const fetchImpl = vi.fn(async () => new Response(null, { status: 200 }));
+        const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 200 }));
         const client = new GuestSignalingClient({ channel: "meeting-1", token: "guest-token", fetchImpl });
         for (const kind of ["hello", "offer", "answer", "ice-candidate", "presenter-claim", "presenter-release", "state", "reaction", "relay-fallback"] as const) {
             fetchImpl.mockClear();

@@ -774,3 +774,40 @@ every symptom and the code's own stated intent, not a confirmed root cause. If i
 most useful thing to grab is the 403 response's actual body/headers (ours vs. a middlebox's own block page would
 look very different) - that would either confirm this fix or redirect the investigation toward the server's own ACL
 check instead.
+
+## 2026-09-30 (later): the real cause - send() never attached the CSRF header
+
+The `keepalive` theory above was wrong. JP shipped it as 0.9.1, captured a HAR from a still-failing device, and the
+403's actual response body (never captured before - this is the piece that was missing) was:
+
+    {"code":"api-105","status":403,"level":"debug","message":"This request is missing a valid CSRF token."}
+
+Not `AUTH_PERMISSION_FAILURE` (an ACL check) at all - `AUTH_CSRF_FAILURE`, thrown by `@rapidrest/service-core`'s
+`RouteUtils.checkCsrf()`/`verifyCsrfRequest()` (`src/http/csrf/csrf.ts`) before the route handler, let alone its own
+ACL check, ever runs. And the captured request wasn't a guest at all: real `jwt`/`refresh` cookies for a genuine
+PowerLevel account, no `Authorization` header - the *authenticated* path (`VideoMeetingJoinResult.authenticated:
+true`), confirming `req.auth?.source === "cookie"`, which is exactly the one case `verifyCsrfRequest()` enforces (a
+bearer-authenticated request - the guest path - is exempt entirely, per its own doc comment).
+
+The mechanism: this server's `jwt`-cookie auth ships a double-submit `csrf` cookie (readable, non-`HttpOnly` by
+design) that a mutating request must echo back as `x-csrf-token`. `@rapidmx/web-client`'s `apiFetch()` already does
+this for every other endpoint via `withCsrfHeader()` - `GuestSignalingClient.send()` builds its own `fetch()` instead
+(needs to conditionally choose bearer vs. cookie auth, which `apiFetch()` doesn't support) and never called it. Every
+`hello`/offer/answer/ICE candidate/`bye` sent while relying on the cookie 403'd, silently (`send()` is
+fire-and-forget) - exactly "stuck connecting, then no audio or video" from everyone else's side.
+
+Why this reads as "guests behind a firewall fail, guests on open networks don't" is still a guess, but a much better
+one now: it was never about the network at all. A phone that has never opened mail.powerlevel.gg holds no `jwt`
+cookie, so `join()` mints it a real guest token (bearer, CSRF-exempt) - always works. A corporate/managed device
+already signed into the org's webmail in that browser gets `authenticated: true` instead (no guest token at all,
+see `join()`'s doc comment) - cookie path, needs the CSRF header, 403's on every send without this fix. "Behind a
+firewall" and "already has a company mail session in that browser" correlate for an obvious reason (the same
+managed devices) without either one being what actually matters.
+
+Fixed: `send()` now calls `withCsrfHeader()` (`@rapidmx/web-client/lib/util/api.js`, same package
+`GuestSignalingClient.ts` already imports `apiOrigin()`/`pushUrl()` from) on every send, bearer or cookie - harmless
+on the bearer branch since the server only enforces the check for `req.auth.source === "cookie"`.
+
+The `keepalive` fix (immediately above) stays: it's still correct on its own terms (matches the code's stated
+intent, zero downside) and no longer claims to be the reason anything connects - this entry supersedes that claim,
+not the change itself.

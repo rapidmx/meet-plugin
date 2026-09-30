@@ -40,9 +40,11 @@
  * request carries no `Authorization` header at all and instead relies on `fetch()`'s own default same-origin
  * credentials mode, which already attaches the browser's real `jwt` cookie to a same-origin request with zero
  * extra code - `JWTStrategy.getAuthToken()`'s cookie fallback authenticates it exactly as it would any other
- * same-origin authenticated call. Fire-and-forget either way, matching every other push publish in this codebase -
- * a failed send is logged, never thrown, since a caller (`MeshConnectionManager`) has no meaningful per-message
- * retry of its own.
+ * same-origin authenticated call. Either way `send()` also attaches the CSRF double-submit header
+ * (`withCsrfHeader()`) - required server-side only for the cookie case, but harmless to send for the bearer one
+ * too - see `send()`'s own doc comment. Fire-and-forget either way, matching every other push publish in this
+ * codebase - a failed send is logged, never thrown, since a caller (`MeshConnectionManager`) has no meaningful
+ * per-message retry of its own.
  * - An incoming meeting message arrives wrapped `{ type: "MESSAGE", channel, data: <the posted body> }` - this
  * client unwraps it and delivers `data` (expected to be a `SignalMessage`) to `onMessage()` listeners.
  *
@@ -63,7 +65,7 @@
  * absent, as described above - the browser's real cookie was always going to win that write anyway, so the
  * correct behavior is to not fight it and let it authenticate normally instead.
  */
-import { apiOrigin } from "@rapidmx/web-client/lib/util/api.js";
+import { apiOrigin, withCsrfHeader } from "@rapidmx/web-client/lib/util/api.js";
 import { pushUrl } from "@rapidmx/web-client/lib/mail/pushClient.js";
 import type { SignalMessage, SignalingChannel } from "../webrtc/types.js";
 
@@ -174,7 +176,16 @@ export class GuestSignalingClient implements SignalingChannel {
 
     /** Publishes over `POST /push/:id`, with `token` as a bearer credential when present - see this module's doc
      * comment on why this, unlike subscribing, needs no cookie workaround at all, and on the omitted-`token` case
-     * (an already-authenticated real caller), which relies on the browser's own real `jwt` cookie instead.
+     * (an already-authenticated real caller), which relies on the browser's own real `jwt` cookie instead - and,
+     * because that's a *cookie*-authenticated request, also needs the matching CSRF header
+     * (`@rapidmx/web-client`'s `withCsrfHeader()`, the same double-submit echo `apiFetch()` applies to every other
+     * mutating call this server answers): without it, `RouteUtils.checkCsrf()` refuses the request with 403
+     * `"This request is missing a valid CSRF token."` before it ever reaches `BasePushRoute.send()`'s own ACL
+     * check - every `hello`/offer/answer/ICE candidate/`bye` a participant on that path sends 403s and is
+     * silently dropped (`send()` is fire-and-forget), which looks exactly like "stuck connecting, then no audio or
+     * video" from everyone else's side. `withCsrfHeader()` is harmless to also add on the bearer-token (guest)
+     * branch - the server only enforces the check for `req.auth.source === "cookie"` - so it's applied
+     * unconditionally here rather than only for the cookie case.
      * Fire-and-forget: a failure is swallowed (there is nothing a signaling message's own sender can usefully do
      * about a dropped publish beyond what the mesh's own `hello` re-announcement/renegotiation already tolerates -
      * see `MeshConnectionManager`'s doc comment on fire-and-forget delivery). */
@@ -190,7 +201,7 @@ export class GuestSignalingClient implements SignalingChannel {
         }
         void fetchImpl(`${origin}/push/${encodeURIComponent(this.options.channel)}`, {
             method: "POST",
-            headers,
+            headers: withCsrfHeader(headers, "POST"),
             body: JSON.stringify(message),
             // Only a `bye` needs to survive the page unloading - every other message is sent while the page (and
             // the rest of this call's signaling) is very much alive. `keepalive` is a real-world liability to set
