@@ -115,17 +115,21 @@ export interface RTCPeerConnectionLike {
     connectionState: string;
     /** Which path the connected pair is using - read from the selected candidate pair once `connectionState` is
      * `connected`. `"unknown"` when the browser does not report one (treated as direct by the caller). */
-    connectionType(): Promise<"p2p" | "turn" | "unknown">;
+    connectionType(): Promise<"p2p" | "turn" | "turn-tcp" | "unknown">;
 }
 
 /** Which of the three media paths a participant's audio and video currently take, in the order they are tried:
  *
  * - `"p2p"`: a direct peer-to-peer WebRTC connection, the preferred path.
  * - `"turn"`: still WebRTC, but relayed through the TURN server, for a participant a direct path cannot reach.
+ * - `"turn-tcp"`: the same, but the relay hop itself is TCP (or `turns:`, TLS being TCP-based too) rather than UDP -
+ * a network that blocks UDP outright. TCP's reliable, ordered delivery means one lost or delayed packet stalls
+ * everything queued behind it instead of just being dropped, so this can sound like pauses rather than the clicks
+ * plain packet loss would - worth telling apart from ordinary `"turn"` for exactly that reason.
  * - `"websocket"`: not WebRTC at all - encoded frames proxied by this server over a WebSocket (see
  * `apps/shared/relay/`), the last resort when neither of the above connects.
  * - `"connecting"`: no path established yet. `"failed"`: every path this browser can try has failed. */
-export type MediaTransport = "connecting" | "p2p" | "turn" | "websocket" | "failed";
+export type MediaTransport = "connecting" | "p2p" | "turn" | "turn-tcp" | "websocket" | "failed";
 
 /** What `MeshConnectionManager` needs from the WebSocket media relay (`apps/shared/relay/RelayTransport.ts` implements
  * it) - declared here so the mesh, and its tests, depend on the shape alone. */

@@ -105,6 +105,12 @@ describe("ParticipantTile transport badge", () => {
         expect(screen.getByTestId("transport-badge")).toHaveTextContent("Can't connect");
     });
 
+    it("distinguishes a TCP-relayed TURN connection from an ordinary one", () => {
+        render(<ParticipantTile name="Bob" transport="turn-tcp" />);
+        expect(screen.getByTestId("transport-badge")).toHaveTextContent("Relayed (TCP)");
+        expect(screen.getByTestId("transport-badge").title).toMatch(/pause briefly/);
+    });
+
     it("stays quiet for a direct connection, one still connecting, and a tile with no transport", () => {
         const { rerender } = render(<ParticipantTile name="Bob" transport="p2p" />);
         expect(screen.queryByTestId("transport-badge")).toBeNull();

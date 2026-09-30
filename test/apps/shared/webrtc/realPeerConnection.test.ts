@@ -167,6 +167,36 @@ describe("selectedConnectionType", () => {
         expect(await typeOf(report("srflx", "relay"))).toBe("turn");
     });
 
+    describe("TCP-relayed TURN", () => {
+        const withProtocol = (relayProtocol: string | undefined) => [
+            { id: "t", type: "transport", selectedCandidatePairId: "p" },
+            { id: "p", type: "candidate-pair", localCandidateId: "l", remoteCandidateId: "r" },
+            { id: "l", type: "local-candidate", candidateType: "relay", relayProtocol },
+            { id: "r", type: "remote-candidate", candidateType: "host" },
+        ];
+
+        it("is turn-tcp when the local relay candidate's own protocol is tcp or tls", async () => {
+            expect(await typeOf(withProtocol("tcp"))).toBe("turn-tcp");
+            expect(await typeOf(withProtocol("tls"))).toBe("turn-tcp");
+        });
+
+        it("is plain turn for a udp relay, or when the protocol isn't reported at all", async () => {
+            expect(await typeOf(withProtocol("udp"))).toBe("turn");
+            expect(await typeOf(withProtocol(undefined))).toBe("turn");
+        });
+
+        it("is plain turn when only the remote end is relayed - there's no visibility into its own protocol", async () => {
+            expect(
+                await typeOf([
+                    { id: "t", type: "transport", selectedCandidatePairId: "p" },
+                    { id: "p", type: "candidate-pair", localCandidateId: "l", remoteCandidateId: "r" },
+                    { id: "l", type: "local-candidate", candidateType: "host" },
+                    { id: "r", type: "remote-candidate", candidateType: "relay", relayProtocol: "tcp" },
+                ]),
+            ).toBe("turn");
+        });
+    });
+
     it("falls back to the nominated, succeeded candidate pair for a browser with no selectedCandidatePairId", async () => {
         expect(
             await typeOf([

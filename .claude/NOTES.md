@@ -853,3 +853,31 @@ Two more things JP reported once connections were working.
   is confirming whether it still happens on a **direct** (non-relay) connection - if so, this fade (relay-only)
   isn't it, and the search moves to the native WebRTC audio path instead, which this plugin's own code has no
   influence over.
+
+## 2026-10-01 (later): tell a TCP-relayed TURN connection apart from a UDP one
+
+JP reported a phone and a remote PC, both over the coturn relay, both hearing "significant gaps... didn't seem
+like packet loss, more like high latency." For a TURN-relayed connection this plugin's own code has no role at
+all in audio encode/decode/jitter - that's entirely the browser's native WebRTC engine (unlike the WebSocket
+relay tier, where `AudioSender`/`AudioPlayer` are this plugin's own code and were the earlier fixes' target) - so
+there is no equivalent JS-level fix available here.
+
+What the symptom does match precisely: TCP-relayed TURN (`?transport=tcp`, or `turns:` - TLS is TCP-based too).
+UDP just drops a lost packet (a click); TCP retransmits it and, being ordered, blocks everything queued behind it
+until that arrives - a stall, not a glitch. `withTcpFallback()` (`IceServerUtils.ts`) already offers both
+transports so a network that blocks UDP outright can still reach the TURN server at all - necessary (the
+alternative is not connecting), but it means a participant on such a network gets exactly this degraded
+experience, silently.
+
+Added the one thing that IS this plugin's own code: telling the two apart and surfacing it, so a "Relayed (TCP)"
+badge (vs. the existing plain "Relayed") distinguishes this specific case going forward, rather than both reading
+identically. `selectedConnectionType()` (`realPeerConnection.ts`) now reads the selected local candidate's own
+`relayProtocol` (`RTCIceCandidateStats`, standard and already available via `getStats()`) when it's a relay
+candidate - `"tcp"`/`"tls"` reports the new `turn-tcp` `MediaTransport`, `"udp"` (or unreported) stays plain
+`turn`. Only the *local* candidate's protocol is visible this way - a relay on the remote end alone (no
+visibility into how *they* reached their own TURN allocation) still reads as plain `turn`, same as before.
+
+Not a fix for the latency itself - there isn't one available at this layer - but real, scoped, tested, and it
+turns "can you fix it?" into something actionable: if the badge shows `turn-tcp` for a participant, the actual
+next step is checking the coturn deployment's UDP reachability (firewall/security group rules, whether its UDP
+listener is actually up) - infrastructure, not this repo.

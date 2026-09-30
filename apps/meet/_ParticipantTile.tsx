@@ -23,6 +23,12 @@ import { MicOffIcon } from "./_icons.js";
  * (which needs no comment). Text rather than only an icon, so the reason a picture is degraded is never a guess. */
 const TRANSPORT_BADGES: Partial<Record<MediaTransport, { label: string; title: string }>> = {
     turn: { label: "Relayed", title: "Connected through the relay server, because a direct connection was not possible." },
+    "turn-tcp": {
+        label: "Relayed (TCP)",
+        title:
+            "Connected through the relay server over TCP, because this network blocks the relay's usual UDP connection too. " +
+            "Audio or video may pause briefly under network strain rather than just glitching - a property of TCP, not a dropped connection.",
+    },
     websocket: {
         label: "Server relay",
         title: "Sent through the server as a last resort, because no other connection was possible. Video is lower quality and sound may lag.",

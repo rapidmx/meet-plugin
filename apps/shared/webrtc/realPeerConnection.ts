@@ -10,12 +10,20 @@
 import type { RTCPeerConnectionFactory, RTCPeerConnectionLike } from "./types.js";
 
 /**
- * Whether the pair ICE settled on goes through a TURN relay. The selected pair is found the standard way (the
- * `transport` report's `selectedCandidatePairId`) and, for a browser that does not fill that in, as the succeeded and
- * nominated `candidate-pair`. A relay on *either* end means the media passes through a TURN server, so it counts as
- * `"turn"`; `"unknown"` when no pair is reported at all.
+ * Whether the pair ICE settled on goes through a TURN relay, and - when it's our own end that's relayed - whether
+ * that relay is TCP (`turn-tcp`, meaning `turns:` too, TLS being TCP-based as well) rather than UDP. The selected
+ * pair is found the standard way (the `transport` report's `selectedCandidatePairId`) and, for a browser that does
+ * not fill that in, as the succeeded and nominated `candidate-pair`. A relay on *either* end means the media
+ * passes through a TURN server, so it counts as at least `"turn"`; `"unknown"` when no pair is reported at all.
+ *
+ * The TCP/UDP distinction matters because they fail very differently under loss: UDP just drops the lost packet
+ * (a click), while TCP retransmits it and blocks everything queued behind it until that arrives (a stall) - exactly
+ * the "gaps that feel like latency, not packet loss" a participant on a TCP-relayed connection reports. `relayProtocol`
+ * (`"udp"`/`"tcp"`/`"tls"`) is only ever reported on a *local* relay candidate - there's no equivalent visibility into
+ * how the *remote* peer reaches its own TURN allocation, so a relay on the remote end alone is reported as plain
+ * `"turn"` rather than guessed at.
  */
-export async function selectedConnectionType(pc: Pick<RTCPeerConnection, "getStats">): Promise<"p2p" | "turn" | "unknown"> {
+export async function selectedConnectionType(pc: Pick<RTCPeerConnection, "getStats">): Promise<"p2p" | "turn" | "turn-tcp" | "unknown"> {
     const reports = new Map<string, Record<string, unknown>>();
     (await pc.getStats()).forEach((report: Record<string, unknown>) => reports.set(String(report.id), report));
     const transport = [...reports.values()].find((report) => report.type === "transport" && report.selectedCandidatePairId);
@@ -27,7 +35,11 @@ export async function selectedConnectionType(pc: Pick<RTCPeerConnection, "getSta
     }
     const local = reports.get(String(pair.localCandidateId));
     const remote = reports.get(String(pair.remoteCandidateId));
-    return local?.candidateType === "relay" || remote?.candidateType === "relay" ? "turn" : "p2p";
+    if (local?.candidateType !== "relay" && remote?.candidateType !== "relay") {
+        return "p2p";
+    }
+    const relayProtocol = local?.candidateType === "relay" ? String(local.relayProtocol ?? "") : "";
+    return relayProtocol === "tcp" || relayProtocol === "tls" ? "turn-tcp" : "turn";
 }
 
 export const createBrowserPeerConnection: RTCPeerConnectionFactory = (config) => {

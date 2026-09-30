@@ -484,9 +484,10 @@ export class MeshConnectionManager {
         }
     }
 
-    /** Records whether a connected pair is direct or relayed through TURN, from the candidate pair ICE selected. */
+    /** Records whether a connected pair is direct, relayed through TURN, or relayed through TURN over TCP (see
+     * `MediaTransport`'s doc comment), from the candidate pair ICE selected. */
     private async detectTransport(peer: PeerState): Promise<void> {
-        let type: "p2p" | "turn" | "unknown";
+        let type: "p2p" | "turn" | "turn-tcp" | "unknown";
         try {
             type = await peer.pc.connectionType();
         } catch {
@@ -494,7 +495,7 @@ export class MeshConnectionManager {
         }
         // The pair may have moved on (fallen back, left, or dropped again) while the stats were being read.
         if (peer.transport !== "websocket" && this.peers.get(peer.uid) === peer && peer.pc.connectionState === "connected") {
-            this.setTransport(peer, type === "turn" ? "turn" : "p2p");
+            this.setTransport(peer, type === "turn" || type === "turn-tcp" ? type : "p2p");
         }
     }
 
