@@ -61,7 +61,7 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
      * meeting", since a kicked participant's server-side channel grant has just been revoked and a rejoin attempt
      * would only fail. */
     const [endedReason, setEndedReason] = useState<string | undefined>(undefined);
-    const media = useLocalMedia({ effectsAssetsUrl: joinResult?.effectsAssetsUrl });
+    const media = useLocalMedia({ effectsAssetsUrl: joinResult?.effectsAssetsUrl, forceMuteOnJoin: joinResult?.meeting.forceMuteOnJoin });
     const { release } = media;
 
     React.useEffect(() => {
@@ -116,6 +116,7 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
                 iceServers={joinResult.iceServers}
                 relayEnabled={joinResult.relayEnabled}
                 hostUid={joinResult.meeting.hostUid}
+                initialForceMuteOnJoin={!!joinResult.meeting.forceMuteOnJoin}
                 media={media}
                 onLeave={handleLeave}
             />

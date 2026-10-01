@@ -136,14 +136,14 @@ function saved(): Record<string, unknown> {
 }
 
 /** The hook with working fake devices, before any access is requested. */
-function setup(options?: { effectsAssetsUrl?: string }) {
+function setup(options?: { effectsAssetsUrl?: string; forceMuteOnJoin?: boolean }) {
     const requests: MediaStreamConstraints[] = [];
     installMediaDevices(fakeMediaDevices({ devices: DEVICES, userMediaStream: streamsFor(requests) }));
     const hook = renderHook(() => useLocalMedia(options));
     return { ...hook, requests };
 }
 
-async function setupLive(options?: { effectsAssetsUrl?: string }) {
+async function setupLive(options?: { effectsAssetsUrl?: string; forceMuteOnJoin?: boolean }) {
     const hook = setup(options);
     await act(() => hook.result.current.requestAccess());
     return hook;
@@ -668,6 +668,25 @@ describe("useLocalMedia - remembered on and off", () => {
         await act(() => result.current.toggleMic());
         act(() => result.current.release());
         expect(saved()).toMatchObject({ micEnabled: false, cameraEnabled: true });
+    });
+
+    it("joins muted when forceMuteOnJoin is set, even though the microphone was remembered as on", async () => {
+        seed({ micEnabled: true });
+        const { result } = await setupLive({ forceMuteOnJoin: true });
+        expect(result.current.micOn).toBe(false);
+        expect(result.current.audioTrack!.enabled).toBe(false);
+    });
+
+    it("does not overwrite the remembered 'on' preference just because forceMuteOnJoin forced this call muted", async () => {
+        seed({ micEnabled: true });
+        const { result } = await setupLive({ forceMuteOnJoin: true });
+        expect(result.current.micOn).toBe(false);
+        expect(saved().micEnabled).toBe(true);
+    });
+
+    it("changes nothing when forceMuteOnJoin is false", async () => {
+        const { result } = await setupLive({ forceMuteOnJoin: false });
+        expect(result.current.micOn).toBe(true);
     });
 });
 

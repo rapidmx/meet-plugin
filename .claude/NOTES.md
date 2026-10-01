@@ -1044,3 +1044,33 @@ retry is pointless), not because reloading the link itself is blocked.
 Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
 clean at 100%/98.61%/100%/100% (1398 tests). This closes Phase B's mute/kick pair; B3 (force-mute-on-join) is next,
 then B4 (password to join) and B5 (waiting room), per the approved plan's sequencing.
+
+## 2026-09-30 (Phase B3 of the 7-item batch): force-mute-on-join
+
+`VideoMeeting.forceMuteOnJoin?: boolean` - the standard 5-file field pattern this codebase already has a dozen
+precedents for (`types.ts`, both `VideoMeetingMongo`/`VideoMeetingSQL` + their constructor's `"x" in other` copy
+line), settable both at `create()` time and via `update()` (new to this route: every prior field `update()` could
+change was already settable at creation, but a brand-new meeting has no participants to retroactively affect, so
+there was no reason this one couldn't be create()-time too). `join()` returns it on `PublicVideoMeeting`, omitted
+(not sent as a literal `false`) when unset - the same "absent reads as off" convention `relayEnabled` already
+established, so an older client/server pairing degrades safely either direction.
+
+**Client-side, this is deliberately a one-time starting condition, not a standing restriction**: `useLocalMedia()`
+gained a `forceMuteOnJoin` option, consulted only inside `ensurePrefs()` (the lazy, once-per-mount read of the
+remembered mic/camera/filters preferences) - when set, it forces `micEnabled` to `false` for *this* call alongside
+whatever was remembered, but critically never calls `remember()` with it, so a participant's own cross-meeting
+preference is untouched; nothing stops them unmuting the instant they join, same as every other mute in this app.
+`[token].tsx` threads `joinResult.meeting.forceMuteOnJoin` into both `useLocalMedia()` (so the lobby preview and
+the call both start muted together) and `CallView`'s new `initialForceMuteOnJoin` prop (the host toggle's starting
+value - see below).
+
+**Host toggle**: a checkbox in the participants drawer's header, host-only (reuses `isSelfHost` from B1/B2),
+labeled "Mute new participants on join" to be explicit that it's forward-looking - muting someone already in the
+call is what each row's own B2 "Mute" button is for, a semantically different action this toggle deliberately
+doesn't also perform. Applied optimistically (`handleToggleForceMuteOnJoin()`) and reverted if the
+`PUT /video-meetings/:id` save fails, so the drawer never keeps showing a setting that didn't actually persist -
+unlike kick's "fire and forget, nothing useful to recover" posture, a setting toggle has an obvious, cheap
+correctness fix available (flip it back), so this one takes it.
+
+Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
+clean at 100%/98.62%/100%/100% (1419 tests). B4 (password to join) is next, then B5 (waiting room).

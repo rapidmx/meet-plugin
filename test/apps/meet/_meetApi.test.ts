@@ -5,7 +5,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { jsonResponse, mockFetch } from "../testUtils.js";
-import { joinMeeting, kickParticipant } from "../../../apps/meet/_meetApi.js";
+import { joinMeeting, kickParticipant, setForceMuteOnJoin } from "../../../apps/meet/_meetApi.js";
 
 afterEach(() => {
     vi.unstubAllGlobals();
@@ -71,5 +71,25 @@ describe("kickParticipant", () => {
     it("rejects with an ApiRequestError on a 403 (not the host)", async () => {
         mockFetch(() => jsonResponse(403, { message: "Permission denied." }));
         await expect(kickParticipant("m1", "guest:abc")).rejects.toMatchObject({ status: 403 });
+    });
+});
+
+describe("setForceMuteOnJoin", () => {
+    it("PUTs the meeting's own endpoint with the new setting", async () => {
+        const fetchMock = mockFetch((url, init) => {
+            expect(url).toBe("/api/mail/video-meetings/m1");
+            expect(init?.method).toBe("PUT");
+            expect(JSON.parse(init?.body as string)).toEqual({ forceMuteOnJoin: true });
+            return jsonResponse(200, { uid: "m1", forceMuteOnJoin: true });
+        });
+
+        await setForceMuteOnJoin("m1", true);
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects with an ApiRequestError on a 403 (not the host)", async () => {
+        mockFetch(() => jsonResponse(403, { message: "Permission denied." }));
+        await expect(setForceMuteOnJoin("m1", false)).rejects.toMatchObject({ status: 403 });
     });
 });

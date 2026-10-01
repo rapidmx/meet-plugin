@@ -19,6 +19,7 @@ describe("SQL model default construction", () => {
         expect(obj.publicSlug).toBeUndefined();
         expect(obj.organizerSlug).toBeUndefined();
         expect(obj.status).toBe(VideoMeetingStatus.SCHEDULED);
+        expect(obj.forceMuteOnJoin).toBeUndefined();
         expect(obj.startTime).toBeUndefined();
         expect(obj.endTime).toBeUndefined();
     });
@@ -34,6 +35,7 @@ describe("SQL model default construction", () => {
             publicSlug: "abc12345xyz",
             organizerSlug: "zyx54321cba",
             status: VideoMeetingStatus.ACTIVE,
+            forceMuteOnJoin: true,
             startTime,
             endTime,
         });
@@ -45,6 +47,7 @@ describe("SQL model default construction", () => {
         expect(obj.publicSlug).toBe("abc12345xyz");
         expect(obj.organizerSlug).toBe("zyx54321cba");
         expect(obj.status).toBe(VideoMeetingStatus.ACTIVE);
+        expect(obj.forceMuteOnJoin).toBe(true);
         expect(obj.startTime).toBe(startTime);
         expect(obj.endTime).toBe(endTime);
     });
@@ -72,6 +75,13 @@ describe("SQL model default construction", () => {
         const cleared = new VideoMeetingSQL({ calendarEventUid: null as any, publicSlug: undefined });
         expect(cleared.calendarEventUid).toBeNull();
         expect(cleared.publicSlug).toBeUndefined();
+    });
+
+    it("VideoMeetingSQL honors an explicit clear of forceMuteOnJoin.", () => {
+        const set = new VideoMeetingSQL({ forceMuteOnJoin: true });
+        expect(set.forceMuteOnJoin).toBe(true);
+        const cleared = new VideoMeetingSQL({ forceMuteOnJoin: undefined });
+        expect(cleared.forceMuteOnJoin).toBeUndefined();
     });
 
     it("VideoMeetingInviteeSQL falls back to class defaults when constructed with no data.", () => {

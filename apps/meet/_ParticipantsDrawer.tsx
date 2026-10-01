@@ -16,6 +16,10 @@
  * button (hidden once that participant is already muted - there is no useful "unmute someone else" action to
  * offer) and a "Remove" button (a native `confirm()` first, since removal can't be undone by the participant the
  * way a mute request can) - never on the local participant's own row, and never shown to anyone but the host.
+ *
+ * The header also gets a host-only "Mute on join" checkbox (`forceMuteOnJoin`/`onToggleForceMuteOnJoin`) - a
+ * setting for whoever joins *next*, not an action on anyone already here (muting someone already in the call is
+ * what each row's own "Mute" button is for).
  */
 import React, { useEffect } from "react";
 import type { MeshParticipant } from "../shared/webrtc/types.js";
@@ -35,6 +39,9 @@ export interface ParticipantsDrawerProps {
     /** Removes the given participant's `uid` - see `_CallView.tsx`'s `handleKickParticipant()` for what this
      * actually does (the cooperative signal plus the enforced server-side revoke). */
     onKick: (uid: string) => void;
+    /** Whether a newly joining participant currently starts muted - the header checkbox's own state, host-only. */
+    forceMuteOnJoin: boolean;
+    onToggleForceMuteOnJoin: () => void;
     onClose: () => void;
 }
 
@@ -114,7 +121,19 @@ function Row({
     );
 }
 
-export default function ParticipantsDrawer({ selfName, micOn, handRaised, participants, isSelfHost, isParticipantHost, onMute, onKick, onClose }: ParticipantsDrawerProps) {
+export default function ParticipantsDrawer({
+    selfName,
+    micOn,
+    handRaised,
+    participants,
+    isSelfHost,
+    isParticipantHost,
+    onMute,
+    onKick,
+    forceMuteOnJoin,
+    onToggleForceMuteOnJoin,
+    onClose,
+}: ParticipantsDrawerProps) {
     useEffect(() => {
         const onKeyDown = (event: KeyboardEvent) => {
             if (event.key === "Escape") {
@@ -145,6 +164,12 @@ export default function ParticipantsDrawer({ selfName, micOn, handRaised, partic
                         ✕
                     </button>
                 </div>
+                {isSelfHost && (
+                    <label className="flex items-center gap-2 px-3 py-2 border-b border-white/10 text-sm">
+                        <input type="checkbox" checked={forceMuteOnJoin} onChange={onToggleForceMuteOnJoin} className="w-4 h-4" />
+                        Mute new participants on join
+                    </label>
+                )}
                 <ul className="flex-1 min-h-0 overflow-y-auto p-2 text-sm">
                     <Row name={selfName} isSelf isHost={isSelfHost} micMuted={!micOn} handRaised={handRaised} />
                     {participants.map((p) => (

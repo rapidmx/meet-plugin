@@ -107,6 +107,8 @@ export interface CreateVideoMeetingBody {
     endTime?: string;
     /** Required (and non-empty), only when `visibility` is `"private"`. */
     invitees?: { email?: string; displayName?: string }[];
+    /** See `VideoMeeting.forceMuteOnJoin`. */
+    forceMuteOnJoin?: boolean;
 }
 
 /** One invitee of a newly created private meeting, as returned by `create()` - everything a caller needs to build
@@ -155,6 +157,9 @@ export interface PublicVideoMeeting {
      * longer exists or (in a deployment shape where that's possible) has no single owning account; a client then
      * simply shows no host controls, rather than guessing. */
     hostUid?: string;
+    /** See `VideoMeeting.forceMuteOnJoin`. Omitted (reads as `false`) rather than sent as a literal `false`, same
+     * convention as `VideoMeetingJoinResult.relayEnabled`. */
+    forceMuteOnJoin?: boolean;
 }
 
 /**
@@ -554,6 +559,9 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
                 }
             }
         }
+        if (body.forceMuteOnJoin !== undefined && typeof body.forceMuteOnJoin !== "boolean") {
+            throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "'forceMuteOnJoin' must be a boolean.");
+        }
         return { mailboxUid: body.mailboxUid, visibility: body.visibility };
     }
 
@@ -606,6 +614,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             endTime,
             publicSlug,
             organizerSlug,
+            forceMuteOnJoin: body.forceMuteOnJoin,
         });
         const meeting: VM = await this.meetingRepo!.create(instance, {
             user: strippedUser,
@@ -833,15 +842,15 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         return this.withJoinUrls(meeting);
     }
 
-    @Summary("Updates a video meeting's title, or cancels it.")
+    @Summary("Updates a video meeting's title, force-mute-on-join setting, or cancels it.")
     @Description(
-        "Deliberately minimal for Phase 1: only 'title' and cancellation ('status': 'cancelled') may be changed. " +
-            "Requires UPDATE on the meeting's owning mailbox.",
+        "Deliberately minimal for Phase 1: only 'title', 'forceMuteOnJoin' and cancellation ('status': " +
+            "'cancelled') may be changed. Requires UPDATE on the meeting's owning mailbox.",
     )
     @Put("/:id")
     public async update(
         @Param("id") id: string,
-        body: { title?: string; status?: string } | undefined,
+        body: { title?: string; status?: string; forceMuteOnJoin?: boolean } | undefined,
         @AuthUser user?: JWTUser,
     ): Promise<VM> {
         await this.init();
@@ -859,8 +868,14 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             }
             patch.status = VideoMeetingStatus.CANCELLED;
         }
-        if (patch.title === undefined && patch.status === undefined) {
-            throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "Nothing to update: supply 'title' and/or 'status'.");
+        if (body?.forceMuteOnJoin !== undefined) {
+            if (typeof body.forceMuteOnJoin !== "boolean") {
+                throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "'forceMuteOnJoin' must be a boolean.");
+            }
+            patch.forceMuteOnJoin = body.forceMuteOnJoin;
+        }
+        if (patch.title === undefined && patch.status === undefined && patch.forceMuteOnJoin === undefined) {
+            throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "Nothing to update: supply 'title', 'forceMuteOnJoin' and/or 'status'.");
         }
         const strippedUser: JWTUser | undefined = stripTrustedRoles(user, this.trustedRoles);
         const updated: VM = await this.meetingRepo!.update(patch as any, meeting, { user: strippedUser, ignoreACL: true });
@@ -1122,6 +1137,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             status: meeting.status,
             hostDisplayName,
             hostUid,
+            forceMuteOnJoin: meeting.forceMuteOnJoin || undefined,
         };
         const iceServers: IceServerConfig[] = buildIceServers({
             url: this.turnUrl,

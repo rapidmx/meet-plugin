@@ -77,6 +77,11 @@ export class VideoMeetingSQL extends BaseEntity implements VideoMeeting {
     public status: VideoMeetingStatus = VideoMeetingStatus.SCHEDULED;
 
     @Column({ nullable: true })
+    @Description("When true, a joining participant starts with their microphone muted.")
+    @Nullable
+    public forceMuteOnJoin?: boolean;
+
+    @Column({ nullable: true })
     @Description("Informational only: not used for any availability or conflict checking.")
     @Nullable
     public startTime?: Date;
@@ -97,6 +102,7 @@ export class VideoMeetingSQL extends BaseEntity implements VideoMeeting {
             this.publicSlug = "publicSlug" in other ? other.publicSlug : this.publicSlug;
             this.organizerSlug = "organizerSlug" in other ? other.organizerSlug : this.organizerSlug;
             this.status = other.status !== undefined ? other.status : this.status;
+            this.forceMuteOnJoin = "forceMuteOnJoin" in other ? other.forceMuteOnJoin : this.forceMuteOnJoin;
             this.startTime = "startTime" in other ? other.startTime : this.startTime;
             this.endTime = "endTime" in other ? other.endTime : this.endTime;
         }

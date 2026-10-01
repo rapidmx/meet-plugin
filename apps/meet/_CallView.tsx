@@ -47,7 +47,7 @@ import type { MeshParticipant, RelayTransportLike } from "../shared/webrtc/types
 import { createRelayTransport } from "../shared/relay/RelayTransport.js";
 import { GuestSignalingClient } from "../shared/push/GuestSignalingClient.js";
 import CallControls, { type CallViewMode } from "./_CallControls.js";
-import { kickParticipant } from "./_meetApi.js";
+import { kickParticipant, setForceMuteOnJoin as apiSetForceMuteOnJoin } from "./_meetApi.js";
 import ParticipantTile from "./_ParticipantTile.js";
 import ParticipantsDrawer from "./_ParticipantsDrawer.js";
 
@@ -69,6 +69,11 @@ export interface CallViewProps {
      * this is a client-side-only check, not a server-enforced one for every moderation action). Absent when the
      * server couldn't resolve one, in which case nobody sees host controls. */
     hostUid?: string;
+    /** `PublicVideoMeeting.forceMuteOnJoin` as of this call's own `join()` - the starting value for the host's
+     * toggle in the participants drawer, which this view then owns and keeps current itself (see
+     * `handleToggleForceMuteOnJoin()`). Does not update if changed elsewhere while this view is mounted - there is
+     * no signal for that today, matching every other meeting-settings field's lack of live sync. */
+    initialForceMuteOnJoin?: boolean;
     /** The camera and microphone, owned by the page (`[token].tsx`) - the lobby's tracks carried into the call. */
     media: LocalMedia;
     /** Called once the participant leaves, for any reason. `reason` is set only when the call ended without the
@@ -125,7 +130,19 @@ export function accountUidOf(peerUid: string): string {
     return i === -1 ? peerUid : peerUid.slice(0, i);
 }
 
-export default function CallView({ channel, token, selfUid, selfName, meetingTitle, iceServers, relayEnabled, hostUid, media, onLeave }: CallViewProps) {
+export default function CallView({
+    channel,
+    token,
+    selfUid,
+    selfName,
+    meetingTitle,
+    iceServers,
+    relayEnabled,
+    hostUid,
+    initialForceMuteOnJoin,
+    media,
+    onLeave,
+}: CallViewProps) {
     const [peerId] = useState(() => newPeerId(selfUid));
     const [connectError, setConnectError] = useState<string | null>(null);
     const [participants, setParticipants] = useState<MeshParticipant[]>([]);
@@ -144,6 +161,7 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
     const [audioNonce, setAudioNonce] = useState(0);
     const [signalingReady, setSignalingReady] = useState(false);
     const [drawerOpen, setDrawerOpen] = useState(false);
+    const [forceMuteOnJoin, setForceMuteOnJoinState] = useState(!!initialForceMuteOnJoin);
 
     const managerRef = useRef<MeshConnectionManager | null>(null);
     /** The raw capture from `getDisplayMedia()` - only ever used to stop it (releasing the OS's own share
@@ -394,6 +412,16 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
         kickParticipant(channel, accountUidOf(peerUid)).catch(() => undefined);
     }
 
+    /** Flips the host's "mute new participants on join" setting: applied optimistically (the toggle itself is the
+     * only feedback this small a control needs) and reverted if the save fails, so the drawer never keeps claiming
+     * a setting that isn't actually persisted. Takes effect for whoever joins next - never retroactive, see
+     * `setForceMuteOnJoin()`'s own doc comment. */
+    function handleToggleForceMuteOnJoin() {
+        const next = !forceMuteOnJoin;
+        setForceMuteOnJoinState(next);
+        apiSetForceMuteOnJoin(channel, next).catch(() => setForceMuteOnJoinState(!next));
+    }
+
     function handleAudioBlocked() {
         setAudioBlocked(true);
     }
@@ -601,6 +629,8 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
                     isParticipantHost={isParticipantHost}
                     onMute={handleMuteParticipant}
                     onKick={handleKickParticipant}
+                    forceMuteOnJoin={forceMuteOnJoin}
+                    onToggleForceMuteOnJoin={handleToggleForceMuteOnJoin}
                     onClose={() => setDrawerOpen(false)}
                 />
             )}

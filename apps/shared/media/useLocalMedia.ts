@@ -138,6 +138,10 @@ function combineErrors(audio: MediaAccessError | null, video: MediaAccessError |
 export interface LocalMediaOptions {
     /** Where the filters' models are hosted, when not on the default CDN - see `filters/mlModels.ts`. */
     effectsAssetsUrl?: string;
+    /** The host's `VideoMeeting.forceMuteOnJoin` setting - when `true`, this call's microphone starts muted
+     * regardless of what was remembered from a previous call, overriding (but never overwriting) that preference -
+     * see `ensurePrefs()`. `undefined`/`false` changes nothing. */
+    forceMuteOnJoin?: boolean;
 }
 
 /** `base`, asking for `preferredId` (the device used last time) when there is one - as a preference, not a demand. */
@@ -145,7 +149,7 @@ function preferring(base: MediaTrackConstraints, preferredId?: string): MediaTra
     return preferredId ? { ...base, deviceId: { ideal: preferredId } } : base;
 }
 
-export function useLocalMedia({ effectsAssetsUrl }: LocalMediaOptions = {}): LocalMedia {
+export function useLocalMedia({ effectsAssetsUrl, forceMuteOnJoin }: LocalMediaOptions = {}): LocalMedia {
     const [supported, setSupported] = useState(true);
     const [requesting, setRequesting] = useState(false);
     const [error, setError] = useState<MediaAccessError | null>(null);
@@ -186,7 +190,7 @@ export function useLocalMedia({ effectsAssetsUrl }: LocalMediaOptions = {}): Loc
         }
         const prefs = loadPreferences();
         prefsRef.current = prefs;
-        if (prefs.micEnabled === false) {
+        if (prefs.micEnabled === false || forceMuteOnJoin) {
             micEnabledRef.current = false;
             setMicEnabled(false);
         }
@@ -204,7 +208,7 @@ export function useLocalMedia({ effectsAssetsUrl }: LocalMediaOptions = {}): Loc
             );
         }
         return prefs;
-    }, [applyBackground, applyFilters]);
+    }, [applyBackground, applyFilters, forceMuteOnJoin]);
 
     /** Saves a change to the remembered settings. */
     const remember = useCallback(

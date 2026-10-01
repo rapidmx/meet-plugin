@@ -161,6 +161,30 @@ describe("Route:VideoMeetingSQL Tests", () => {
             expect(new Date(result.body.meeting.endTime).toISOString()).toBe(end);
         });
 
+        it("Persists forceMuteOnJoin when creating with it set, and returns it to the owner on join().", async () => {
+            const result = await authed(ownerToken)
+                .post(baseUrl)
+                .send({ mailboxUid: mailbox.uid, title: "x", visibility: "public", forceMuteOnJoin: true });
+            expect(result.status).toBe(200);
+            expect(result.body.meeting.forceMuteOnJoin).toBe(true);
+
+            const joined = await request(server.getApplication()).get(`${baseUrl}/join/${result.body.meeting.publicSlug}`);
+            expect(joined.body.meeting.forceMuteOnJoin).toBe(true);
+        });
+
+        it("Omits forceMuteOnJoin from join() when it was never set.", async () => {
+            const result = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const joined = await request(server.getApplication()).get(`${baseUrl}/join/${result.body.meeting.publicSlug}`);
+            expect(joined.body.meeting.forceMuteOnJoin).toBeUndefined();
+        });
+
+        it("Rejects a non-boolean forceMuteOnJoin (400).", async () => {
+            const result = await authed(ownerToken)
+                .post(baseUrl)
+                .send({ mailboxUid: mailbox.uid, title: "x", visibility: "public", forceMuteOnJoin: "yes" });
+            expect(result.status).toBe(400);
+        });
+
         it("Omits joinUrl/publicJoinUrl when no public_url is configured.", async () => {
             const route: any = objectFactory.getInstance("routes.VideoMeetingRoute");
             const original = route.publicUrl;
@@ -297,6 +321,25 @@ describe("Route:VideoMeetingSQL Tests", () => {
         it("Returns 404 for an unknown id.", async () => {
             const result = await authed(ownerToken).put(`${baseUrl}/${uuid.v4()}`).send({ title: "x" });
             expect(result.status).toBe(404);
+        });
+
+        it("Sets and clears forceMuteOnJoin.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const uid = created.body.meeting.uid;
+
+            const set = await authed(ownerToken).put(`${baseUrl}/${uid}`).send({ forceMuteOnJoin: true });
+            expect(set.status).toBe(200);
+            expect(set.body.forceMuteOnJoin).toBe(true);
+
+            const cleared = await authed(ownerToken).put(`${baseUrl}/${uid}`).send({ forceMuteOnJoin: false });
+            expect(cleared.status).toBe(200);
+            expect(cleared.body.forceMuteOnJoin).toBe(false);
+        });
+
+        it("Rejects a non-boolean forceMuteOnJoin (400).", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const result = await authed(ownerToken).put(`${baseUrl}/${created.body.meeting.uid}`).send({ forceMuteOnJoin: "yes" });
+            expect(result.status).toBe(400);
         });
     });
 

@@ -33,6 +33,9 @@ export interface PublicVideoMeeting {
      * server can't resolve one (an orphaned mailbox, or a server that predates this field), in which case no host
      * controls are shown to anyone. */
     hostUid?: string;
+    /** When `true`, a joining participant's microphone starts muted - see `useLocalMedia`'s `forceMuteOnJoin`
+     * option, which this is threaded into. Absent reads as `false`. */
+    forceMuteOnJoin?: boolean;
 }
 
 /**
@@ -83,4 +86,15 @@ export function joinMeeting(token: string): Promise<VideoMeetingJoinResult> {
  * its tab-scoped suffix - see `_CallView.tsx`'s `accountUidOf()`), not their tab-scoped peer id. */
 export function kickParticipant(meetingUid: string, uid: string): Promise<void> {
     return apiFetch(`/mail/video-meetings/${encodeURIComponent(meetingUid)}/kick/${encodeURIComponent(uid)}`, { method: "POST" });
+}
+
+/** Sets whether a newly joining participant starts muted (`PublicVideoMeeting.forceMuteOnJoin`) - host only,
+ * enforced the same way as every other owner-side video-meeting update. Takes effect for anyone who joins (or
+ * reloads the join link and joins again) after this call resolves; it does not retroactively mute anyone already
+ * in the call - the host's own "Mute" button (see `kickParticipant()`) is the tool for that. */
+export function setForceMuteOnJoin(meetingUid: string, forceMuteOnJoin: boolean): Promise<void> {
+    return apiFetch(`/mail/video-meetings/${encodeURIComponent(meetingUid)}`, {
+        method: "PUT",
+        body: JSON.stringify({ forceMuteOnJoin }),
+    });
 }

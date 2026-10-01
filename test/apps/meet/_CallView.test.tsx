@@ -102,8 +102,11 @@ vi.mock("../../../apps/shared/media/deviceMedia.js", async (importOriginal) => {
 });
 vi.mock("../../../apps/shared/media/chime.js", () => ({ playRaisedHandChime: chimeMock }));
 
-const kickParticipantMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
-vi.mock("../../../apps/meet/_meetApi.js", () => ({ kickParticipant: kickParticipantMock }));
+const { kickParticipantMock, setForceMuteOnJoinMock } = vi.hoisted(() => ({
+    kickParticipantMock: vi.fn().mockResolvedValue(undefined),
+    setForceMuteOnJoinMock: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("../../../apps/meet/_meetApi.js", () => ({ kickParticipant: kickParticipantMock, setForceMuteOnJoin: setForceMuteOnJoinMock }));
 
 import CallView, { accountUidOf, computeMainUid, newPeerId } from "../../../apps/meet/_CallView.js";
 
@@ -982,5 +985,45 @@ describe("CallView - host mute/kick controls", () => {
         const drawer = screen.getByRole("dialog", { name: "Participants" });
         expect(within(drawer).queryByRole("button", { name: /^Mute / })).toBeNull();
         expect(within(drawer).queryByRole("button", { name: /^Remove / })).toBeNull();
+    });
+});
+
+describe("CallView - force-mute-on-join toggle", () => {
+    it("shows the checkbox only to the host, reflecting the initial setting", async () => {
+        await connected({ selfUid: "local-me", hostUid: "local-me", initialForceMuteOnJoin: true });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        expect(screen.getByRole("checkbox", { name: "Mute new participants on join" })).toBeChecked();
+    });
+
+    it("hides the checkbox from a non-host", async () => {
+        await connected();
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        expect(screen.queryByRole("checkbox", { name: "Mute new participants on join" })).toBeNull();
+    });
+
+    it("toggles optimistically and persists the new value", async () => {
+        await connected({ selfUid: "local-me", hostUid: "local-me" });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        const checkbox = screen.getByRole("checkbox", { name: "Mute new participants on join" });
+        expect(checkbox).not.toBeChecked();
+
+        fireEvent.click(checkbox);
+        expect(checkbox).toBeChecked();
+        expect(setForceMuteOnJoinMock).toHaveBeenCalledWith("meeting-1", true);
+
+        fireEvent.click(checkbox);
+        expect(checkbox).not.toBeChecked();
+        expect(setForceMuteOnJoinMock).toHaveBeenCalledWith("meeting-1", false);
+    });
+
+    it("reverts the checkbox when persisting the change fails", async () => {
+        setForceMuteOnJoinMock.mockRejectedValueOnce(new Error("network error"));
+        await connected({ selfUid: "local-me", hostUid: "local-me" });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        const checkbox = screen.getByRole("checkbox", { name: "Mute new participants on join" });
+
+        fireEvent.click(checkbox);
+        expect(checkbox).toBeChecked();
+        await waitFor(() => expect(checkbox).not.toBeChecked());
     });
 });

@@ -109,6 +109,13 @@ export interface VideoMeeting extends BaseEntity {
 
     status: VideoMeetingStatus;
 
+    /** When `true`, a participant joining this meeting starts with their microphone muted, overriding (never
+     * overwriting) whatever they personally remembered from an earlier call - see `useLocalMedia`'s
+     * `forceMuteOnJoin` option. A host-set default, not a permission: nothing stops a participant from unmuting
+     * themselves immediately after joining. `undefined`/`false` changes nothing (the ordinary remembered-preference
+     * behavior). */
+    forceMuteOnJoin?: boolean;
+
     /** Informational only in Phase 1 - not used for any availability or conflict checking (a video meeting has no
      * concept of "busy" the way a `Booking` does). */
     startTime?: Date;
