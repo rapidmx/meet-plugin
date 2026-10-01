@@ -1241,3 +1241,15 @@ only the panel's own visual position moved, not where it sits in the tree.
 
 Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
 clean at 100%/98.57%/100%/100% (1570 tests).
+
+## 2026-09-30 (small follow-up, same day): talking-stick button gets a baton icon
+
+The host's navbar toggle read "Talking stick"/"End talking stick" as plain text - swapped for a new `BatonIcon`
+(`_icons.tsx`: a diagonal rounded bar with a grip-knob circle, hand-drawn rather than a Material path, since there
+isn't one for this), matching every other control button's icon-only shape. Kept the exact same accessible name
+(`aria-label`, not visible text now) so it's still announced the same way and every existing test that queries the
+button by that name needed no changes; added a `title` for a hover tooltip, since there's no label text to glance
+at anymore.
+
+Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
+clean at 100%/98.57%/100%/100% (1570 tests).

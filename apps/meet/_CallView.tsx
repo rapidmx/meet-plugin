@@ -64,6 +64,7 @@ import type { MeshParticipant, RelayTransportLike } from "../shared/webrtc/types
 import { createRelayTransport } from "../shared/relay/RelayTransport.js";
 import { GuestSignalingClient } from "../shared/push/GuestSignalingClient.js";
 import CallControls, { type CallViewMode } from "./_CallControls.js";
+import { BatonIcon } from "./_icons.js";
 import {
     admitParticipant,
     denyParticipant,
@@ -685,11 +686,13 @@ export default function CallView({
                         {isHost && (
                             <button
                                 type="button"
-                                className={`px-3 py-1.5 rounded-full text-sm font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80 ${talkingStickActive ? "bg-[#a8c7fa] text-[#062e6f] hover:bg-[#8ab4f8]" : "bg-[#3c4043] hover:bg-[#4b4f53]"}`}
+                                className={`w-9 h-9 flex items-center justify-center rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80 ${talkingStickActive ? "bg-[#a8c7fa] text-[#062e6f] hover:bg-[#8ab4f8]" : "bg-[#3c4043] hover:bg-[#4b4f53]"}`}
+                                aria-label={talkingStickActive ? "End talking stick" : "Talking stick"}
                                 aria-pressed={talkingStickActive}
+                                title={talkingStickActive ? "End talking stick" : "Start talking stick mode"}
                                 onClick={handleToggleTalkingStick}
                             >
-                                {talkingStickActive ? "End talking stick" : "Talking stick"}
+                                <BatonIcon />
                             </button>
                         )}
                         <button

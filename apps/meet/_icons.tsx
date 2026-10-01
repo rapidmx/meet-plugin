@@ -68,3 +68,15 @@ export const FlipIcon = () => (
 export const DiagnosticsIcon = () => (
     <Icon path="M22 12h-4l-3 9L9 3l-3 9H2v2h5.6l1.4-4.2L13.4 21 17 12h5v-2z" />
 );
+
+/** A talking stick: a rounded shaft with a grip knob at one end, drawn (not a Material path - there isn't one for
+ * this) as a diagonal bar with a circle, rather than reusing `HandIcon`'s emoji-glyph fallback, since this one
+ * needs to light up (`currentColor`) the same way every other control icon here does. */
+export const BatonIcon = () => (
+    <svg viewBox="0 0 24 24" className="w-6 h-6" fill="currentColor" aria-hidden="true" focusable="false">
+        <g transform="rotate(45 12 12)">
+            <rect x="5" y="10.5" width="13" height="3" rx="1.5" />
+            <circle cx="19" cy="12" r="3" />
+        </g>
+    </svg>
+);
