@@ -1163,3 +1163,54 @@ worth telling a guest apart.
 Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
 clean at 100%/98.54%/100%/100% (1553 tests). This closes all seven items from the approved plan
 (A1-A3 additive UI, B1-B5 host identity and moderation) - no further phases remain unless new work is raised.
+
+## 2026-09-30 (new request, outside the seven-item plan): talking-stick mode
+
+JP asked for a "talking stick" - the host activates it from the navbar, holds it themselves at first (everyone
+else muted), raises-hand signals who wants it, and the host hands it to one participant at a time (that
+participant unmuted, everyone else - host included - muted).
+
+**No backend route, no `VideoMeeting` field, at all.** Checked the precedent before building anything: this is
+much closer in shape to `mute-request`/`kicked`/presenter-claim (an ephemeral, in-call runtime state that resets
+every time the call ends, nothing downstream needs to know before or outside the call) than to
+`forceMuteOnJoin`/`waitingRoomEnabled`/password (meeting-level settings that persist and gate joining). Built it
+as a pure peer-to-peer signal: a new `SignalMessage` kind `"talking-stick"` (broadcast, `active`/`holder`),
+`MeshConnectionManager.setTalkingStick()`/`"talking-stick-changed"`, all in `apps/shared/webrtc/`. No new test
+files needed in `test/routes/` or `test/models/` as a result - the whole feature lives in the frontend.
+
+**No collision to resolve, unlike presenter.** `presenter-claim` needs `MeshConnectionManager` to remember the
+current presenter and resolve a race deterministically, because *any* participant may claim it. Talking stick is
+host-exclusive by convention (same trust level as `mute-request`/`kicked` - nothing on the wire checks the sender
+actually is the host), so there is only ever one legitimate sender at a time; the manager carries no state of its
+own at all and just relays the latest message as `talking-stick-changed`, applying it to the sender's own tab
+immediately via a local emit (same "optimistic, no round trip" shape `claimPresenter()` uses).
+
+**Enforcement is a real disabled control, not just a nudge - a first for this codebase.** Every prior "mute
+someone" mechanism here (`mute-request`, `forceMuteOnJoin`) is explicitly one-shot and non-binding: call
+`toggleMic()` once, and nothing stops the participant calling it right back. Talking stick needed to actually hold
+(“everyone else must be silent”), so `_CallView.tsx` now derives `micLocked` (`talkingStickActive &&
+!selfHasTalkingStick`) and passes it to `CallControls`, which disables the microphone button itself (with a title
+explaining why) for as long as it applies - paired with an effect that force-toggles the mic to match whenever a
+tab's own holder status changes (unmuting a newly chosen speaker automatically, muting everyone else, including
+the host). Still cooperative at the signaling layer, same as everything else in `MeshConnectionManager`'s doc
+comment on host moderation - a non-standard client could ignore the lock entirely - but the first-party UI no
+longer merely suggests silence, it withholds the control.
+
+**A holder who leaves gets no special handling, on purpose.** Unlike presenter (which clears `presenterUid` and
+emits an event when the presenter's `bye` arrives, because a dangling screen-share tile would be visibly wrong),
+"the stick's holder is no longer in the call" doesn't need the manager to say anything: every other participant's
+existing `participant-left` handling already drops the departed uid from the roster, and nobody's own identity
+comparison (`holder === myPeerId`) needs to know whether `holder` is still around to correctly stay silent. The
+header's status chip reads this the same way ("Waiting for the host to choose a speaker" once the name lookup
+finds nobody) - no extra code, no auto-reassignment, the host just has to notice and pick someone (possibly
+themselves) again. Flagged as a known limitation rather than solved: if the *host's own* tab is the one that
+leaves while the mode is on, nobody has standing to fix it, the same shape as this plugin's other host-only
+controls having no fallback for the host disappearing.
+
+**UI**: a host-only navbar toggle button next to the participant-count chip ("Talking stick" / "End talking
+stick"), a status chip visible to everyone naming the current holder, and a "Give stick" button on every row of
+the participants drawer (including the host's own, so the host can reclaim it) - host-only, hidden on whichever
+row already holds it, with a 🎙️ badge on that row visible to every viewer, not just the host.
+
+Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
+clean at 100%/98.57%/100%/100% (1570 tests).

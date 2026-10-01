@@ -1009,6 +1009,121 @@ describe("CallView - host mute/kick controls", () => {
     });
 });
 
+describe("CallView - talking stick mode", () => {
+    async function withHostAndParticipant(overrides: Partial<React.ComponentProps<typeof CallView>> = {}) {
+        const view = await connected({ selfUid: "local-me", hostUid: "local-me", ...overrides });
+        view.client.emit({ type: "video-meeting-signal", kind: "hello", from: "zzz", peer: "zzz~tab", name: "Zed", state: STATE });
+        await screen.findAllByText("Zed");
+        return view;
+    }
+
+    it("shows the toggle only to the host", async () => {
+        await connected({ selfUid: "local-me", hostUid: "local-me" });
+        expect(screen.getByRole("button", { name: "Talking stick" })).toBeInTheDocument();
+    });
+
+    it("hides the toggle from a non-host", async () => {
+        await connected({ selfUid: "local-me", hostUid: "someone-else" });
+        expect(screen.queryByRole("button", { name: "Talking stick" })).toBeNull();
+    });
+
+    it("starts the mode, making the host the initial holder and unmuting if currently muted", async () => {
+        const media = fakeLocalMedia({ micOn: false });
+        const { client } = await connected({ selfUid: "local-me", hostUid: "local-me", media });
+        fireEvent.click(screen.getByRole("button", { name: "Talking stick" }));
+
+        expect(client.sent).toContainEqual(expect.objectContaining({ kind: "talking-stick", active: true, holder: SELF }));
+        expect(media.toggleMic).toHaveBeenCalledTimes(1);
+        expect(screen.getByRole("button", { name: "End talking stick" })).toHaveAttribute("aria-pressed", "true");
+        expect(screen.getByTestId("talking-stick-status")).toHaveTextContent("You have the floor");
+    });
+
+    it("ends the mode without touching anyone's mic state", async () => {
+        const media = fakeLocalMedia({ micOn: true });
+        const { client } = await connected({ selfUid: "local-me", hostUid: "local-me", media });
+        fireEvent.click(screen.getByRole("button", { name: "Talking stick" }));
+        fireEvent.click(screen.getByRole("button", { name: "End talking stick" }));
+
+        expect(client.sent).toContainEqual(expect.objectContaining({ kind: "talking-stick", active: false, holder: undefined }));
+        expect(screen.getByRole("button", { name: "Talking stick" })).toHaveAttribute("aria-pressed", "false");
+        expect(screen.queryByTestId("talking-stick-status")).toBeNull();
+        expect(media.toggleMic).not.toHaveBeenCalled();
+    });
+
+    it("force-mutes and locks a non-holder's microphone, and names the holder in the status chip", async () => {
+        const media = fakeLocalMedia({ micOn: true });
+        const { client } = await connected({ selfUid: "local-me", hostUid: "other-host", media });
+        client.emit({ type: "video-meeting-signal", kind: "hello", from: "other-host", peer: "other-host~tab", name: "Hank", state: STATE });
+        await screen.findAllByText("Hank");
+
+        client.emit({ type: "video-meeting-signal", kind: "talking-stick", from: "other-host", peer: "other-host~tab", active: true, holder: "other-host~tab" });
+
+        expect(media.toggleMic).toHaveBeenCalledTimes(1);
+        expect(screen.getByRole("button", { name: "Mute microphone" })).toBeDisabled();
+        expect(screen.getByTestId("talking-stick-status")).toHaveTextContent("Hank has the floor");
+    });
+
+    it("says nobody has the floor yet when the mode is on with no holder assigned", async () => {
+        const { client } = await connected({ selfUid: "local-me", hostUid: "other-host" });
+        client.emit({ type: "video-meeting-signal", kind: "talking-stick", from: "other-host", active: true });
+        expect(screen.getByTestId("talking-stick-status")).toHaveTextContent("Waiting for the host to choose a speaker");
+    });
+
+    it("re-enables and unlocks the microphone once the mode is turned off", async () => {
+        const media = fakeLocalMedia({ micOn: true });
+        const { client } = await connected({ selfUid: "local-me", hostUid: "other-host", media });
+        client.emit({ type: "video-meeting-signal", kind: "talking-stick", from: "other-host", active: true, holder: "other-host~tab" });
+        expect(screen.getByRole("button", { name: "Mute microphone" })).toBeDisabled();
+
+        client.emit({ type: "video-meeting-signal", kind: "talking-stick", from: "other-host", active: false });
+        expect(screen.getByRole("button", { name: "Mute microphone" })).toBeEnabled();
+    });
+
+    it("gives the stick to a participant from the drawer, showing their badge and the host's own button to reclaim it", async () => {
+        const view = await withHostAndParticipant();
+        fireEvent.click(screen.getByRole("button", { name: "Talking stick" }));
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        const drawer = screen.getByRole("dialog", { name: "Participants" });
+        const zedRow = within(drawer).getByText("Zed").closest("li")!;
+
+        fireEvent.click(within(zedRow).getByRole("button", { name: "Give the talking stick to Zed" }));
+        expect(view.client.sent).toContainEqual(expect.objectContaining({ kind: "talking-stick", active: true, holder: "zzz~tab" }));
+
+        // Giving it away makes the host a non-holder: their own mic gets force-muted and locked.
+        expect(view.props.media.toggleMic).toHaveBeenCalled();
+        expect(screen.getByRole("button", { name: "Mute microphone" })).toBeDisabled();
+
+        // Zed's row now shows the badge and no longer offers to give it to themselves; the host's own row does, so
+        // the host can take it back.
+        expect(within(zedRow).getByLabelText("Holding the talking stick")).toBeInTheDocument();
+        expect(within(zedRow).queryByRole("button", { name: "Give the talking stick to Zed" })).toBeNull();
+        const selfRow = within(drawer).getByText("Alice (you)").closest("li")!;
+        expect(within(selfRow).getByRole("button", { name: "Give the talking stick to Alice" })).toBeInTheDocument();
+    });
+
+    it("lets the host take the stick back via their own row", async () => {
+        const view = await withHostAndParticipant();
+        fireEvent.click(screen.getByRole("button", { name: "Talking stick" }));
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        const drawer = screen.getByRole("dialog", { name: "Participants" });
+        fireEvent.click(within(within(drawer).getByText("Zed").closest("li")!).getByRole("button", { name: "Give the talking stick to Zed" }));
+
+        const selfRow = within(drawer).getByText("Alice (you)").closest("li")!;
+        fireEvent.click(within(selfRow).getByRole("button", { name: "Give the talking stick to Alice" }));
+
+        expect(view.client.sent).toContainEqual(expect.objectContaining({ kind: "talking-stick", active: true, holder: SELF }));
+        expect(within(selfRow).getByLabelText("Holding the talking stick")).toBeInTheDocument();
+    });
+
+    it("hides the Give stick buttons from a non-host, even while the mode is on", async () => {
+        const { client } = await withParticipant({ selfUid: "local-me", hostUid: "other-host" });
+        client.emit({ type: "video-meeting-signal", kind: "talking-stick", from: "other-host", active: true, holder: "other-host~tab" });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        const drawer = screen.getByRole("dialog", { name: "Participants" });
+        expect(within(drawer).queryByRole("button", { name: /^Give the talking stick/ })).toBeNull();
+    });
+});
+
 describe("CallView - force-mute-on-join toggle", () => {
     it("shows the checkbox only to the host, reflecting the initial setting", async () => {
         await connected({ selfUid: "local-me", hostUid: "local-me", initialForceMuteOnJoin: true });

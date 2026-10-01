@@ -33,6 +33,23 @@
  * auto-detected active speaker (silently ignored while presenting, so it never fights the presenter for the main
  * slot); else, in focus mode with nobody yet speaking, the first other participant - so focus mode never shows an
  * empty main slot once someone else has joined.
+ *
+ * ## Talking stick mode
+ *
+ * A host-only navbar toggle (`handleToggleTalkingStick()`) that, once on, lets at most one participant's microphone
+ * be unmuted at a time - the host assigns who from the participants drawer (`handleGiveTalkingStick()`), everyone
+ * else sees a header chip naming who currently holds it. Purely an in-call runtime state signaled peer-to-peer over
+ * the mesh (`MeshConnectionManager.setTalkingStick()`/`"talking-stick-changed"`), the same shape as `mute-request`/
+ * `kicked`: no `VideoMeeting` field, no backend route, and only as "enforced" as a cooperating client makes it (see
+ * `types.ts`'s `SignalMessage` doc comment on why the signaling layer has no host identity to check against). What
+ * *is* new here versus `mute-request`'s one-time nudge: becoming or ceasing to be the holder force-toggles this
+ * tab's own mic to match (`selfHasTalkingStick`'s effect, below), and the mic button itself is disabled
+ * (`micLocked`, passed to `CallControls`) the whole time a non-holder would otherwise be able to tap it straight
+ * back on - a real restriction for as long as this tab's own UI is the one in front of the participant, not just a
+ * suggestion. Turning the mode off touches nobody's mic state, matching every other host toggle's "never
+ * retroactive" posture. A holder who leaves the call is not specially reassigned - see
+ * `MeshConnectionManager`'s own doc comment on why that needs no extra code - the header chip then says nobody has
+ * the floor, until the host picks someone (or themselves) again.
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { playRaisedHandChime } from "../shared/media/chime.js";
@@ -185,6 +202,8 @@ export default function CallView({
     const [hasPassword, setHasPassword] = useState(!!initialHasPassword);
     const [waitingRoomEnabled, setWaitingRoomEnabledState] = useState(!!initialWaitingRoomEnabled);
     const [waitingParticipants, setWaitingParticipants] = useState<WaitingParticipant[]>([]);
+    const [talkingStickActive, setTalkingStickActive] = useState(false);
+    const [talkingStickHolder, setTalkingStickHolder] = useState<string | undefined>(undefined);
 
     const managerRef = useRef<MeshConnectionManager | null>(null);
     /** The raw capture from `getDisplayMedia()` - only ever used to stop it (releasing the OS's own share
@@ -280,6 +299,10 @@ export default function CallView({
                 case "kicked":
                     onLeave("The host removed you from this call.");
                     return;
+                case "talking-stick-changed":
+                    setTalkingStickActive(event.active);
+                    setTalkingStickHolder(event.holder);
+                    return;
             }
         });
 
@@ -336,6 +359,25 @@ export default function CallView({
     useEffect(() => {
         managerRef.current?.setLocalState({ audioOn: media.micOn, videoOn: media.cameraOn || isPresenting, handRaised });
     }, [media.micOn, media.cameraOn, isPresenting, handRaised]);
+
+    // Talking-stick mode forces exactly one microphone on at a time: whoever just became the holder (including the
+    // host, on activation) is unmuted; everyone else is muted. Unlike `mute-requested`'s one-time nudge, this is
+    // paired with disabling the mic button itself (`micLocked`, passed to `CallControls` below) while it applies,
+    // so it isn't merely a suggestion - though still cooperative at the signaling layer, like every other
+    // moderation feature here (see `MeshConnectionManager`'s doc comment). Turning the mode off touches nobody's
+    // mic - states are left exactly as they are, the same "never retroactive" posture as every other host toggle.
+    const selfHasTalkingStick = talkingStickActive && talkingStickHolder === peerId;
+    const micLocked = talkingStickActive && !selfHasTalkingStick;
+    useEffect(() => {
+        if (!talkingStickActive) {
+            return;
+        }
+        if (selfHasTalkingStick && !mediaRef.current.micOn) {
+            void mediaRef.current.toggleMic();
+        } else if (!selfHasTalkingStick && mediaRef.current.micOn) {
+            void mediaRef.current.toggleMic();
+        }
+    }, [talkingStickActive, selfHasTalkingStick]);
 
     useEffect(() => {
         if (!presenterUid) {
@@ -462,6 +504,19 @@ export default function CallView({
         apiSetWaitingRoomEnabled(channel, next).catch(() => setWaitingRoomEnabledState(!next));
     }
 
+    /** Starts or stops talking-stick mode - host-only, see this module's doc comment. Starting makes the host the
+     * initial holder; stopping clears the holder too, leaving mic states exactly as they are rather than
+     * retroactively unmuting anyone. */
+    function handleToggleTalkingStick() {
+        managerRef.current?.setTalkingStick(!talkingStickActive, talkingStickActive ? undefined : peerId);
+    }
+
+    /** Hands the talking stick to `uid` (a participant's `MeshParticipant.uid`, or this tab's own `peerId` for the
+     * host taking it back) - host-only, called from the participants drawer's per-row "Give stick" button. */
+    function handleGiveTalkingStick(uid: string) {
+        managerRef.current?.setTalkingStick(true, uid);
+    }
+
     /** Admits one pending request - optimistically removed from the drawer's own list (the next poll would drop it
      * anyway, once the requester's own next poll completes their join; removing it here just avoids the visible
      * delay). Re-added if the save itself fails, so a failure doesn't silently lose the request from the list. */
@@ -524,6 +579,13 @@ export default function CallView({
         : undefined;
     const presenterName = presenterUid ? (presenterUid === peerId ? selfName : (participants.find((p) => p.uid === presenterUid)?.name ?? "Someone")) : undefined;
     const raisedNames = [...(handRaised ? ["You"] : []), ...participants.filter((p) => p.handRaised).map((p) => p.name)];
+    // Absent (not "Someone") once the holder has left the call - see `MeshConnectionManager`'s doc comment on why
+    // nothing reassigns it automatically; the header then says so rather than naming someone no longer here.
+    const talkingStickHolderName = !talkingStickActive
+        ? undefined
+        : selfHasTalkingStick
+          ? "You"
+          : participants.find((p) => p.uid === talkingStickHolder)?.name;
     const alone = participants.length === 0;
     // This participant has no working link yet: the signaling channel is still opening, or there is someone in the call
     // and every connection to them is still being made. Once any one is up (or nobody else is here) it is not shown,
@@ -614,6 +676,21 @@ export default function CallView({
                             ✋ {raisedNames.join(", ")}
                         </span>
                     )}
+                    {talkingStickActive && (
+                        <span className="max-w-[45vw] truncate px-3 py-1.5 rounded-full bg-[#a8c7fa] text-[#062e6f] text-sm font-medium" data-testid="talking-stick-status">
+                            🎙️ {talkingStickHolderName ? `${talkingStickHolderName} ${talkingStickHolderName === "You" ? "have" : "has"} the floor` : "Waiting for the host to choose a speaker"}
+                        </span>
+                    )}
+                    {isHost && (
+                        <button
+                            type="button"
+                            className={`px-3 py-1.5 rounded-full text-sm font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80 ${talkingStickActive ? "bg-[#a8c7fa] text-[#062e6f] hover:bg-[#8ab4f8]" : "bg-[#3c4043] hover:bg-[#4b4f53]"}`}
+                            aria-pressed={talkingStickActive}
+                            onClick={handleToggleTalkingStick}
+                        >
+                            {talkingStickActive ? "End talking stick" : "Talking stick"}
+                        </button>
+                    )}
                     <button
                         type="button"
                         className="px-3 py-1.5 rounded-full bg-[#3c4043] hover:bg-[#4b4f53] text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
@@ -662,6 +739,7 @@ export default function CallView({
                     onReaction={handleReaction}
                     viewMode={viewMode}
                     onToggleViewMode={() => setViewMode((prev) => (prev === "grid" ? "focus" : "grid"))}
+                    micLocked={micLocked}
                     onLeave={onLeave}
                 />
             </footer>
@@ -716,6 +794,10 @@ export default function CallView({
                     waitingParticipants={waitingParticipants}
                     onAdmit={handleAdmitParticipant}
                     onDeny={handleDenyParticipant}
+                    talkingStickActive={talkingStickActive}
+                    selfPeerId={peerId}
+                    talkingStickHolder={talkingStickHolder}
+                    onGiveTalkingStick={handleGiveTalkingStick}
                     onClose={() => setDrawerOpen(false)}
                 />
             )}

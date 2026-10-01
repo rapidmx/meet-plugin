@@ -73,6 +73,24 @@ describe("CallControls - microphone and camera", () => {
         expect(media.toggleCamera).toHaveBeenCalledTimes(1);
     });
 
+    it("disables the microphone toggle while micLocked, with an explanatory title, but not the device-picker chevron", () => {
+        const media = fakeLocalMedia();
+        renderControls({ media, micLocked: true });
+        const muteButton = screen.getByRole("button", { name: "Mute microphone" });
+        expect(muteButton).toBeDisabled();
+        expect(muteButton).toHaveAttribute("title", "Only the current talking-stick holder can unmute.");
+        fireEvent.click(muteButton);
+        expect(media.toggleMic).not.toHaveBeenCalled();
+        expect(screen.getByRole("button", { name: "Choose microphone" })).toBeEnabled();
+    });
+
+    it("leaves the microphone toggle enabled, with no title, when not locked", () => {
+        renderControls({ micLocked: false });
+        const muteButton = screen.getByRole("button", { name: "Mute microphone" });
+        expect(muteButton).toBeEnabled();
+        expect(muteButton).not.toHaveAttribute("title");
+    });
+
     it("lists the microphones with the one in use ticked, and switches to the one picked", () => {
         const media = fakeLocalMedia({
             devices: { cameras: [], microphones: [fakeDeviceInfo("audioinput", "mic-1", "Built-in"), fakeDeviceInfo("audioinput", "mic-2", "")] },

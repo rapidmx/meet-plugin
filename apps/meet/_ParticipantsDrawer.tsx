@@ -25,6 +25,11 @@
  * `waitingParticipants`/`onAdmit`/`onDeny`): `_CallView.tsx` polls the list while this drawer is open and the
  * caller is the host (there is no push signal for a newly filed admission request), so it stays current without
  * the host needing to close and reopen the drawer.
+ *
+ * While talking-stick mode is on (`talkingStickActive`), every row - including the host's own - shows a "Give
+ * stick" button, host-only, hidden on whichever row currently holds it (`talkingStickHolder`); everyone (not just
+ * the host) sees a badge on that row instead, same visibility as the "Host" tag. See `_CallView.tsx`'s doc comment
+ * on talking-stick mode for what granting it actually does to the recipient's microphone.
  */
 import React, { useEffect, useState } from "react";
 import type { MeshParticipant } from "../shared/webrtc/types.js";
@@ -63,6 +68,17 @@ export interface ParticipantsDrawerProps {
     waitingParticipants: WaitingParticipant[];
     onAdmit: (uid: string) => void;
     onDeny: (uid: string) => void;
+    /** Whether talking-stick mode is currently on - the host-only navbar toggle's own state (see `_CallView.tsx`'s
+     * doc comment on talking-stick mode). */
+    talkingStickActive: boolean;
+    /** This tab's own peer id - needed only so the self row's "Give stick" button can name itself when the host
+     * wants to take the stick back. */
+    selfPeerId: string;
+    /** Whichever peer id (`selfPeerId`, or a participant's `MeshParticipant.uid`) currently holds the stick;
+     * undefined while `talkingStickActive` is `false`, or (transiently) once its holder has left the call. */
+    talkingStickHolder?: string;
+    /** Hands the stick to `uid` - host-only, see `_CallView.tsx`'s `handleGiveTalkingStick()`. */
+    onGiveTalkingStick: (uid: string) => void;
     onClose: () => void;
 }
 
@@ -187,6 +203,9 @@ function Row({
     canModerate,
     onMute,
     onKick,
+    hasStick,
+    canGiveStick,
+    onGiveStick,
 }: {
     name: string;
     isSelf?: boolean;
@@ -198,6 +217,12 @@ function Row({
     canModerate?: boolean;
     onMute?: () => void;
     onKick?: () => void;
+    /** Whether this row currently holds the talking stick - shown to every viewer, not just the host. */
+    hasStick?: boolean;
+    /** Whether to show this row's "Give stick" button - `isSelfHost && talkingStickActive`, decided by the caller;
+     * never shown on the row that already holds it. */
+    canGiveStick?: boolean;
+    onGiveStick?: () => void;
 }) {
     const badge = transport ? TRANSPORT_BADGES[transport] : undefined;
     return (
@@ -207,6 +232,11 @@ function Row({
                 {isSelf ? " (you)" : ""}
             </span>
             {isHost && <span className="px-2 py-0.5 rounded text-xs whitespace-nowrap bg-[#a8c7fa] text-[#062e6f]">Host</span>}
+            {hasStick && (
+                <span className="px-2 py-0.5 rounded text-xs whitespace-nowrap bg-[#a8c7fa] text-[#062e6f]" role="img" aria-label="Holding the talking stick">
+                    🎙️
+                </span>
+            )}
             {handRaised && (
                 <span role="img" aria-label="Hand raised">
                     ✋
@@ -224,6 +254,16 @@ function Row({
                 >
                     {badge.label}
                 </span>
+            )}
+            {canGiveStick && !hasStick && (
+                <button
+                    type="button"
+                    className="px-2 py-0.5 rounded text-xs whitespace-nowrap bg-white/10 hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                    aria-label={`Give the talking stick to ${name}`}
+                    onClick={onGiveStick}
+                >
+                    Give stick
+                </button>
             )}
             {canModerate && !micMuted && (
                 <button
@@ -271,6 +311,10 @@ export default function ParticipantsDrawer({
     waitingParticipants,
     onAdmit,
     onDeny,
+    talkingStickActive,
+    selfPeerId,
+    talkingStickHolder,
+    onGiveTalkingStick,
     onClose,
 }: ParticipantsDrawerProps) {
     useEffect(() => {
@@ -320,7 +364,16 @@ export default function ParticipantsDrawer({
                     <WaitingSection waitingParticipants={waitingParticipants} onAdmit={onAdmit} onDeny={onDeny} />
                 )}
                 <ul className="flex-1 min-h-0 overflow-y-auto p-2 text-sm">
-                    <Row name={selfName} isSelf isHost={isSelfHost} micMuted={!micOn} handRaised={handRaised} />
+                    <Row
+                        name={selfName}
+                        isSelf
+                        isHost={isSelfHost}
+                        micMuted={!micOn}
+                        handRaised={handRaised}
+                        hasStick={talkingStickActive && talkingStickHolder === selfPeerId}
+                        canGiveStick={isSelfHost && talkingStickActive}
+                        onGiveStick={() => onGiveTalkingStick(selfPeerId)}
+                    />
                     {participants.map((p) => (
                         <Row
                             key={p.uid}
@@ -332,6 +385,9 @@ export default function ParticipantsDrawer({
                             canModerate={isSelfHost}
                             onMute={() => onMute(p.uid)}
                             onKick={() => onKick(p.uid)}
+                            hasStick={talkingStickActive && talkingStickHolder === p.uid}
+                            canGiveStick={isSelfHost && talkingStickActive}
+                            onGiveStick={() => onGiveTalkingStick(p.uid)}
                         />
                     ))}
                 </ul>

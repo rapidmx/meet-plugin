@@ -71,6 +71,19 @@
  * manager takes no action of its own beyond that - it doesn't mute a track or tear itself down, since a kicked
  * participant's actual departure is `stop()`, which the caller decides to call.
  *
+ * ## Talking stick (`talking-stick`)
+ *
+ * One exclusive "floor" - at most one participant may be unmuted at a time, host-assigned - but unlike presenter,
+ * there is no claim race to resolve: only the host's own client ever calls `setTalkingStick()` (same trust level as
+ * `sendMuteRequest()`/`sendKick()` - nothing here checks that), so the manager carries no state of its own and
+ * simply relays the latest message it sees as `talking-stick-changed`, applying it to itself too via an immediate
+ * local emit (the same "optimistic, no round trip" shape `claimPresenter()`/`releasePresenter()` use). A holder who
+ * leaves the call is not specially reassigned - every other participant's existing `participant-left` handling
+ * already drops them from the roster, and "the stick's holder is no longer in the call" is simply "nobody is holder
+ * right now" without any manager needing to say so, until the host picks someone (or themselves) again. There is no
+ * backend route or persisted field for this at all: like `mute-request`/`kicked`, it only matters while people are
+ * actually in the call together.
+ *
  * ## Three media paths, tried in order
  *
  * Each pair of participants reaches for the best path that works, and `MeshParticipant.transport` says which one it
@@ -319,6 +332,16 @@ export class MeshConnectionManager {
         this.send({ kind: "kicked", to: peerUid });
     }
 
+    /** Turns talking-stick mode on (naming `holder`, the initial speaker) or off (`active: false`, `holder`
+     * omitted), or hands an already-active stick to a different `holder` - see this module's doc comment on why
+     * there is no collision to resolve here, unlike presenter. Broadcasts and applies locally at once, trusting
+     * there is only ever one sender; the caller (`_CallView.tsx`) is responsible for only offering this to the
+     * host. */
+    setTalkingStick(active: boolean, holder?: string): void {
+        this.send({ kind: "talking-stick", active, holder });
+        this.emit({ type: "talking-stick-changed", active, holder });
+    }
+
     private sendHello(): void {
         this.send({ kind: "hello", name: this.options.selfName, state: this.localState });
     }
@@ -384,6 +407,9 @@ export class MeshConnectionManager {
                 return;
             case "kicked":
                 this.emit({ type: "kicked" });
+                return;
+            case "talking-stick":
+                this.emit({ type: "talking-stick-changed", active: message.active === true, holder: typeof message.holder === "string" ? message.holder : undefined });
                 return;
         }
     }

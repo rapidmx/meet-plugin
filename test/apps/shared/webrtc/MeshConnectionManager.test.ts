@@ -1312,3 +1312,46 @@ describe("MeshConnectionManager - host moderation (mute-request, kicked)", () =>
         expect(events).toContainEqual({ type: "kicked" });
     });
 });
+
+describe("MeshConnectionManager - talking stick", () => {
+    it("broadcasts activating the mode and applies it locally at once, with no round trip", () => {
+        const { manager, channel, events } = setup({ peerId: "a~tab" });
+        manager.start();
+        manager.setTalkingStick(true, "a~tab");
+        expect(channel.sent).toContainEqual({ type: "video-meeting-signal", kind: "talking-stick", from: "a", peer: "a~tab", active: true, holder: "a~tab" });
+        expect(events).toContainEqual({ type: "talking-stick-changed", active: true, holder: "a~tab" });
+    });
+
+    it("broadcasts handing the stick to someone else", () => {
+        const { manager, channel, events } = setup({ peerId: "a~tab" });
+        manager.start();
+        manager.setTalkingStick(true, "z~tab");
+        expect(channel.sent).toContainEqual(expect.objectContaining({ kind: "talking-stick", active: true, holder: "z~tab" }));
+        expect(events).toContainEqual({ type: "talking-stick-changed", active: true, holder: "z~tab" });
+    });
+
+    it("broadcasts turning the mode off with no holder", () => {
+        const { manager, channel, events } = setup({ peerId: "a~tab" });
+        manager.start();
+        manager.setTalkingStick(false);
+        expect(channel.sent).toContainEqual(expect.objectContaining({ kind: "talking-stick", active: false, holder: undefined }));
+        expect(events).toContainEqual({ type: "talking-stick-changed", active: false, holder: undefined });
+    });
+
+    it("emits talking-stick-changed on receiving one, trusting the latest message with no collision to resolve", () => {
+        const { manager, channel, events } = setup({ peerId: "a~tab" });
+        manager.start();
+        channel.emit(signal("talking-stick", "z", { active: true, holder: "z~tab" }));
+        expect(events).toContainEqual({ type: "talking-stick-changed", active: true, holder: "z~tab" });
+
+        channel.emit(signal("talking-stick", "z", { active: true, holder: "a~tab" }));
+        expect(events).toContainEqual({ type: "talking-stick-changed", active: true, holder: "a~tab" });
+    });
+
+    it("sanitizes an untrusted message's fields rather than trusting their shape off the wire", () => {
+        const { manager, channel, events } = setup({ peerId: "a~tab" });
+        manager.start();
+        channel.emit(signal("talking-stick", "z", { active: "yes" as unknown as boolean, holder: 42 as unknown as string }));
+        expect(events).toContainEqual({ type: "talking-stick-changed", active: false, holder: undefined });
+    });
+});

@@ -11,7 +11,9 @@
  *
  * The microphone button shows a live level while it is unmuted - bars that move with the sound the microphone is
  * picking up, so a participant can see their audio is being sent - and the camera button shows a green dot while a
- * camera is sending. Both are driven by `LocalMedia` (`apps/shared/media/useLocalMedia.ts`).
+ * camera is sending. Both are driven by `LocalMedia` (`apps/shared/media/useLocalMedia.ts`). The microphone button
+ * is disabled (`micLocked`) while talking-stick mode is on and this participant isn't the current holder - see
+ * `_CallView.tsx`'s doc comment.
  */
 import React, { useEffect, useRef, useState } from "react";
 import { filtersActive } from "../shared/media/filters/filterTypes.js";
@@ -57,6 +59,10 @@ export interface CallControlsProps {
     onReaction: (emoji: string) => void;
     viewMode: CallViewMode;
     onToggleViewMode: () => void;
+    /** True while talking-stick mode is on and this participant doesn't currently hold it - see `_CallView.tsx`'s
+     * doc comment on talking-stick mode. Disables the microphone toggle (not the device-picker chevron, which
+     * doesn't change whether anyone can hear them) rather than merely nudging it, unlike a `mute-request`. */
+    micLocked?: boolean;
     onLeave: () => void;
 }
 
@@ -97,6 +103,7 @@ export default function CallControls({
     onReaction,
     viewMode,
     onToggleViewMode,
+    micLocked,
     onLeave,
 }: CallControlsProps) {
     const [openMenu, setOpenMenu] = useState<OpenMenu>(null);
@@ -145,9 +152,11 @@ export default function CallControls({
                 </button>
                 <button
                     type="button"
-                    className={`${BUTTON} min-w-14 gap-1.5 px-3 rounded-l-none ${media.micOn ? NEUTRAL : ALERT}`}
+                    className={`${BUTTON} min-w-14 gap-1.5 px-3 rounded-l-none ${media.micOn ? NEUTRAL : ALERT} disabled:opacity-50 disabled:cursor-not-allowed`}
                     aria-label={media.micOn ? "Mute microphone" : "Unmute microphone"}
                     aria-pressed={!media.micOn}
+                    disabled={micLocked}
+                    title={micLocked ? "Only the current talking-stick holder can unmute." : undefined}
                     onClick={() => void media.toggleMic()}
                 >
                     {media.micOn && <LevelBars level={media.audioLevel} />}
