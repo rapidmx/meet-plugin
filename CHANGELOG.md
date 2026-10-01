@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-01
+
+### Changed
+- Dock the participants drawer and move diagnostics to an overlay
+- The participants drawer no longer overlays the call behind a dimming
+- backdrop - it's now an ordinary sidebar that shrinks the call's own
+- content column to make room, so it can stay open and visible while
+- the call continues. Dropped "click the backdrop to close" as a direct
+- consequence; Escape and the drawer's own controls still close it.
+- The call diagnostics panel moves from a dropdown anchored to its
+- control-bar button to a fixed overlay in the top-left corner, read
+- more naturally as a HUD while watching the call. Same panel, same
+- open/close button and outside-click/Escape handling - only its
+- position changed.
+
 ## [0.11.0] - 2026-10-01
 
 ### Added
@@ -418,7 +433,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/rapidmx/meet-plugin/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/rapidmx/meet-plugin/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/rapidmx/meet-plugin/compare/v0.9.3...v0.10.0
 [0.9.3]: https://github.com/rapidmx/meet-plugin/compare/v0.9.2...v0.9.3
