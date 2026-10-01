@@ -20,6 +20,7 @@ describe("SQL model default construction", () => {
         expect(obj.organizerSlug).toBeUndefined();
         expect(obj.status).toBe(VideoMeetingStatus.SCHEDULED);
         expect(obj.forceMuteOnJoin).toBeUndefined();
+        expect(obj.passwordHash).toBeUndefined();
         expect(obj.startTime).toBeUndefined();
         expect(obj.endTime).toBeUndefined();
     });
@@ -36,6 +37,7 @@ describe("SQL model default construction", () => {
             organizerSlug: "zyx54321cba",
             status: VideoMeetingStatus.ACTIVE,
             forceMuteOnJoin: true,
+            passwordHash: "salt:key",
             startTime,
             endTime,
         });
@@ -48,6 +50,7 @@ describe("SQL model default construction", () => {
         expect(obj.organizerSlug).toBe("zyx54321cba");
         expect(obj.status).toBe(VideoMeetingStatus.ACTIVE);
         expect(obj.forceMuteOnJoin).toBe(true);
+        expect(obj.passwordHash).toBe("salt:key");
         expect(obj.startTime).toBe(startTime);
         expect(obj.endTime).toBe(endTime);
     });
@@ -82,6 +85,13 @@ describe("SQL model default construction", () => {
         expect(set.forceMuteOnJoin).toBe(true);
         const cleared = new VideoMeetingSQL({ forceMuteOnJoin: undefined });
         expect(cleared.forceMuteOnJoin).toBeUndefined();
+    });
+
+    it("VideoMeetingSQL honors an explicit clear of passwordHash.", () => {
+        const set = new VideoMeetingSQL({ passwordHash: "salt:key" });
+        expect(set.passwordHash).toBe("salt:key");
+        const cleared = new VideoMeetingSQL({ passwordHash: undefined });
+        expect(cleared.passwordHash).toBeUndefined();
     });
 
     it("VideoMeetingInviteeSQL falls back to class defaults when constructed with no data.", () => {

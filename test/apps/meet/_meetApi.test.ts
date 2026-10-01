@@ -5,7 +5,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { jsonResponse, mockFetch } from "../testUtils.js";
-import { joinMeeting, kickParticipant, setForceMuteOnJoin } from "../../../apps/meet/_meetApi.js";
+import { joinMeeting, kickParticipant, setForceMuteOnJoin, setMeetingPassword, verifyMeetingPassword } from "../../../apps/meet/_meetApi.js";
 
 afterEach(() => {
     vi.unstubAllGlobals();
@@ -53,6 +53,20 @@ describe("joinMeeting", () => {
         mockFetch(() => jsonResponse(404, { message: "Not Found." }));
         await expect(joinMeeting("stale-token")).rejects.toMatchObject({ status: 404 });
     });
+
+    it("passes through a password-required response with no grant at all", async () => {
+        mockFetch(() =>
+            jsonResponse(200, {
+                meeting: { uid: "m1", title: "Standup", visibility: "public", status: "scheduled", hasPassword: true },
+                requiresPassword: true,
+            }),
+        );
+
+        const result = await joinMeeting("tok1");
+
+        expect("requiresPassword" in result && result.requiresPassword).toBe(true);
+        expect(result.meeting.hasPassword).toBe(true);
+    });
 });
 
 describe("kickParticipant", () => {
@@ -91,5 +105,64 @@ describe("setForceMuteOnJoin", () => {
     it("rejects with an ApiRequestError on a 403 (not the host)", async () => {
         mockFetch(() => jsonResponse(403, { message: "Permission denied." }));
         await expect(setForceMuteOnJoin("m1", false)).rejects.toMatchObject({ status: 403 });
+    });
+});
+
+describe("verifyMeetingPassword", () => {
+    it("POSTs the verify endpoint with the token URL-encoded and the password in the body", async () => {
+        const fetchMock = mockFetch((url, init) => {
+            expect(url).toBe("/api/mail/video-meetings/join/abc%2Fdef/verify");
+            expect(init?.method).toBe("POST");
+            expect(JSON.parse(init?.body as string)).toEqual({ password: "s3cret" });
+            return jsonResponse(200, {
+                meeting: { uid: "m1", title: "Standup", visibility: "public", status: "scheduled" },
+                iceServers: [{ urls: "stun:stun.example.com:19302" }],
+                authenticated: false,
+                selfUid: "guest:1",
+                token: "guest-jwt",
+                expiresAt: "2026-01-01T00:00:00.000Z",
+            });
+        });
+
+        const result = await verifyMeetingPassword("abc/def", "s3cret");
+
+        expect(result.selfUid).toBe("guest:1");
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects with an ApiRequestError on a 403 (wrong password)", async () => {
+        mockFetch(() => jsonResponse(403, { message: "Incorrect password." }));
+        await expect(verifyMeetingPassword("tok1", "wrong")).rejects.toMatchObject({ status: 403 });
+    });
+});
+
+describe("setMeetingPassword", () => {
+    it("PUTs the meeting's own endpoint with the new password", async () => {
+        const fetchMock = mockFetch((url, init) => {
+            expect(url).toBe("/api/mail/video-meetings/m1");
+            expect(init?.method).toBe("PUT");
+            expect(JSON.parse(init?.body as string)).toEqual({ password: "s3cret" });
+            return jsonResponse(200, { uid: "m1" });
+        });
+
+        await setMeetingPassword("m1", "s3cret");
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("sends null to remove the password", async () => {
+        const fetchMock = mockFetch((url, init) => {
+            expect(JSON.parse(init?.body as string)).toEqual({ password: null });
+            return jsonResponse(200, { uid: "m1" });
+        });
+
+        await setMeetingPassword("m1", null);
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects with an ApiRequestError on a 403 (not the host)", async () => {
+        mockFetch(() => jsonResponse(403, { message: "Permission denied." }));
+        await expect(setMeetingPassword("m1", "s3cret")).rejects.toMatchObject({ status: 403 });
     });
 });

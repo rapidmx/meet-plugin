@@ -36,6 +36,9 @@ export interface PublicVideoMeeting {
     /** When `true`, a joining participant's microphone starts muted - see `useLocalMedia`'s `forceMuteOnJoin`
      * option, which this is threaded into. Absent reads as `false`. */
     forceMuteOnJoin?: boolean;
+    /** Whether this meeting currently requires a password - never the password or its hash, just whether one is
+     * set. Absent reads as `false`. */
+    hasPassword?: boolean;
 }
 
 /**
@@ -66,6 +69,18 @@ export interface VideoMeetingJoinResult {
     effectsAssetsUrl?: string;
 }
 
+/** Mirrors `BaseVideoMeetingRoute.ts`'s `VideoMeetingPasswordRequiredResult` - returned by `joinMeeting()` in place
+ * of a `VideoMeetingJoinResult` when the meeting requires a password that hasn't been submitted yet. Carries only
+ * enough to show a password prompt (the meeting's title/host); nothing here grants anything. Narrow on
+ * `"requiresPassword" in result && result.requiresPassword`. */
+export interface VideoMeetingPasswordRequiredResult {
+    meeting: PublicVideoMeeting;
+    requiresPassword: true;
+}
+
+/** `joinMeeting()`'s actual return type - see `VideoMeetingPasswordRequiredResult`'s own doc comment. */
+export type VideoMeetingJoinResponse = VideoMeetingJoinResult | VideoMeetingPasswordRequiredResult;
+
 /** Resolves a join token (an invitee's own link) or a public meeting's slug to its meeting info, ICE servers, and
  * either a short-lived guest signaling token (the common anonymous case) or confirmation that the caller's own
  * existing session already grants them signaling access (`authenticated: true` - see
@@ -74,8 +89,27 @@ export interface VideoMeetingJoinResult {
  * private/public token shape for what it's being used against - the caller (`[token].tsx`) shows a single,
  * friendly "this meeting link isn't valid" state for all of those rather than trying to distinguish them, matching
  * `BaseVideoMeetingRoute.requireMeetingByToken()`'s own explicit "never leak which almost-matched" posture. */
-export function joinMeeting(token: string): Promise<VideoMeetingJoinResult> {
+export function joinMeeting(token: string): Promise<VideoMeetingJoinResponse> {
     return apiFetch(`/mail/video-meetings/join/${encodeURIComponent(token)}`);
+}
+
+/** Submits a password for a meeting `joinMeeting()` reported `requiresPassword` for. On success, returns an
+ * ordinary granted `VideoMeetingJoinResult` - the same shape and same meaning as `joinMeeting()`'s own non-password
+ * case. Rejects with `ApiRequestError` (status `403`) for a wrong or missing password. */
+export function verifyMeetingPassword(token: string, password: string): Promise<VideoMeetingJoinResult> {
+    return apiFetch(`/mail/video-meetings/join/${encodeURIComponent(token)}/verify`, {
+        method: "POST",
+        body: JSON.stringify({ password }),
+    });
+}
+
+/** Sets, replaces, or removes (`password: null`) the meeting's join password - host only, enforced the same way
+ * as every other owner-side video-meeting update. Hashed server-side; the plaintext is never stored or returned. */
+export function setMeetingPassword(meetingUid: string, password: string | null): Promise<void> {
+    return apiFetch(`/mail/video-meetings/${encodeURIComponent(meetingUid)}`, {
+        method: "PUT",
+        body: JSON.stringify({ password }),
+    });
 }
 
 /** Removes a participant from the meeting - host only, enforced server-side with the caller's own authenticated

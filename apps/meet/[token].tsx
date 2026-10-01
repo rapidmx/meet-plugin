@@ -5,7 +5,7 @@
 /**
  * The public join/lobby/in-call page, `GET /meet/:token` - resolves an invitee's join token or a public meeting's
  * slug (`BaseVideoMeetingRoute.join()`, both shapes accepted identically - see `_meetApi.ts`), then walks through
- * `loading` -> `lobby` -> `in-call` -> `ended`.
+ * `loading` -> (`password`, only when the meeting requires one) -> `lobby` -> `in-call` -> `ended`.
  *
  * ## Session-based name prefill - NOT implemented, and why
  *
@@ -35,13 +35,14 @@ import { Branding } from "@rapidmx/web-client/lib/branding/brandingApi.js";
 import { ApiRequestError } from "@rapidmx/web-client/lib/util/api.js";
 import Button from "@rapidmx/web-client/lib/components/buttons/Button.js";
 import Alert from "@rapidmx/web-client/lib/components/feedback/Alert.js";
+import FormField from "@rapidmx/web-client/lib/components/forms/FormField.js";
 import { MeetCard, MeetPageShell } from "./_MeetChrome.js";
 import { useLocalMedia } from "../shared/media/useLocalMedia.js";
 import MeetLobby from "./_MeetLobby.js";
 import CallView from "./_CallView.js";
-import { type VideoMeetingJoinResult, joinMeeting } from "./_meetApi.js";
+import { type PublicVideoMeeting, type VideoMeetingJoinResult, joinMeeting, verifyMeetingPassword } from "./_meetApi.js";
 
-type Phase = "loading" | "not-found" | "lobby" | "in-call" | "ended";
+type Phase = "loading" | "not-found" | "password" | "lobby" | "in-call" | "ended";
 
 export default function MeetJoinPage({ params }: { params: { token: string } }) {
     const { branding } = useBranding();
@@ -56,6 +57,12 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
     const [name, setName] = useState("");
     const [loadError, setLoadError] = useState<string | null>(null);
     const [joinResult, setJoinResult] = useState<VideoMeetingJoinResult | null>(null);
+    /** The restricted `PublicVideoMeeting` `joinMeeting()` returned while this meeting required a password - just
+     * enough to show the password prompt's own title/host, since `joinResult` itself stays unset until one is
+     * verified (see `handleSubmitPassword()`). Only read while `phase === "password"`. */
+    const [passwordMeeting, setPasswordMeeting] = useState<PublicVideoMeeting | null>(null);
+    const [passwordInput, setPasswordInput] = useState("");
+    const [passwordError, setPasswordError] = useState<string | null>(null);
     /** Set only when the call ended without the participant's own action (currently: kicked by the host) - see
      * `CallView`'s `onLeave` doc comment. Shown instead of the ordinary "you left" message; also hides "Rejoin
      * meeting", since a kicked participant's server-side channel grant has just been revoked and a rejoin attempt
@@ -68,10 +75,16 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
         let cancelled = false;
         joinMeeting(token)
             .then((result) => {
-                if (!cancelled) {
-                    setJoinResult(result);
-                    setPhase("lobby");
+                if (cancelled) {
+                    return;
                 }
+                if ("requiresPassword" in result) {
+                    setPasswordMeeting(result.meeting);
+                    setPhase("password");
+                    return;
+                }
+                setJoinResult(result);
+                setPhase("lobby");
             })
             .catch((err) => {
                 if (cancelled) {
@@ -92,6 +105,18 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
     function handleJoin(joinName: string) {
         setName(joinName);
         setPhase("in-call");
+    }
+
+    async function handleSubmitPassword(e: React.FormEvent) {
+        e.preventDefault();
+        setPasswordError(null);
+        try {
+            const result = await verifyMeetingPassword(token, passwordInput);
+            setJoinResult(result);
+            setPhase("lobby");
+        } catch (err) {
+            setPasswordError(err instanceof ApiRequestError && err.status === 403 ? "Incorrect password." : "Something went wrong. Try again.");
+        }
     }
 
     function handleLeave(reason?: string) {
@@ -117,6 +142,7 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
                 relayEnabled={joinResult.relayEnabled}
                 hostUid={joinResult.meeting.hostUid}
                 initialForceMuteOnJoin={!!joinResult.meeting.forceMuteOnJoin}
+                initialHasPassword={!!joinResult.meeting.hasPassword}
                 media={media}
                 onLeave={handleLeave}
             />
@@ -134,6 +160,30 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
         content = (
             <MeetCard>
                 <Alert>{loadError ?? "This meeting link isn't valid."}</Alert>
+            </MeetCard>
+        );
+    } else if (phase === "password") {
+        content = (
+            <MeetCard>
+                <h1 className="text-2xl font-bold tracking-tight">{passwordMeeting?.title}</h1>
+                {passwordMeeting?.hostDisplayName && <p className="text-sm text-text-muted mt-1">Hosted by {passwordMeeting.hostDisplayName}</p>}
+                <p className="text-base text-text-muted mt-4 mb-3">This meeting requires a password to join.</p>
+                <form onSubmit={(e) => void handleSubmitPassword(e)}>
+                    <FormField label="Password" htmlFor="meet-password">
+                        <input
+                            id="meet-password"
+                            type="password"
+                            autoFocus
+                            className="w-full text-base py-2.5 px-3.5 border border-border rounded-md bg-surface text-text focus:outline-none focus:border-primary"
+                            value={passwordInput}
+                            onChange={(e) => setPasswordInput(e.target.value)}
+                        />
+                    </FormField>
+                    {passwordError && <Alert>{passwordError}</Alert>}
+                    <Button type="submit" className="!w-auto mt-3" disabled={!passwordInput}>
+                        Join meeting
+                    </Button>
+                </form>
             </MeetCard>
         );
     } else if (phase === "ended") {

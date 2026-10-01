@@ -21,6 +21,7 @@ import {
 import { CalendarEventAttendeeLink, Mailbox } from "@rapidmx/restapi";
 import { parseEffectsAssetsUrl } from "../util/EffectsUtils.js";
 import { buildIceServers, IceServerConfig } from "../util/IceServerUtils.js";
+import { hashPassword, verifyPassword as verifyPasswordHash } from "../util/PasswordUtils.js";
 import { buildBaseUrl } from "../util/PublicUrlUtils.js";
 import { RedisRelayBus } from "../util/RedisRelayBus.js";
 import {
@@ -59,6 +60,10 @@ const RELAY_WS_OPTIONS = WS_ROUTE_OPTIONS_SUPPORTED
 const MAX_TITLE_LENGTH = 200;
 const MAX_DISPLAY_NAME_LENGTH = 200;
 const MAX_EMAIL_LENGTH = 254;
+/** A generous ceiling, not a real policy - `hashPassword()`'s cost is already what actually limits how useful a
+ * very long guess is to an attacker. The lower bound (1) just rejects an accidentally-empty string; this feature
+ * has no stated complexity requirement. */
+const MAX_PASSWORD_LENGTH = 200;
 
 /** The most invitees a single private meeting may be created with - a defensive cap, not a real product limit
  * (this plugin's "full-mesh, up to 4-6 participants" design already makes a larger list impractical - see
@@ -109,6 +114,9 @@ export interface CreateVideoMeetingBody {
     invitees?: { email?: string; displayName?: string }[];
     /** See `VideoMeeting.forceMuteOnJoin`. */
     forceMuteOnJoin?: boolean;
+    /** The plaintext password to require for this meeting, hashed before storage (see `VideoMeeting.passwordHash`) -
+     * never stored or returned as given. Omitted or empty means no password is required. */
+    password?: string;
 }
 
 /** One invitee of a newly created private meeting, as returned by `create()` - everything a caller needs to build
@@ -160,6 +168,12 @@ export interface PublicVideoMeeting {
     /** See `VideoMeeting.forceMuteOnJoin`. Omitted (reads as `false`) rather than sent as a literal `false`, same
      * convention as `VideoMeetingJoinResult.relayEnabled`. */
     forceMuteOnJoin?: boolean;
+    /** Whether this meeting currently requires a password to join (`VideoMeeting.passwordHash` is set) - never the
+     * hash itself, nowhere, ever. Present (as `true`) whenever a password is required, including on the restricted
+     * `VideoMeetingPasswordRequiredResult` shape `join()` returns before one is submitted - so a client already
+     * showing a password prompt can also show, say, "password required" copy without a second field. Omitted
+     * (reads as `false`) when none is required. */
+    hasPassword?: boolean;
 }
 
 /**
@@ -202,6 +216,24 @@ export interface VideoMeetingJoinResult {
      * (`mail:videoconf:effects:assets_url`). Omitted when unset, in which case clients use the public CDNs. */
     effectsAssetsUrl?: string;
 }
+
+/**
+ * Returned by `join()` in place of a `VideoMeetingJoinResult` when the meeting requires a password
+ * (`meeting.hasPassword`) that the caller has not yet submitted - see `join()`'s doc comment for exactly when this
+ * applies (never for the organizer's own slug, which already proves stronger authority). Carries only enough to
+ * show a password prompt (the meeting's title/host, so the prompt isn't a bare form); nothing here grants
+ * `/push` access, mints a guest identity, or includes ICE servers - that only happens once
+ * `verifyPassword()` succeeds, returning an ordinary `VideoMeetingJoinResult` instead. The literal `true` is a
+ * discriminant: a caller narrows on `"requiresPassword" in result && result.requiresPassword`.
+ */
+export interface VideoMeetingPasswordRequiredResult {
+    meeting: PublicVideoMeeting;
+    requiresPassword: true;
+}
+
+/** `join()`'s actual return type: either a granted `VideoMeetingJoinResult`, or a `VideoMeetingPasswordRequiredResult`
+ * demanding a password first. */
+export type VideoMeetingJoinResponse = VideoMeetingJoinResult | VideoMeetingPasswordRequiredResult;
 
 /**
  * The owner's management of their own `VideoMeeting`s (JWT-authenticated, mailbox-ACL-checked exactly like any
@@ -562,6 +594,9 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         if (body.forceMuteOnJoin !== undefined && typeof body.forceMuteOnJoin !== "boolean") {
             throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "'forceMuteOnJoin' must be a boolean.");
         }
+        if (body.password !== undefined && (typeof body.password !== "string" || body.password.length > MAX_PASSWORD_LENGTH)) {
+            throw new ApiError(ApiErrors.INVALID_REQUEST, 400, `'password' must be a string of at most ${MAX_PASSWORD_LENGTH} characters.`);
+        }
         return { mailboxUid: body.mailboxUid, visibility: body.visibility };
     }
 
@@ -599,6 +634,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         // Same mint function - and so the same shape/entropy - as `publicSlug`: the two live in separate columns, so
         // the only collision namespace either shares is its own, exactly as in Phase 1.
         const organizerSlug: string | undefined = visibility === VideoMeetingVisibility.PRIVATE ? mintPublicSlug() : undefined;
+        const passwordHash: string | undefined = body.password ? await hashPassword(body.password) : undefined;
 
         // Constructed before `create()` is called (rather than inline) because its own, already-generated `uid`
         // (every `BaseEntity` mints one on construction) is what `acl.uid` below claims the meeting's own
@@ -615,6 +651,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             publicSlug,
             organizerSlug,
             forceMuteOnJoin: body.forceMuteOnJoin,
+            passwordHash,
         });
         const meeting: VM = await this.meetingRepo!.create(instance, {
             user: strippedUser,
@@ -700,6 +737,15 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         return base ? `${base}/${tokenOrSlug}` : undefined;
     }
 
+    /** Never let the stored password hash itself reach a response, not even the meeting's own owner's - a hash
+     * leak invites offline brute-forcing for no benefit to the owner, who already knows the plaintext they set (or
+     * can simply set a new one if they forgot it). Applied everywhere a raw persisted entity would otherwise flow
+     * straight into a response: `create()`, `withJoinUrls()` (so `find()`/`findById()` inherit it too), `update()`. */
+    private withoutPasswordHash<T extends VM>(meeting: T): T {
+        const { passwordHash: _passwordHash, ...rest } = meeting as any;
+        return rest as T;
+    }
+
     @Summary("Creates a video meeting.")
     @Description(
         "Creates a video meeting owned by the given mailbox. A 'private' meeting requires at least one invitee, " +
@@ -721,7 +767,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
 
         const { meeting, invitees } = await this.persistMeeting(mailboxUid, body, visibility, startTime, endTime, user);
 
-        const result: VideoMeetingCreateResult<VM> = { meeting };
+        const result: VideoMeetingCreateResult<VM> = { meeting: this.withoutPasswordHash(meeting) };
         if (visibility === VideoMeetingVisibility.PRIVATE) {
             result.invitees = invitees.map((invitee) => ({
                 uid: invitee.uid,
@@ -747,10 +793,11 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
      * that IS a user's "personal room" - see `.claude/NOTES.md`'s Phase 4 entry - was created in an earlier visit)
      * would otherwise have no way to recover a public meeting's shareable link, or a private meeting's organizer
      * link, at all. Spreads rather than mutates: the loaded instance is the repo's own entity, and both fields are
-     * response-only.
+     * response-only. Also strips `passwordHash` (`withoutPasswordHash()`) - `find()`/`findById()` are this field's
+     * only other response paths besides `create()`/`update()`, which strip it themselves.
      */
     private withJoinUrls<T extends VM>(meeting: T): T & { organizerJoinUrl?: string; publicJoinUrl?: string } {
-        const result: T & { organizerJoinUrl?: string; publicJoinUrl?: string } = { ...meeting };
+        const result: T & { organizerJoinUrl?: string; publicJoinUrl?: string } = this.withoutPasswordHash({ ...meeting });
         if (meeting.organizerSlug) {
             result.organizerJoinUrl = this.joinUrl(meeting.organizerSlug);
         }
@@ -842,15 +889,18 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         return this.withJoinUrls(meeting);
     }
 
-    @Summary("Updates a video meeting's title, force-mute-on-join setting, or cancels it.")
+    @Summary("Updates a video meeting's title, force-mute-on-join setting or password, or cancels it.")
     @Description(
-        "Deliberately minimal for Phase 1: only 'title', 'forceMuteOnJoin' and cancellation ('status': " +
-            "'cancelled') may be changed. Requires UPDATE on the meeting's owning mailbox.",
+        "Deliberately minimal for Phase 1: only 'title', 'forceMuteOnJoin', 'password' and cancellation " +
+            "('status': 'cancelled') may be changed. 'password' hashes before storage; 'null' removes password " +
+            "protection entirely, a non-empty string sets/replaces it. Requires UPDATE on the meeting's owning " +
+            "mailbox. The response never carries the stored password hash, same as every other response that " +
+            "includes a meeting.",
     )
     @Put("/:id")
     public async update(
         @Param("id") id: string,
-        body: { title?: string; status?: string; forceMuteOnJoin?: boolean } | undefined,
+        body: { title?: string; status?: string; forceMuteOnJoin?: boolean; password?: string | null } | undefined,
         @AuthUser user?: JWTUser,
     ): Promise<VM> {
         await this.init();
@@ -874,15 +924,28 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             }
             patch.forceMuteOnJoin = body.forceMuteOnJoin;
         }
-        if (patch.title === undefined && patch.status === undefined && patch.forceMuteOnJoin === undefined) {
-            throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "Nothing to update: supply 'title', 'forceMuteOnJoin' and/or 'status'.");
+        if (body?.password !== undefined) {
+            if (body.password === null) {
+                patch.passwordHash = null;
+            } else if (typeof body.password !== "string" || !body.password || body.password.length > MAX_PASSWORD_LENGTH) {
+                throw new ApiError(
+                    ApiErrors.INVALID_REQUEST,
+                    400,
+                    `'password' must be a non-empty string of at most ${MAX_PASSWORD_LENGTH} characters, or null to remove it.`,
+                );
+            } else {
+                patch.passwordHash = await hashPassword(body.password);
+            }
+        }
+        if (patch.title === undefined && patch.status === undefined && patch.forceMuteOnJoin === undefined && patch.passwordHash === undefined) {
+            throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "Nothing to update: supply 'title', 'forceMuteOnJoin', 'password' and/or 'status'.");
         }
         const strippedUser: JWTUser | undefined = stripTrustedRoles(user, this.trustedRoles);
         const updated: VM = await this.meetingRepo!.update(patch as any, meeting, { user: strippedUser, ignoreACL: true });
         if (patch.status === VideoMeetingStatus.CANCELLED) {
             await this.deleteAttendeeLinks(meeting, await this.findInvitees(meeting), strippedUser);
         }
-        return updated;
+        return this.withoutPasswordHash(updated);
     }
 
     @Summary("Deletes a video meeting.")
@@ -1091,46 +1154,12 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         return { hostDisplayName: mailbox?.displayName || undefined, hostUid: mailbox?.ownerUserUid || undefined };
     }
 
-    @Summary("Joins a video meeting.")
-    @Description(
-        "Resolves an invitee's join token or a public meeting's slug. If the caller already presents a valid " +
-            "session for a real RapidMX identity (not a returning guest), that identity is granted READ/CREATE " +
-            "on the meeting's own push channel directly and the response carries 'authenticated: true' with no " +
-            "guest token at all - the caller's own existing session cookie/header already authenticates /push " +
-            "for them. Otherwise (the common anonymous case) mints a short-lived guest JWT (see " +
-            "GUEST_JWT_TTL_SECONDS) already granted READ/CREATE on the same channel, ready to use against /push " +
-            "to exchange WebRTC signaling messages. Requires no authentication beyond the token itself; a " +
-            "stale/unknown token answers 404. The one exception is a private meeting's organizerSlug, which is " +
-            "never an anonymous surface: it additionally requires an already-authenticated caller holding READ on " +
-            "the meeting's owning mailbox, and answers the very same 404 for anyone else.",
-    )
-    @RateLimit()
-    @Get("/join/:token")
-    public async join(@Param("token") token: string, @AuthUser user?: JWTUser): Promise<VideoMeetingJoinResult> {
-        await this.init();
-        const { meeting, resolvedVia } = await this.requireMeetingByToken(token);
-
-        // An `organizerSlug` is not a credential of its own (unlike an invitee `joinToken` or a `publicSlug`): it
-        // only exists so the owner of a private meeting has something that resolves to it at all, since they are
-        // deliberately never one of its invitees. So it is gated here on BOTH conditions, before anything about
-        // the meeting is computed or returned: a real, already-authenticated identity (the same non-guest check
-        // the authenticated branch below uses - a returning guest presenting a prior join()'s guest JWT is not
-        // one), AND that identity actually holding READ on this meeting's own mailbox, with its trusted roles
-        // stripped first exactly as `requireMailboxAccess()` does. A failure answers the bare 404
-        // `requireMeetingByToken()` already throws for a token that matched nothing whatsoever - deliberately NOT
-        // `requireMailboxAccess()`'s 403, which would tell an anonymous prober that this slug named a real meeting.
-        // Nothing here changes how an invitee token or a publicSlug resolves.
-        if (resolvedVia === "organizerSlug") {
-            const isRealCaller: boolean = !!user && !user.uid.startsWith(GUEST_UID_PREFIX);
-            if (!isRealCaller || !(await this.aclUtils!.hasPermission(stripTrustedRoles(user, this.trustedRoles), meeting.mailboxUid, ACLAction.READ))) {
-                throw new ApiError(ApiErrors.NOT_FOUND, 404, ApiErrorMessages.NOT_FOUND);
-            }
-        }
-
-        const relayEnabled: boolean = this.isRelayEnabled();
-        const effectsAssetsUrl: string | undefined = parseEffectsAssetsUrl(this.effectsAssetsUrlSetting);
+    /** The `PublicVideoMeeting` projection shared by `join()`'s two possible responses (granted or
+     * password-required) and `verifyPassword()`'s - computed once a token/slug has resolved, before either method
+     * decides what else (if anything) to grant. */
+    private async buildPublicMeeting(meeting: VM): Promise<PublicVideoMeeting> {
         const { hostDisplayName, hostUid } = await this.hostInfo(meeting.mailboxUid);
-        const publicMeeting: PublicVideoMeeting = {
+        return {
             uid: meeting.uid,
             title: meeting.title,
             visibility: meeting.visibility,
@@ -1138,7 +1167,37 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             hostDisplayName,
             hostUid,
             forceMuteOnJoin: meeting.forceMuteOnJoin || undefined,
+            hasPassword: meeting.passwordHash ? true : undefined,
         };
+    }
+
+    /**
+     * Enforces the organizer-slug-only authority check - see `join()`'s doc comment on why holding an
+     * `organizerSlug` is not, by itself, a credential. A no-op for the other two resolutions. Shared between
+     * `join()` and `verifyPassword()`, since either could in principle be called first for an organizer's own link
+     * (a password a host also set on their own meeting should never block them - this check already proves
+     * stronger authority than any password could add, which is exactly why both methods skip the password
+     * check entirely once this passes).
+     */
+    private async requireOrganizerAuth(meeting: VM, resolvedVia: VideoMeetingTokenResolution, user: JWTUser | undefined): Promise<void> {
+        if (resolvedVia !== "organizerSlug") {
+            return;
+        }
+        const isRealCaller: boolean = !!user && !user.uid.startsWith(GUEST_UID_PREFIX);
+        if (!isRealCaller || !(await this.aclUtils!.hasPermission(stripTrustedRoles(user, this.trustedRoles), meeting.mailboxUid, ACLAction.READ))) {
+            throw new ApiError(ApiErrors.NOT_FOUND, 404, ApiErrorMessages.NOT_FOUND);
+        }
+    }
+
+    /**
+     * The actual grant: ICE servers, and either the caller's own real uid or a freshly minted guest identity,
+     * granted `READ`/`CREATE` on the meeting's channel - shared by `join()` (when no password blocks it) and
+     * `verifyPassword()` (once one is confirmed, or was never required). Everything `join()`'s own doc comment
+     * says about the `authenticated`/`selfUid`/`token` shape applies here unchanged.
+     */
+    private async completeJoin(meeting: VM, publicMeeting: PublicVideoMeeting, user: JWTUser | undefined): Promise<VideoMeetingJoinResult> {
+        const relayEnabled: boolean = this.isRelayEnabled();
+        const effectsAssetsUrl: string | undefined = parseEffectsAssetsUrl(this.effectsAssetsUrlSetting);
         const iceServers: IceServerConfig[] = buildIceServers({
             url: this.turnUrl,
             username: this.turnUsername,
@@ -1166,6 +1225,63 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             relayEnabled,
             ...(effectsAssetsUrl && { effectsAssetsUrl }),
         };
+    }
+
+    @Summary("Joins a video meeting.")
+    @Description(
+        "Resolves an invitee's join token or a public meeting's slug. If the caller already presents a valid " +
+            "session for a real RapidMX identity (not a returning guest), that identity is granted READ/CREATE " +
+            "on the meeting's own push channel directly and the response carries 'authenticated: true' with no " +
+            "guest token at all - the caller's own existing session cookie/header already authenticates /push " +
+            "for them. Otherwise (the common anonymous case) mints a short-lived guest JWT (see " +
+            "GUEST_JWT_TTL_SECONDS) already granted READ/CREATE on the same channel, ready to use against /push " +
+            "to exchange WebRTC signaling messages. Requires no authentication beyond the token itself; a " +
+            "stale/unknown token answers 404. The one exception is a private meeting's organizerSlug, which is " +
+            "never an anonymous surface: it additionally requires an already-authenticated caller holding READ on " +
+            "the meeting's owning mailbox, and answers the very same 404 for anyone else. If the meeting requires " +
+            "a password (and wasn't resolved via organizerSlug), returns { meeting, requiresPassword: true } " +
+            "instead of granting anything - submit it to POST /join/:token/verify to actually join.",
+    )
+    @RateLimit()
+    @Get("/join/:token")
+    public async join(@Param("token") token: string, @AuthUser user?: JWTUser): Promise<VideoMeetingJoinResponse> {
+        await this.init();
+        const { meeting, resolvedVia } = await this.requireMeetingByToken(token);
+        await this.requireOrganizerAuth(meeting, resolvedVia, user);
+        const publicMeeting: PublicVideoMeeting = await this.buildPublicMeeting(meeting);
+        if (meeting.passwordHash && resolvedVia !== "organizerSlug") {
+            return { meeting: publicMeeting, requiresPassword: true };
+        }
+        return this.completeJoin(meeting, publicMeeting, user);
+    }
+
+    @Summary("Verifies a video meeting's join password.")
+    @Description(
+        "Checks 'password' against the meeting's own stored hash and, on success, completes the join exactly as " +
+            "GET /join/:token would for a meeting with no password at all - the same grant, the same response " +
+            "shape. Returns 403 for a wrong or missing password, never revealing how close a guess was. Calling " +
+            "this on a meeting that doesn't require a password, or via the organizer's own slug, succeeds " +
+            "unconditionally - the password check is skipped entirely in both cases, matching GET /join/:token's " +
+            "own posture. Rate-limited, like GET /join/:token, since this is the one endpoint a brute-force " +
+            "password guesser would actually hit repeatedly.",
+    )
+    @RateLimit()
+    @Post("/join/:token/verify")
+    public async verifyPassword(
+        @Param("token") token: string,
+        body: { password?: string } | undefined,
+        @AuthUser user?: JWTUser,
+    ): Promise<VideoMeetingJoinResult> {
+        await this.init();
+        const { meeting, resolvedVia } = await this.requireMeetingByToken(token);
+        await this.requireOrganizerAuth(meeting, resolvedVia, user);
+        if (meeting.passwordHash && resolvedVia !== "organizerSlug") {
+            if (typeof body?.password !== "string" || !(await verifyPasswordHash(body.password, meeting.passwordHash))) {
+                throw new ApiError(ApiErrors.AUTH_PERMISSION_FAILURE, 403, "Incorrect password.");
+            }
+        }
+        const publicMeeting: PublicVideoMeeting = await this.buildPublicMeeting(meeting);
+        return this.completeJoin(meeting, publicMeeting, user);
     }
 
     /** Whether the WebSocket media relay is enabled - `mail:videoconf:relay:enabled`, see `parseRelayEnabled()`. */

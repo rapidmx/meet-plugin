@@ -102,11 +102,16 @@ vi.mock("../../../apps/shared/media/deviceMedia.js", async (importOriginal) => {
 });
 vi.mock("../../../apps/shared/media/chime.js", () => ({ playRaisedHandChime: chimeMock }));
 
-const { kickParticipantMock, setForceMuteOnJoinMock } = vi.hoisted(() => ({
+const { kickParticipantMock, setForceMuteOnJoinMock, setMeetingPasswordMock } = vi.hoisted(() => ({
     kickParticipantMock: vi.fn().mockResolvedValue(undefined),
     setForceMuteOnJoinMock: vi.fn().mockResolvedValue(undefined),
+    setMeetingPasswordMock: vi.fn().mockResolvedValue(undefined),
 }));
-vi.mock("../../../apps/meet/_meetApi.js", () => ({ kickParticipant: kickParticipantMock, setForceMuteOnJoin: setForceMuteOnJoinMock }));
+vi.mock("../../../apps/meet/_meetApi.js", () => ({
+    kickParticipant: kickParticipantMock,
+    setForceMuteOnJoin: setForceMuteOnJoinMock,
+    setMeetingPassword: setMeetingPasswordMock,
+}));
 
 import CallView, { accountUidOf, computeMainUid, newPeerId } from "../../../apps/meet/_CallView.js";
 
@@ -1025,5 +1030,67 @@ describe("CallView - force-mute-on-join toggle", () => {
         fireEvent.click(checkbox);
         expect(checkbox).toBeChecked();
         await waitFor(() => expect(checkbox).not.toBeChecked());
+    });
+});
+
+describe("CallView - host password section", () => {
+    it("shows the password section only to the host, reflecting whether one is already set", async () => {
+        await connected({ selfUid: "local-me", hostUid: "local-me", initialHasPassword: true });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        expect(screen.getByText("Password protection is on.")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Remove password" })).toBeInTheDocument();
+    });
+
+    it("hides the password section from a non-host", async () => {
+        await connected();
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        expect(screen.queryByText(/password/i)).toBeNull();
+    });
+
+    it("says no password is required when none is set, with no remove button", async () => {
+        await connected({ selfUid: "local-me", hostUid: "local-me" });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        expect(screen.getByText("No password required to join.")).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Remove password" })).toBeNull();
+    });
+
+    it("sets a password, clears the input, and updates the status once saved", async () => {
+        await connected({ selfUid: "local-me", hostUid: "local-me" });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        const input = screen.getByLabelText("Set a password");
+        fireEvent.change(input, { target: { value: "s3cret" } });
+        fireEvent.click(screen.getByRole("button", { name: "Set" }));
+
+        await waitFor(() => expect(setMeetingPasswordMock).toHaveBeenCalledWith("meeting-1", "s3cret"));
+        expect(await screen.findByText("Password protection is on.")).toBeInTheDocument();
+        expect(screen.getByLabelText("New password")).toHaveValue("");
+    });
+
+    it("removes the password and reverts the status once saved", async () => {
+        await connected({ selfUid: "local-me", hostUid: "local-me", initialHasPassword: true });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+
+        fireEvent.click(screen.getByRole("button", { name: "Remove password" }));
+
+        await waitFor(() => expect(setMeetingPasswordMock).toHaveBeenCalledWith("meeting-1", null));
+        expect(await screen.findByText("No password required to join.")).toBeInTheDocument();
+    });
+
+    it("does nothing if the form is submitted with an empty password", async () => {
+        await connected({ selfUid: "local-me", hostUid: "local-me" });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        fireEvent.submit(screen.getByLabelText("Set a password").closest("form")!);
+        expect(setMeetingPasswordMock).not.toHaveBeenCalled();
+    });
+
+    it("shows an inline error and keeps the previous status when saving fails", async () => {
+        setMeetingPasswordMock.mockRejectedValueOnce(new Error("network error"));
+        await connected({ selfUid: "local-me", hostUid: "local-me" });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        fireEvent.change(screen.getByLabelText("Set a password"), { target: { value: "s3cret" } });
+        fireEvent.click(screen.getByRole("button", { name: "Set" }));
+
+        expect(await screen.findByText("Could not save - try again.")).toBeInTheDocument();
+        expect(screen.getByText("No password required to join.")).toBeInTheDocument();
     });
 });

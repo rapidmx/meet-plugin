@@ -47,7 +47,7 @@ import type { MeshParticipant, RelayTransportLike } from "../shared/webrtc/types
 import { createRelayTransport } from "../shared/relay/RelayTransport.js";
 import { GuestSignalingClient } from "../shared/push/GuestSignalingClient.js";
 import CallControls, { type CallViewMode } from "./_CallControls.js";
-import { kickParticipant, setForceMuteOnJoin as apiSetForceMuteOnJoin } from "./_meetApi.js";
+import { kickParticipant, setForceMuteOnJoin as apiSetForceMuteOnJoin, setMeetingPassword } from "./_meetApi.js";
 import ParticipantTile from "./_ParticipantTile.js";
 import ParticipantsDrawer from "./_ParticipantsDrawer.js";
 
@@ -74,6 +74,10 @@ export interface CallViewProps {
      * `handleToggleForceMuteOnJoin()`). Does not update if changed elsewhere while this view is mounted - there is
      * no signal for that today, matching every other meeting-settings field's lack of live sync. */
     initialForceMuteOnJoin?: boolean;
+    /** `PublicVideoMeeting.hasPassword` as of this call's own `join()` - the starting value for the host's password
+     * section in the participants drawer, same "owned and kept current by this view" shape as
+     * `initialForceMuteOnJoin`. */
+    initialHasPassword?: boolean;
     /** The camera and microphone, owned by the page (`[token].tsx`) - the lobby's tracks carried into the call. */
     media: LocalMedia;
     /** Called once the participant leaves, for any reason. `reason` is set only when the call ended without the
@@ -140,6 +144,7 @@ export default function CallView({
     relayEnabled,
     hostUid,
     initialForceMuteOnJoin,
+    initialHasPassword,
     media,
     onLeave,
 }: CallViewProps) {
@@ -162,6 +167,7 @@ export default function CallView({
     const [signalingReady, setSignalingReady] = useState(false);
     const [drawerOpen, setDrawerOpen] = useState(false);
     const [forceMuteOnJoin, setForceMuteOnJoinState] = useState(!!initialForceMuteOnJoin);
+    const [hasPassword, setHasPassword] = useState(!!initialHasPassword);
 
     const managerRef = useRef<MeshConnectionManager | null>(null);
     /** The raw capture from `getDisplayMedia()` - only ever used to stop it (releasing the OS's own share
@@ -422,6 +428,15 @@ export default function CallView({
         apiSetForceMuteOnJoin(channel, next).catch(() => setForceMuteOnJoinState(!next));
     }
 
+    /** Sets, changes, or removes (`password: null`) the host's join password - unlike the force-mute toggle, this
+     * is not applied optimistically: the drawer's own `PasswordSection` awaits the result itself (clearing its
+     * input on success, showing an inline error on failure), so there is nothing here to revert. `hasPassword`
+     * updates only once the save actually succeeds. */
+    async function handleSetPassword(password: string | null): Promise<void> {
+        await setMeetingPassword(channel, password);
+        setHasPassword(!!password);
+    }
+
     function handleAudioBlocked() {
         setAudioBlocked(true);
     }
@@ -631,6 +646,8 @@ export default function CallView({
                     onKick={handleKickParticipant}
                     forceMuteOnJoin={forceMuteOnJoin}
                     onToggleForceMuteOnJoin={handleToggleForceMuteOnJoin}
+                    hasPassword={hasPassword}
+                    onSetPassword={handleSetPassword}
                     onClose={() => setDrawerOpen(false)}
                 />
             )}

@@ -50,6 +50,11 @@ const joinResponse = {
     expiresAt: "2026-01-01T00:00:00.000Z",
 };
 
+const passwordRequiredResponse = {
+    meeting: { uid: "m1", title: "Standup", visibility: "public", status: "scheduled", hostDisplayName: "Jane", hasPassword: true },
+    requiresPassword: true,
+};
+
 const authenticatedJoinResponse = {
     meeting: { uid: "m1", title: "Standup", visibility: "public", status: "scheduled", hostDisplayName: "Jane" },
     iceServers: [{ urls: "stun:stun.example.com:19302" }],
@@ -237,5 +242,69 @@ describe("MeetJoinPage", () => {
         rejectJoin();
         await Promise.resolve();
         await Promise.resolve();
+    });
+});
+
+describe("MeetJoinPage - password protection", () => {
+    it("shows a password prompt when the meeting requires one, naming its title and host", async () => {
+        mockJoin(passwordRequiredResponse);
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        expect(await screen.findByText("Standup")).toBeInTheDocument();
+        expect(screen.getByText("Hosted by Jane")).toBeInTheDocument();
+        expect(screen.getByText("This meeting requires a password to join.")).toBeInTheDocument();
+        expect(screen.getByLabelText("Password")).toBeInTheDocument();
+    });
+
+    it("shows the lobby after submitting the correct password", async () => {
+        mockFetch((url, init) => {
+            if (url === "/api/system/branding") return jsonResponse(200, { companyName: "", title: "" });
+            if (url === "/api/mail/video-meetings/join/tok1") return jsonResponse(200, passwordRequiredResponse);
+            if (url === "/api/mail/video-meetings/join/tok1/verify") {
+                expect(JSON.parse(init?.body as string)).toEqual({ password: "s3cret" });
+                return jsonResponse(200, joinResponse);
+            }
+            throw new Error(`unexpected ${url}`);
+        });
+
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        await screen.findByText("This meeting requires a password to join.");
+        fireEvent.change(screen.getByLabelText("Password"), { target: { value: "s3cret" } });
+        fireEvent.click(screen.getByText("Join meeting"));
+
+        expect(await screen.findByLabelText("Your name")).toBeInTheDocument();
+        expect(screen.queryByText("This meeting requires a password to join.")).toBeNull();
+    });
+
+    it("shows an inline error and stays on the password screen for a wrong password", async () => {
+        mockFetch((url) => {
+            if (url === "/api/system/branding") return jsonResponse(200, { companyName: "", title: "" });
+            if (url === "/api/mail/video-meetings/join/tok1") return jsonResponse(200, passwordRequiredResponse);
+            if (url === "/api/mail/video-meetings/join/tok1/verify") return jsonResponse(403, { message: "Incorrect password." });
+            throw new Error(`unexpected ${url}`);
+        });
+
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        await screen.findByText("This meeting requires a password to join.");
+        fireEvent.change(screen.getByLabelText("Password"), { target: { value: "wrong" } });
+        fireEvent.click(screen.getByText("Join meeting"));
+
+        expect(await screen.findByText("Incorrect password.")).toBeInTheDocument();
+        expect(screen.getByText("This meeting requires a password to join.")).toBeInTheDocument();
+    });
+
+    it("shows a generic error for a non-403 verify failure", async () => {
+        mockFetch((url) => {
+            if (url === "/api/system/branding") return jsonResponse(200, { companyName: "", title: "" });
+            if (url === "/api/mail/video-meetings/join/tok1") return jsonResponse(200, passwordRequiredResponse);
+            if (url === "/api/mail/video-meetings/join/tok1/verify") return jsonResponse(500, { message: "boom" });
+            throw new Error(`unexpected ${url}`);
+        });
+
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        await screen.findByText("This meeting requires a password to join.");
+        fireEvent.change(screen.getByLabelText("Password"), { target: { value: "x" } });
+        fireEvent.click(screen.getByText("Join meeting"));
+
+        expect(await screen.findByText("Something went wrong. Try again.")).toBeInTheDocument();
     });
 });

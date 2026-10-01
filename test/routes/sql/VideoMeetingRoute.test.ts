@@ -597,6 +597,134 @@ describe("Route:VideoMeetingSQL Tests", () => {
         });
     });
 
+    describe("password-protected meetings (GET /join/:token, POST /join/:token/verify)", () => {
+        const createProtected = async (password = "s3cret") => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "Protected", visibility: "public", password });
+            return created.body.meeting as { uid: string; publicSlug: string };
+        };
+
+        it("Persists a hash (never the plaintext, never in create()'s own response) when creating with a password.", async () => {
+            const meeting = await createProtected("s3cret");
+            expect(meeting.passwordHash).toBeUndefined();
+            const row = await meetingRepo.findOne({ where: { uid: meeting.uid } });
+            expect(row!.passwordHash).toBeTruthy();
+            expect(row!.passwordHash).not.toBe("s3cret");
+        });
+
+        it("Sets no passwordHash at all when none was given.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const row = await meetingRepo.findOne({ where: { uid: created.body.meeting.uid } });
+            expect(row!.passwordHash).toBeFalsy();
+        });
+
+        it("Returns requiresPassword with no grant at all from GET /join/:token when a password is set.", async () => {
+            const meeting = await createProtected();
+            const result = await request(server.getApplication()).get(`${baseUrl}/join/${meeting.publicSlug}`);
+
+            expect(result.status).toBe(200);
+            expect(result.body.requiresPassword).toBe(true);
+            expect(result.body.meeting.hasPassword).toBe(true);
+            expect(result.body.meeting.title).toBe("Protected");
+            expect(result.body.iceServers).toBeUndefined();
+            expect(result.body.authenticated).toBeUndefined();
+            expect(result.body.selfUid).toBeUndefined();
+            expect(result.body.token).toBeUndefined();
+        });
+
+        it("Grants a full join via POST /join/:token/verify with the correct password.", async () => {
+            const meeting = await createProtected("s3cret");
+            const result = await request(server.getApplication()).post(`${baseUrl}/join/${meeting.publicSlug}/verify`).send({ password: "s3cret" });
+
+            expect(result.status).toBe(200);
+            expect(result.body.requiresPassword).toBeUndefined();
+            expect(result.body.authenticated).toBe(false);
+            expect(result.body.selfUid).toMatch(/^guest:/);
+            expect(result.body.iceServers.length).toBeGreaterThanOrEqual(2);
+        });
+
+        it("Rejects an incorrect password with 403, granting nothing.", async () => {
+            const meeting = await createProtected("s3cret");
+            const result = await request(server.getApplication()).post(`${baseUrl}/join/${meeting.publicSlug}/verify`).send({ password: "wrong" });
+            expect(result.status).toBe(403);
+            expect(result.body.selfUid).toBeUndefined();
+        });
+
+        it("Rejects a missing password with 403.", async () => {
+            const meeting = await createProtected("s3cret");
+            const result = await request(server.getApplication()).post(`${baseUrl}/join/${meeting.publicSlug}/verify`).send({});
+            expect(result.status).toBe(403);
+        });
+
+        it("Succeeds unconditionally via verify() when the meeting has no password at all.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const result = await request(server.getApplication())
+                .post(`${baseUrl}/join/${created.body.meeting.publicSlug}/verify`)
+                .send({});
+            expect(result.status).toBe(200);
+            expect(result.body.authenticated).toBe(false);
+        });
+
+        it("Lets the real, already-authenticated organizer bypass the password entirely via their own organizerSlug.", async () => {
+            const created = await authed(ownerToken)
+                .post(baseUrl)
+                .send({ mailboxUid: mailbox.uid, title: "x", visibility: "private", invitees: [{ email: "a@example.com" }], password: "s3cret" });
+            const result = await authed(ownerToken).get(`${baseUrl}/join/${created.body.meeting.organizerSlug}`);
+            expect(result.status).toBe(200);
+            expect(result.body.requiresPassword).toBeUndefined();
+            expect(result.body.authenticated).toBe(true);
+        });
+
+        it("Sets, replaces, and clears the password via PUT /:id, each time hashing or nulling server-side.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const uid = created.body.meeting.uid;
+            const slug = created.body.meeting.publicSlug;
+            expect((await request(server.getApplication()).get(`${baseUrl}/join/${slug}`)).body.requiresPassword).toBeUndefined();
+
+            const set = await authed(ownerToken).put(`${baseUrl}/${uid}`).send({ password: "first" });
+            expect(set.status).toBe(200);
+            expect(set.body.passwordHash).toBeUndefined();
+            expect((await request(server.getApplication()).get(`${baseUrl}/join/${slug}`)).body.requiresPassword).toBe(true);
+            expect((await request(server.getApplication()).post(`${baseUrl}/join/${slug}/verify`).send({ password: "first" })).status).toBe(200);
+
+            await authed(ownerToken).put(`${baseUrl}/${uid}`).send({ password: "second" });
+            expect((await request(server.getApplication()).post(`${baseUrl}/join/${slug}/verify`).send({ password: "first" })).status).toBe(403);
+            expect((await request(server.getApplication()).post(`${baseUrl}/join/${slug}/verify`).send({ password: "second" })).status).toBe(200);
+
+            const cleared = await authed(ownerToken).put(`${baseUrl}/${uid}`).send({ password: null });
+            expect(cleared.status).toBe(200);
+            const afterClear = await request(server.getApplication()).get(`${baseUrl}/join/${slug}`);
+            expect(afterClear.body.requiresPassword).toBeUndefined();
+            expect(afterClear.body.authenticated).toBe(false);
+        });
+
+        it("Rejects an empty-string password on update (400) - use null to clear instead.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const result = await authed(ownerToken).put(`${baseUrl}/${created.body.meeting.uid}`).send({ password: "" });
+            expect(result.status).toBe(400);
+        });
+
+        it("Rejects a non-string, non-null password on update (400).", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const result = await authed(ownerToken).put(`${baseUrl}/${created.body.meeting.uid}`).send({ password: 12345 });
+            expect(result.status).toBe(400);
+        });
+
+        it("Rejects a password over the length limit on create (400).", async () => {
+            const result = await authed(ownerToken)
+                .post(baseUrl)
+                .send({ mailboxUid: mailbox.uid, title: "x", visibility: "public", password: "x".repeat(201) });
+            expect(result.status).toBe(400);
+        });
+
+        it("Never includes passwordHash in find()/findById() responses even when one is set.", async () => {
+            const meeting = await createProtected();
+            const listed = await authed(ownerToken).get(`${baseUrl}?mailboxUid=${mailbox.uid}`);
+            expect(listed.body.find((m: any) => m.uid === meeting.uid).passwordHash).toBeUndefined();
+            const read = await authed(ownerToken).get(`${baseUrl}/${meeting.uid}`);
+            expect(read.body.passwordHash).toBeUndefined();
+        });
+    });
+
     const suiteContext = {
         app: () => server.getApplication(),
         baseUrl,

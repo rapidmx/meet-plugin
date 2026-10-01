@@ -116,6 +116,17 @@ export interface VideoMeeting extends BaseEntity {
      * behavior). */
     forceMuteOnJoin?: boolean;
 
+    /** A hash of the password required to join this meeting (`util/PasswordUtils.ts`'s `hashPassword()`), or
+     * `undefined` when no password is required - the ordinary case. Never the plaintext, and never returned by any
+     * API response (not even to the meeting's own owner) - `BaseVideoMeetingRoute.join()`'s `PublicVideoMeeting`
+     * exposes only a `hasPassword: boolean`, enough to decide whether to show a prompt or a "remove password"
+     * control, never anything the hash itself could be recovered from. Checked by
+     * `POST /join/:token/verify` (`BaseVideoMeetingRoute.verifyPassword()`), not by the ordinary `GET /join/:token`,
+     * which instead answers `requiresPassword: true` with none of a normal join's grant when this is set (see that
+     * method's doc comment) - unless the caller resolved via `organizerSlug`, which already proves stronger,
+     * account-ownership-based authority than any password could add. */
+    passwordHash?: string;
+
     /** Informational only in Phase 1 - not used for any availability or conflict checking (a video meeting has no
      * concept of "busy" the way a `Booking` does). */
     startTime?: Date;

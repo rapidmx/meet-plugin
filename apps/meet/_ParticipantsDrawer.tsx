@@ -19,9 +19,10 @@
  *
  * The header also gets a host-only "Mute on join" checkbox (`forceMuteOnJoin`/`onToggleForceMuteOnJoin`) - a
  * setting for whoever joins *next*, not an action on anyone already here (muting someone already in the call is
- * what each row's own "Mute" button is for).
+ * what each row's own "Mute" button is for) - and a host-only password section (`hasPassword`/`onSetPassword`),
+ * the same "next joiner" scope: setting or changing it never affects anyone already in the call.
  */
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import type { MeshParticipant } from "../shared/webrtc/types.js";
 import { TRANSPORT_BADGES } from "./_ParticipantTile.js";
 import { MicOffIcon } from "./_icons.js";
@@ -42,7 +43,78 @@ export interface ParticipantsDrawerProps {
     /** Whether a newly joining participant currently starts muted - the header checkbox's own state, host-only. */
     forceMuteOnJoin: boolean;
     onToggleForceMuteOnJoin: () => void;
+    /** Whether this meeting currently requires a password - never the password itself, which the server never
+     * sends back (see `PublicVideoMeeting.hasPassword`'s own doc comment). */
+    hasPassword: boolean;
+    /** Sets (a non-empty string), replaces, or removes (`null`) the join password. Rejecting lets
+     * `PasswordSection` show its own inline error without this drawer needing to know anything about it. */
+    onSetPassword: (password: string | null) => Promise<void>;
     onClose: () => void;
+}
+
+/** The host-only password form: one text input plus a Set/Change button, and a Remove button once one is set.
+ * Owns its own input/error/busy state locally - `_CallView.tsx` only needs to know whether a password exists, not
+ * what a half-typed one currently says. */
+function PasswordSection({ hasPassword, onSetPassword }: { hasPassword: boolean; onSetPassword: (password: string | null) => Promise<void> }) {
+    const [input, setInput] = useState("");
+    const [error, setError] = useState<string | null>(null);
+    const [busy, setBusy] = useState(false);
+
+    async function submit(password: string | null) {
+        setBusy(true);
+        setError(null);
+        try {
+            await onSetPassword(password);
+            setInput("");
+        } catch {
+            setError("Could not save - try again.");
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    return (
+        <div className="px-3 py-2 border-b border-white/10 text-sm">
+            <p className="text-white/70 mb-1.5">{hasPassword ? "Password protection is on." : "No password required to join."}</p>
+            <form
+                className="flex gap-2"
+                onSubmit={(event) => {
+                    event.preventDefault();
+                    if (input) {
+                        void submit(input);
+                    }
+                }}
+            >
+                <input
+                    type="password"
+                    aria-label={hasPassword ? "New password" : "Set a password"}
+                    placeholder={hasPassword ? "New password" : "Set a password"}
+                    className="flex-1 min-w-0 px-2 py-1 rounded bg-white/10 text-white placeholder:text-white/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                    value={input}
+                    onChange={(event) => setInput(event.target.value)}
+                    disabled={busy}
+                />
+                <button
+                    type="submit"
+                    className="px-2 py-1 rounded text-xs whitespace-nowrap bg-white/10 hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80 disabled:opacity-50"
+                    disabled={busy || !input}
+                >
+                    {hasPassword ? "Change" : "Set"}
+                </button>
+            </form>
+            {hasPassword && (
+                <button
+                    type="button"
+                    className="mt-1.5 text-xs text-[#f2b8b5] underline focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80 disabled:opacity-50"
+                    disabled={busy}
+                    onClick={() => void submit(null)}
+                >
+                    Remove password
+                </button>
+            )}
+            {error && <p className="text-[#f2b8b5] text-xs mt-1.5">{error}</p>}
+        </div>
+    );
 }
 
 function Row({
@@ -132,6 +204,8 @@ export default function ParticipantsDrawer({
     onKick,
     forceMuteOnJoin,
     onToggleForceMuteOnJoin,
+    hasPassword,
+    onSetPassword,
     onClose,
 }: ParticipantsDrawerProps) {
     useEffect(() => {
@@ -170,6 +244,7 @@ export default function ParticipantsDrawer({
                         Mute new participants on join
                     </label>
                 )}
+                {isSelfHost && <PasswordSection hasPassword={hasPassword} onSetPassword={onSetPassword} />}
                 <ul className="flex-1 min-h-0 overflow-y-auto p-2 text-sm">
                     <Row name={selfName} isSelf isHost={isSelfHost} micMuted={!micOn} handRaised={handRaised} />
                     {participants.map((p) => (

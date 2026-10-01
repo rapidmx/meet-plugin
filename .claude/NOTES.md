@@ -1074,3 +1074,47 @@ correctness fix available (flip it back), so this one takes it.
 
 Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
 clean at 100%/98.62%/100%/100% (1419 tests). B4 (password to join) is next, then B5 (waiting room).
+
+## 2026-09-30 (Phase B4 of the 7-item batch): password to join
+
+**Hashing**: nothing in this codebase's own dependency tree (`@rapidrest/*`/`@rapidmx/*`) hashes a credential for
+later verification anywhere - checked before building anything, rather than guessing. New `util/PasswordUtils.ts`
+uses Node's built-in `crypto.scrypt` directly (the same "built-in `crypto`, no new dependency" choice
+`TokenUtils.ts` already made for this plugin's other secrets, rather than adding bcrypt/argon2 for one call site),
+storing `<salt>:<derived key>` both base64url in the one `VideoMeeting.passwordHash` column.
+
+**The real design question was the shape of the gate, not the hash.** `GET /join/:token` already does several
+different things depending on how a token resolved (organizer slug vs. invitee token vs. public slug); adding
+"and also maybe a password" needed its own branch, not a bolt-on check. Settled on: `join()` now returns a
+discriminated union (`VideoMeetingJoinResponse` = `VideoMeetingJoinResult | VideoMeetingPasswordRequiredResult`) -
+a protected meeting resolved via anything but `organizerSlug` gets back only `{ meeting, requiresPassword: true }`,
+with `publicMeeting` computed (so the prompt can still show the title/host) but *no* ICE servers, no minted guest,
+no ACL grant at all - the password gate withholds the actual join, not just a confirmation screen in front of one
+already granted. A new `POST /join/:token/verify` (rate-limited like `join()` itself, the one endpoint a brute-force
+guesser would actually hit) checks the password and then runs the exact same grant logic. Extracted that shared
+logic out of the old monolithic `join()` into `buildPublicMeeting()` (the projection), `requireOrganizerAuth()`
+(the organizer-slug-only authority check, now shared since either endpoint could be hit first for that link), and
+`completeJoin()` (the actual grant) - `join()` and `verifyPassword()` are now both thin callers of the same three
+pieces, rather than near-duplicates.
+
+**The organizer's own slug bypasses the password entirely, on purpose**: holding it already proves stronger,
+account-ownership-based authority than any password could add (see `VideoMeeting.organizerSlug`'s own doc comment
+from Phase 1) - a host should never be able to lock themselves out of their own meeting by setting a password on
+it. `requireOrganizerAuth()` passing is sufficient on its own; the password check is skipped, not merely satisfied.
+
+**Never leak the hash, anywhere, to anyone - not even the owner.** `create()`/`update()`/`find()`/`findById()` all
+return the raw persisted entity today; added `withoutPasswordHash()` and applied it to all four, plus the new
+`hasPassword: boolean` (never the hash) added to `PublicVideoMeeting` as the one thing a client - including the
+host's own UI - is ever told about it.
+
+**Frontend**: `[token].tsx` gains a `"password"` phase between `loading` and `lobby`, shown whenever `joinMeeting()`
+reports `requiresPassword` - a bare title/host + password form, calling the new `verifyMeetingPassword()`; a 403
+shows "Incorrect password," anything else a generic retry message, same posture as every other error screen this
+page already has. The host's side lives in the participants drawer: a new `PasswordSection` (local input/error/busy
+state, so `_CallView.tsx` only needs to track whether a password currently exists) with Set/Change and, once one
+exists, Remove - calling the new `setMeetingPassword()`. Unlike the force-mute toggle (B3), this is NOT applied
+optimistically: a half-typed password sitting in a toggled-on checkbox has no equivalent, and clearing the input
+only on confirmed success is itself the right feedback.
+
+Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
+clean at 100%/98.67%/100%/100% (1472 tests). B5 (waiting room) is the last of the seven.
