@@ -7,6 +7,124 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-01
+
+### Added
+- Added a presenter screen rotate/flip control
+- Added a built-in call diagnostics panel
+- Added a participants drawer
+- Added host identity, mute-request/kicked signals, and enforced kick()
+- Added host mute/kick buttons to the participants drawer
+- Added a force-mute-on-join host setting
+- Added a host-settable password to join
+- Added a host-managed waiting room
+- Added a new model). Guests see a name/password request form, then a
+
+### Changed
+- Tell a TCP-relayed TURN connection apart from a UDP one
+- A phone and a remote PC both over the coturn relay reported "gaps that
+- feel like latency, not packet loss." For a TURN-relayed connection this
+- plugin's code has no role in audio encode/decode/jitter at all - that's
+- entirely the browser's native WebRTC engine - so there's no equivalent
+- What the symptom matches precisely is TCP-relayed TURN (?transport=tcp,
+- or turns: - TLS is TCP-based too): UDP drops a lost packet (a click);
+- TCP retransmits it and, being ordered, blocks everything queued behind
+- it until that arrives (a stall). withTcpFallback() already offers both
+- transports so a UDP-blocking network can still reach the TURN server at
+- all, but that means a participant on such a network gets this degraded
+- experience silently - no way to tell it apart from an ordinary relayed
+- connection.
+- selectedConnectionType() now reads the selected local candidate's own
+- relayProtocol (standard RTCIceCandidateStats, already available via
+- getStats()) and reports a new "turn-tcp" MediaTransport distinct from
+- plain "turn" when it's tcp/tls. The tile badge now says "Relayed (TCP)"
+- with a title explaining why, instead of reading identically to a
+- UDP-relayed connection.
+- Not a fix for the latency itself - there isn't one available at this
+- layer - but it turns "can you fix it?" into something actionable: this
+- badge is what tells you whether the next step is checking the coturn
+- deployment's UDP reachability (infrastructure, not this repo).
+- the earlier "screen sharing a window displays upside down" report -
+- confirmed at the time to be the browser's own window-capture bug (already
+- upside down in the presenter's own raw local preview before this app's
+- code ever touched it), so there was nothing to patch, only a manual
+- correction to offer.
+- New ScreenTransformProcessor (apps/shared/media/filters/ScreenTransform.ts)
+- mirrors VideoFilterProcessor's shape (hidden <video>, canvas redrawn on a
+- timer, captureStream() exposing the result) much simplified - just a
+- rotate/flip applied per draw. It transforms the actual track that's sent,
+- not a local CSS effect, so everyone benefits, not just the presenter's own
+- view. _CallView.tsx owns it the same way useLocalMedia owns the camera's
+- filter processor: built when screen sharing starts, torn down (and reset
+- to identity) when it stops.
+- Two new buttons in _CallControls.tsx, next to Share Screen, visible only
+- while presenting.
+- for the full batch). A navbar button opens a panel showing this browser's
+- own WebRTC/screen-share/WebCodecs support, what the local participant is
+- sending, and per-participant connection info: the same transport badge
+- _ParticipantTile.tsx already shows, plus round-trip time and per-kind
+- packet loss/jitter/bytes once MeshConnectionManager's new periodic
+- getStats() polling reports them. Entirely local and read-only - nothing
+- here is sent anywhere.
+- Third of seven requested call-experience features, and the last of the
+- Clicking the header's participant-count chip opens a right-side drawer
+- listing everyone in the call - "you" first - with the same mic-muted,
+- hand-raised and connection-transport-badge information the tile grid
+- already shows, as plain rows. Display-only for now; host mute/kick
+- controls are added to these same rows once host identity exists.
+- seven-item batch and plan). join() now resolves hostUid from the
+- meeting's mailbox owner, letting clients identify the host purely for
+- UI purposes. Two new point-to-point signals (mute-request, kicked) let
+- a host's tab ask a participant to mute or tell them they were removed;
+- a kicked participant sees a distinct "removed by the host" screen. The
+- cooperative kicked signal is backed by a real new POST /:id/kick/:uid
+- route that revokes the target's push channel grant, so removal is
+- enforced server-side even if their client ignores the signal.
+- The mute/kick buttons themselves (host-only, in the participants
+- drawer) are a follow-up change.
+- Wires up Phase B1's host-identity plumbing: a host now sees a Mute and
+- a Remove button on every other participant's row in the participants
+- drawer. Remove confirms first and both sends the cooperative kicked
+- signal and calls the enforced kick() endpoint, using a new
+- accountUidOf() helper to recover the participant's real account uid
+- from their tab-scoped peer id (kick's ACL check is keyed by the
+- former, not the latter).
+- Documented a real limitation rather than overselling it: kick()
+- revokes a participant's current grant, not their standing to get a
+- new one, so a removed guest who reloads the join link is granted
+- right back in. An actual ban is a larger, separate feature.
+- VideoMeeting.forceMuteOnJoin, settable at creation or via update(),
+- returned by join() so a joining participant's microphone starts muted
+- for that call only - their own remembered mic preference for future
+- calls is left untouched. A host-only checkbox in the participants
+- drawer's header toggles it, applied optimistically and reverted if the
+- save fails.
+- now set a password in the participants drawer, hashed server-side
+- with scrypt (this codebase's first stored credential, no existing
+- hashing utility to reuse). join() now withholds the actual grant -
+- ICE servers, guest minting, channel access - behind a new
+- requiresPassword response until POST /join/:token/verify confirms the
+- password, rather than just adding a confirmation screen in front of
+- an already-granted join. The meeting owner's own organizerSlug still
+- bypasses it entirely, since holding that already proves stronger
+- authority than any password could add.
+- Meetings can now require host admission before a guest's join completes.
+- When waitingRoomEnabled is set, join() withholds the grant and files a
+- pending admission (tracked in-memory per route instance, mirroring the
+- existing RelayHub trade-off of dropping state on restart rather than
+- waiting screen that polls for the host's decision; hosts get a waiting
+- list in the participants drawer with Admit/Deny actions. Waiting room
+- takes priority over a password gate when a meeting has both, since the
+- admission form already collects both in one step.
+- minted a fresh guest uid for unauthenticated callers, which would have
+- discarded a waiting guest's already-registered identity on admission.
+- Extracted grantJoin() as the shared "grant an already-known identity"
+- step so pollAdmission() can hand back the uid it already has.
+
+### Fixed
+- Fixed available here the way there was for the WebSocket relay tier.
+- Fixed a latent identity bug while wiring this up: completeJoin() always
+
 ## [0.9.3] - 2026-09-30
 
 ### Changed
@@ -281,7 +399,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/rapidmx/meet-plugin/compare/v0.9.3...v0.10.0
 [0.9.3]: https://github.com/rapidmx/meet-plugin/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/rapidmx/meet-plugin/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/rapidmx/meet-plugin/compare/v0.9.0...v0.9.1
