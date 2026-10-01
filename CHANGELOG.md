@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-01
+
+### Added
+- Added a host-managed talking stick mode
+
+### Changed
+- A host-only navbar toggle that, once on, lets only one participant's
+- microphone be unmuted at a time: activating it makes the host the
+- initial holder (everyone else muted), and the host hands it off to
+- whoever should speak next from the participants drawer - the new
+- holder is unmuted automatically, everyone else (including the host)
+- is muted and their mic button disabled for as long as it applies.
+- Pure in-call runtime state, no backend route or persisted field: a new
+- broadcast SignalMessage kind ("talking-stick") and MeshConnectionManager
+- method/event, the same shape as the existing mute-request/kicked
+- signals and subject to the same cooperative trust model. Unlike those,
+- though, this is enforced with a disabled control rather than a one-time
+- nudge, since the whole point is that silence actually holds.
+
 ## [0.10.0] - 2026-10-01
 
 ### Added
@@ -399,7 +418,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/rapidmx/meet-plugin/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/rapidmx/meet-plugin/compare/v0.9.3...v0.10.0
 [0.9.3]: https://github.com/rapidmx/meet-plugin/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/rapidmx/meet-plugin/compare/v0.9.1...v0.9.2
