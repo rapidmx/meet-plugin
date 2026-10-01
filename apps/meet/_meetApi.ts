@@ -74,3 +74,13 @@ export interface VideoMeetingJoinResult {
 export function joinMeeting(token: string): Promise<VideoMeetingJoinResult> {
     return apiFetch(`/mail/video-meetings/join/${encodeURIComponent(token)}`);
 }
+
+/** Removes a participant from the meeting - host only, enforced server-side with the caller's own authenticated
+ * session (the same mailbox-ACL check every other owner-side video-meeting route uses), not by anything the
+ * client claims. Revokes `uid`'s grant on the meeting's own push channel, so they can no longer signal or relay
+ * media even if their client ignores the cooperative "kicked" signal a host's UI sends alongside this
+ * (`MeshConnectionManager.sendKick()`). `uid` is the participant's real account uid (`MeshParticipant.uid` minus
+ * its tab-scoped suffix - see `_CallView.tsx`'s `accountUidOf()`), not their tab-scoped peer id. */
+export function kickParticipant(meetingUid: string, uid: string): Promise<void> {
+    return apiFetch(`/mail/video-meetings/${encodeURIComponent(meetingUid)}/kick/${encodeURIComponent(uid)}`, { method: "POST" });
+}

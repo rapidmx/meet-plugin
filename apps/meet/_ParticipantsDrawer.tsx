@@ -4,17 +4,18 @@
 ///////////////////////////////////////////////////////////////////////////////
 /**
  * The participants drawer, opened from the header's participant-count chip: a right-side panel listing everyone in
- * the call, "you" first. Display-only for now - the same mic-muted/hand-raised/transport-badge information
- * `_ParticipantTile.tsx` already shows on a tile, as plain rows instead (a list reads better than tiles once
- * there's a reason to scan for one name). Host controls (mute/kick) arrive in a later phase once a "host" identity
- * exists in the client protocol; this phase intentionally shows the same rows to everyone.
+ * the call, "you" first. The same mic-muted/hand-raised/transport-badge information `_ParticipantTile.tsx` already
+ * shows on a tile, as plain rows instead (a list reads better than tiles once there's a reason to scan for one
+ * name).
  *
  * Closes on Escape, on a click on the backdrop behind it, or its own close button - never on a click inside the
  * drawer itself, matching `_CallControls.tsx`'s menus.
  *
  * A "Host" tag marks the host's own row (`isSelfHost`/`isParticipantHost` - see `_CallView.tsx`'s doc comment on
- * `hostUid` for what that identity is and isn't) - informational only in this phase; the mute/kick buttons that
- * actually use `isSelfHost` to decide who sees them arrive in a later phase.
+ * `hostUid` for what that identity is and isn't). Only while `isSelfHost` does every *other* row also get a "Mute"
+ * button (hidden once that participant is already muted - there is no useful "unmute someone else" action to
+ * offer) and a "Remove" button (a native `confirm()` first, since removal can't be undone by the participant the
+ * way a mute request can) - never on the local participant's own row, and never shown to anyone but the host.
  */
 import React, { useEffect } from "react";
 import type { MeshParticipant } from "../shared/webrtc/types.js";
@@ -28,6 +29,12 @@ export interface ParticipantsDrawerProps {
     participants: MeshParticipant[];
     isSelfHost: boolean;
     isParticipantHost: (uid: string) => boolean;
+    /** Sends a mute request to the given participant's `uid` - a no-op from the recipient's end if they're already
+     * muted (see `Row`'s own "already muted" guard, which never even shows the button then). */
+    onMute: (uid: string) => void;
+    /** Removes the given participant's `uid` - see `_CallView.tsx`'s `handleKickParticipant()` for what this
+     * actually does (the cooperative signal plus the enforced server-side revoke). */
+    onKick: (uid: string) => void;
     onClose: () => void;
 }
 
@@ -38,6 +45,9 @@ function Row({
     micMuted,
     handRaised,
     transport,
+    canModerate,
+    onMute,
+    onKick,
 }: {
     name: string;
     isSelf?: boolean;
@@ -45,6 +55,10 @@ function Row({
     micMuted: boolean;
     handRaised: boolean;
     transport?: MeshParticipant["transport"];
+    /** Whether to show this row's Mute/Remove buttons - `isSelfHost && !isSelf`, decided by the caller. */
+    canModerate?: boolean;
+    onMute?: () => void;
+    onKick?: () => void;
 }) {
     const badge = transport ? TRANSPORT_BADGES[transport] : undefined;
     return (
@@ -72,11 +86,35 @@ function Row({
                     {badge.label}
                 </span>
             )}
+            {canModerate && !micMuted && (
+                <button
+                    type="button"
+                    className="px-2 py-0.5 rounded text-xs whitespace-nowrap bg-white/10 hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                    aria-label={`Mute ${name}`}
+                    onClick={onMute}
+                >
+                    Mute
+                </button>
+            )}
+            {canModerate && (
+                <button
+                    type="button"
+                    className="px-2 py-0.5 rounded text-xs whitespace-nowrap bg-[#601410] text-[#f9dedc] hover:bg-[#7a1b16] focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                    aria-label={`Remove ${name}`}
+                    onClick={() => {
+                        if (window.confirm(`Remove ${name} from the call?`)) {
+                            onKick?.();
+                        }
+                    }}
+                >
+                    Remove
+                </button>
+            )}
         </li>
     );
 }
 
-export default function ParticipantsDrawer({ selfName, micOn, handRaised, participants, isSelfHost, isParticipantHost, onClose }: ParticipantsDrawerProps) {
+export default function ParticipantsDrawer({ selfName, micOn, handRaised, participants, isSelfHost, isParticipantHost, onMute, onKick, onClose }: ParticipantsDrawerProps) {
     useEffect(() => {
         const onKeyDown = (event: KeyboardEvent) => {
             if (event.key === "Escape") {
@@ -117,6 +155,9 @@ export default function ParticipantsDrawer({ selfName, micOn, handRaised, partic
                             micMuted={!p.audioOn}
                             handRaised={p.handRaised}
                             transport={p.transport}
+                            canModerate={isSelfHost}
+                            onMute={() => onMute(p.uid)}
+                            onKick={() => onKick(p.uid)}
                         />
                     ))}
                 </ul>

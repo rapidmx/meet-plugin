@@ -1010,3 +1010,37 @@ as that method's own tests - the retry logic is backend-agnostic).
 Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
 clean at 100%/98.6%/100%/100% (1389 tests). Next: B2 (the mute/kick buttons in the participants drawer, now that
 `isHost`/`sendMuteRequest`/`sendKick` all exist to wire up), then B3-B5 (force-mute-on-join, password, waiting room).
+
+## 2026-09-30 (Phase B2 of the 7-item batch): host mute/kick buttons in the participants drawer
+
+Second half of host moderation, wiring up everything B1 built. `_ParticipantsDrawer.tsx`'s rows now get a "Mute"
+button (hidden once that participant is already muted - there's no "unmute someone else" action to offer) and a
+"Remove" button, both only on another participant's row and only while `isSelfHost` - never on the host's own row,
+never shown to anyone else. "Remove" confirms first (a plain `window.confirm()` - this plugin has no reusable
+confirm-dialog component yet, and one call site didn't justify building one) since it can't be undone by the
+participant the way a mute request can.
+
+Needed one piece `_CallView.tsx` didn't have: the participant's *real* account uid. `MeshParticipant.uid` is the
+tab-scoped peer id (`<account uid>~<random>`, see `newPeerId()`), but `kick()`'s route and the ACL it revokes are
+keyed by the plain account uid - sending the peer id to `kick()` would silently no-op (`revokeChannelGrant()`
+treats "no matching record" as success, not an error, so this would have failed silently rather than loudly). New
+`accountUidOf()` strips the suffix, relying on the same invariant `handleMessage()`'s own `raw.peer.startsWith(
+`${raw.from}~`)` check already assumes: neither a real account uid nor a minted guest uid can itself contain "~".
+`handleKickParticipant()` fires the cooperative `sendKick()` signal immediately (so a cooperating client leaves
+without waiting on the network) and `kickParticipant()` (new `_meetApi.ts` call, `POST .../kick/:uid`) alongside
+it - its failure is swallowed, not surfaced, since the host already asked the participant to leave and there's no
+useful recovery action to offer from here.
+
+**Found and documented, not fixed - a real gap, not a nitpick**: `kick()` only revokes the *grant* a participant
+currently holds, not their standing to get another one. A removed guest who simply reloads the same join link is
+minted a fresh guest uid and re-granted by `join()` exactly like any first-time joiner; a removed real caller who
+still holds mailbox READ is re-granted their own uid back the same way. So "Remove" ends a participant's *current*
+connection, but is not a ban - the UI's confirm text was written to not imply otherwise, and `kick()`'s own doc
+comment on the backend spells out why (an actual ban needs new state tracking who was removed, consulted by
+`join()`/`ensureChannelGrant()` - a larger feature, out of scope here). `_CallView.test.tsx`'s own "Rejoin meeting"
+screen for a kicked participant is hidden for the same reason it's honest to hide it (the same tab's one-click
+retry is pointless), not because reloading the link itself is blocked.
+
+Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
+clean at 100%/98.61%/100%/100% (1398 tests). This closes Phase B's mute/kick pair; B3 (force-mute-on-join) is next,
+then B4 (password to join) and B5 (waiting room), per the approved plan's sequencing.

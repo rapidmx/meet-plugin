@@ -5,7 +5,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { jsonResponse, mockFetch } from "../testUtils.js";
-import { joinMeeting } from "../../../apps/meet/_meetApi.js";
+import { joinMeeting, kickParticipant } from "../../../apps/meet/_meetApi.js";
 
 afterEach(() => {
     vi.unstubAllGlobals();
@@ -52,5 +52,24 @@ describe("joinMeeting", () => {
     it("rejects with an ApiRequestError on a 404", async () => {
         mockFetch(() => jsonResponse(404, { message: "Not Found." }));
         await expect(joinMeeting("stale-token")).rejects.toMatchObject({ status: 404 });
+    });
+});
+
+describe("kickParticipant", () => {
+    it("POSTs the kick endpoint with the meeting uid and participant uid URL-encoded", async () => {
+        const fetchMock = mockFetch((url, init) => {
+            expect(url).toBe("/api/mail/video-meetings/m1/kick/guest%3Aabc");
+            expect(init?.method).toBe("POST");
+            return jsonResponse(204, undefined);
+        });
+
+        await kickParticipant("m1", "guest:abc");
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects with an ApiRequestError on a 403 (not the host)", async () => {
+        mockFetch(() => jsonResponse(403, { message: "Permission denied." }));
+        await expect(kickParticipant("m1", "guest:abc")).rejects.toMatchObject({ status: 403 });
     });
 });

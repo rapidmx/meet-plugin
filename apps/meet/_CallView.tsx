@@ -47,6 +47,7 @@ import type { MeshParticipant, RelayTransportLike } from "../shared/webrtc/types
 import { createRelayTransport } from "../shared/relay/RelayTransport.js";
 import { GuestSignalingClient } from "../shared/push/GuestSignalingClient.js";
 import CallControls, { type CallViewMode } from "./_CallControls.js";
+import { kickParticipant } from "./_meetApi.js";
 import ParticipantTile from "./_ParticipantTile.js";
 import ParticipantsDrawer from "./_ParticipantsDrawer.js";
 
@@ -112,6 +113,16 @@ export function computeMainUid(options: {
  * `peer` of each message; `from` stays the exact authenticated uid, which the server requires. */
 export function newPeerId(selfUid: string): string {
     return `${selfUid}~${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)}`;
+}
+
+/** The real, server-enforced account uid behind a participant's tab-scoped `MeshParticipant.uid` (`newPeerId()`'s
+ * `<account uid>~<random>` shape) - what the kick route's ACL grant is actually keyed by, unlike the tab-scoped id
+ * this view otherwise addresses a specific tab with. Neither a real account uid nor a minted guest uid (see
+ * `GUEST_UID_PREFIX`/`mintGuestToken()` on the backend) can itself contain "~", so the last one found is always
+ * exactly this suffix's own separator. */
+export function accountUidOf(peerUid: string): string {
+    const i = peerUid.lastIndexOf("~");
+    return i === -1 ? peerUid : peerUid.slice(0, i);
 }
 
 export default function CallView({ channel, token, selfUid, selfName, meetingTitle, iceServers, relayEnabled, hostUid, media, onLeave }: CallViewProps) {
@@ -366,6 +377,23 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
         setPinnedUid((prev) => (prev === uid ? undefined : uid));
     }
 
+    /** Asks `peerUid`'s participant to mute - the host-only button in the participants drawer calls this
+     * directly, with no confirmation (unlike removing someone, muting is easily undone by the participant
+     * themselves). */
+    function handleMuteParticipant(peerUid: string) {
+        managerRef.current?.sendMuteRequest(peerUid);
+    }
+
+    /** Removes `peerUid`'s participant from the call: the cooperative signal (immediate, so a cooperating client
+     * leaves without waiting on the network round trip below) and the enforced server-side revoke together - see
+     * `kickParticipant()`'s own doc comment for why both matter. The REST call's failure is swallowed rather than
+     * surfaced: the host already asked them to leave, and there is no useful recovery action to offer from here
+     * for what is almost always a transient network issue. */
+    function handleKickParticipant(peerUid: string) {
+        managerRef.current?.sendKick(peerUid);
+        kickParticipant(channel, accountUidOf(peerUid)).catch(() => undefined);
+    }
+
     function handleAudioBlocked() {
         setAudioBlocked(true);
     }
@@ -571,6 +599,8 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
                     participants={participants}
                     isSelfHost={isHost}
                     isParticipantHost={isParticipantHost}
+                    onMute={handleMuteParticipant}
+                    onKick={handleKickParticipant}
                     onClose={() => setDrawerOpen(false)}
                 />
             )}

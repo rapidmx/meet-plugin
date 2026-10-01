@@ -102,7 +102,10 @@ vi.mock("../../../apps/shared/media/deviceMedia.js", async (importOriginal) => {
 });
 vi.mock("../../../apps/shared/media/chime.js", () => ({ playRaisedHandChime: chimeMock }));
 
-import CallView, { computeMainUid, newPeerId } from "../../../apps/meet/_CallView.js";
+const kickParticipantMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock("../../../apps/meet/_meetApi.js", () => ({ kickParticipant: kickParticipantMock }));
+
+import CallView, { accountUidOf, computeMainUid, newPeerId } from "../../../apps/meet/_CallView.js";
 
 /** This tab's own id on the channel - `CallView` appends a random suffix to the uid it is given (stubbed below). */
 const SELF = "local-me~fixed";
@@ -898,5 +901,86 @@ describe("CallView - host moderation signals", () => {
         const { client, onLeave } = await connected();
         client.emit({ type: "video-meeting-signal", kind: "kicked", from: "zzz", to: "someone-else" });
         expect(onLeave).not.toHaveBeenCalled();
+    });
+});
+
+describe("accountUidOf", () => {
+    it("strips the tab-scoped suffix off a peer id", () => {
+        expect(accountUidOf("user-1~abc-123")).toBe("user-1");
+        expect(accountUidOf("guest:xyz~abc-123")).toBe("guest:xyz");
+    });
+
+    it("returns the uid unchanged when it carries no suffix at all", () => {
+        expect(accountUidOf("user-1")).toBe("user-1");
+    });
+});
+
+describe("CallView - host mute/kick controls", () => {
+    async function withHostAndParticipant() {
+        const view = await connected({ selfUid: "local-me", hostUid: "local-me" });
+        view.client.emit({ type: "video-meeting-signal", kind: "hello", from: "zzz", peer: "zzz~tab", name: "Zed", state: STATE });
+        await screen.findAllByText("Zed");
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        return view;
+    }
+
+    it("sends a mute request to the participant's own tab, and hides the button once they're already muted", async () => {
+        const { client } = await withHostAndParticipant();
+        const drawer = screen.getByRole("dialog", { name: "Participants" });
+        const row = within(drawer).getByText("Zed").closest("li")!;
+        fireEvent.click(within(row).getByRole("button", { name: "Mute Zed" }));
+        expect(client.sent).toContainEqual(expect.objectContaining({ kind: "mute-request", to: "zzz~tab" }));
+
+        client.emit({ type: "video-meeting-signal", kind: "state", from: "zzz", peer: "zzz~tab", state: { ...STATE, audioOn: false } });
+        expect(within(row).queryByRole("button", { name: "Mute Zed" })).toBeNull();
+    });
+
+    it("removes a participant after confirming, sending the kicked signal and calling the kick endpoint with their real account uid", async () => {
+        const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+        const { client } = await withHostAndParticipant();
+        const drawer = screen.getByRole("dialog", { name: "Participants" });
+        const row = within(drawer).getByText("Zed").closest("li")!;
+
+        fireEvent.click(within(row).getByRole("button", { name: "Remove Zed" }));
+
+        expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("Zed"));
+        expect(client.sent).toContainEqual(expect.objectContaining({ kind: "kicked", to: "zzz~tab" }));
+        expect(kickParticipantMock).toHaveBeenCalledWith("meeting-1", "zzz");
+        confirmSpy.mockRestore();
+    });
+
+    it("swallows a failed kick-endpoint call rather than surfacing it - the cooperative signal was already sent", async () => {
+        const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+        kickParticipantMock.mockRejectedValueOnce(new Error("network error"));
+        await withHostAndParticipant();
+        const drawer = screen.getByRole("dialog", { name: "Participants" });
+        const row = within(drawer).getByText("Zed").closest("li")!;
+
+        fireEvent.click(within(row).getByRole("button", { name: "Remove Zed" }));
+        await waitFor(() => expect(kickParticipantMock).toHaveBeenCalled());
+
+        expect(screen.getByRole("dialog", { name: "Participants" })).toBeInTheDocument();
+        confirmSpy.mockRestore();
+    });
+
+    it("does nothing when the removal confirmation is declined", async () => {
+        const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+        const { client } = await withHostAndParticipant();
+        const drawer = screen.getByRole("dialog", { name: "Participants" });
+        const row = within(drawer).getByText("Zed").closest("li")!;
+
+        fireEvent.click(within(row).getByRole("button", { name: "Remove Zed" }));
+
+        expect(client.sent).not.toContainEqual(expect.objectContaining({ kind: "kicked" }));
+        expect(kickParticipantMock).not.toHaveBeenCalled();
+        confirmSpy.mockRestore();
+    });
+
+    it("shows no moderation buttons to a non-host, and none on the host's own row", async () => {
+        await withParticipant();
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        const drawer = screen.getByRole("dialog", { name: "Participants" });
+        expect(within(drawer).queryByRole("button", { name: /^Mute / })).toBeNull();
+        expect(within(drawer).queryByRole("button", { name: /^Remove / })).toBeNull();
     });
 });

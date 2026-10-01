@@ -896,7 +896,13 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             "subscribe to or publish on it - and therefore can no longer signal or relay media, even if their " +
             "client ignores the cooperative 'kicked' signal the host's own UI also sends over the mesh (see " +
             "SignalMessage's doc comment for why that signal alone isn't enforcement). A no-op if 'uid' holds no " +
-            "grant (already removed, or never joined). Requires UPDATE on the meeting's owning mailbox.",
+            "grant (already removed, or never joined). Requires UPDATE on the meeting's owning mailbox. " +
+            "Known limitation: this revokes the one grant 'uid' currently holds, not the token/slug they used to " +
+            "get it - a removed guest who reloads the same join link is minted a brand new guest uid and " +
+            "re-granted by join() exactly as any other first-time joiner would be, and a removed real caller who " +
+            "still holds mailbox READ is re-granted their own uid back the same way. An actual ban (rejecting a " +
+            "specific identity's future joins, not just today's connection) is a larger feature - new state " +
+            "tracking who was removed and join()/ensureChannelGrant() consulting it - out of scope here.",
     )
     @Post("/:id/kick/:uid")
     public async kick(@Param("id") id: string, @Param("uid") uid: string, @AuthUser user?: JWTUser): Promise<void> {
