@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-10-01
+
+### Changed
+- Use a baton icon for the talking-stick toggle
+- Replaces the "Talking stick"/"End talking stick" text label with a
+- new icon-only button, matching every other control's icon-only shape.
+- The accessible name is unchanged (now an aria-label instead of visible
+- text), so nothing else needed to change.
+
 ## [0.12.0] - 2026-10-01
 
 ### Changed
@@ -433,7 +442,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/rapidmx/meet-plugin/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/rapidmx/meet-plugin/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/rapidmx/meet-plugin/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/rapidmx/meet-plugin/compare/v0.9.3...v0.10.0
