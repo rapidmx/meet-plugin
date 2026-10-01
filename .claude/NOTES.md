@@ -1214,3 +1214,30 @@ row already holds it, with a 🎙️ badge on that row visible to every viewer, 
 
 Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
 clean at 100%/98.57%/100%/100% (1570 tests).
+
+## 2026-09-30 (follow-up polish, same day): participants drawer as a docked sidebar, diagnostics as a top-left overlay
+
+Two small UX requests after trying the call in a real browser.
+
+**Participants drawer no longer dims/covers the call.** It was an absolutely-positioned overlay with a `bg-black/40`
+backdrop (click-outside-to-close, like `_CallControls.tsx`'s menus) - JP wanted it stay visible alongside the call
+instead, not cover it. Restructured `_CallView.tsx`'s own top-level layout: the call's header/tiles/controls (plus
+the self-view tile, reactions and the sr-only announcement region, all previously positioned `absolute` against the
+whole call) now live in their own `flex-1 min-w-0` column, with the outer container switched from `flex-col` to a
+plain `flex` row. The drawer is that row's second child, an ordinary `shrink-0 w-72` sidebar - no backdrop, no
+`absolute` positioning of its own - so opening it now shrinks the call column instead of covering any of it. Lost
+"click the backdrop to close" as a direct consequence (there is no backdrop); Escape and the chip/close button
+still close it. The self-view tile and reactions still render correctly confined to the shrunk call column, since
+their own `absolute` positioning is relative to that column's new `relative` wrapper, not the page.
+
+**Diagnostics panel moved to a `fixed` top-left overlay.** It was a dropdown anchored above its own button in the
+bottom control bar (`_CallControls.tsx`, `absolute bottom-full right-0`) - moved to `fixed top-3 left-3`, reading
+more like a HUD overlaid on the call than a menu tucked into the bottom bar. Deliberately kept as the exact same
+panel and the same open/close button rather than redesigning its content (JP confirmed this over a condensed
+always-on alternative) - round-trip time (ping/latency), jitter and packet loss per participant were already there,
+just inside a panel shaped like a dropdown rather than an overlay. The outside-click/Escape handling still works
+unchanged: it keys off DOM containment within the control bar (`barRef`), which `position: fixed` doesn't affect -
+only the panel's own visual position moved, not where it sits in the tree.
+
+Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
+clean at 100%/98.57%/100%/100% (1570 tests).

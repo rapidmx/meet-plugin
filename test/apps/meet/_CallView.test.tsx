@@ -823,7 +823,7 @@ describe("CallView - participants drawer", () => {
         expect(screen.queryByRole("dialog", { name: "Participants" })).toBeNull();
     });
 
-    it("closes the drawer again from the same chip, on Escape, and on a click on the backdrop", async () => {
+    it("closes the drawer again from the same chip, and on Escape - it is a docked sidebar, so there is no backdrop to click", async () => {
         await connected();
         const chip = screen.getByRole("button", { name: "1 participants" });
 
@@ -835,10 +835,6 @@ describe("CallView - participants drawer", () => {
         fireEvent.keyDown(document, { key: "Enter" });
         expect(screen.getByRole("dialog")).toBeInTheDocument();
         fireEvent.keyDown(document, { key: "Escape" });
-        expect(screen.queryByRole("dialog")).toBeNull();
-
-        fireEvent.click(chip);
-        fireEvent.click(screen.getByRole("dialog").previousSibling as Element);
         expect(screen.queryByRole("dialog")).toBeNull();
     });
 

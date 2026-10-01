@@ -9,6 +9,12 @@
  * screen, reactions, raise hand, grid/focus and leave. The effects button opens the video filter picker
  * (`_EffectsPanel.tsx`) and lights up while any filter is on.
  *
+ * The diagnostics button is the one exception to "opens near its own button": its panel is `fixed` to the
+ * viewport's top-left corner rather than anchored above the button, since it reads better as a HUD-style overlay
+ * sitting over the call than as a dropdown tucked into the bottom control bar. The outside-click/Escape handling
+ * (`barRef`) still closes it the same way, since it's still a DOM descendant of the bar - only its visual position
+ * moved, not its open/close wiring.
+ *
  * The microphone button shows a live level while it is unmuted - bars that move with the sound the microphone is
  * picking up, so a participant can see their audio is being sent - and the camera button shows a green dot while a
  * camera is sending. Both are driven by `LocalMedia` (`apps/shared/media/useLocalMedia.ts`). The microphone button
@@ -322,7 +328,7 @@ export default function CallControls({
                     <div
                         role="dialog"
                         aria-label="Call diagnostics"
-                        className="absolute bottom-full mb-3 right-0 w-80 max-w-[calc(100vw-1rem)] max-h-[60vh] overflow-y-auto p-3 rounded-2xl bg-[#2b2d30] text-white shadow-xl"
+                        className="fixed z-30 top-3 left-3 w-80 max-w-[calc(100vw-1rem)] max-h-[70vh] overflow-y-auto p-3 rounded-2xl bg-[#2b2d30]/95 text-white shadow-xl"
                     >
                         <DiagnosticsPanel selfName={selfName} micOn={media.micOn} cameraOn={media.cameraOn} participants={participants} />
                     </div>

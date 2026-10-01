@@ -8,8 +8,10 @@
  * shows on a tile, as plain rows instead (a list reads better than tiles once there's a reason to scan for one
  * name).
  *
- * Closes on Escape, on a click on the backdrop behind it, or its own close button - never on a click inside the
- * drawer itself, matching `_CallControls.tsx`'s menus.
+ * A docked sidebar, not an overlay: `_CallView.tsx` renders it as an ordinary flex sibling of the call's own
+ * content column, which shrinks to make room rather than being covered by a backdrop - meant to stay open and
+ * visible for as long as the participant wants, including while the call continues underneath. Closes on Escape or
+ * its own close button; there is no backdrop to click, on purpose.
  *
  * A "Host" tag marks the host's own row (`isSelfHost`/`isParticipantHost` - see `_CallView.tsx`'s doc comment on
  * `hostUid` for what that identity is and isn't). Only while `isSelfHost` does every *other* row also get a "Mute"
@@ -328,70 +330,66 @@ export default function ParticipantsDrawer({
     }, [onClose]);
 
     return (
-        <>
-            <div className="absolute inset-0 z-20 bg-black/40" onClick={onClose} aria-hidden="true" />
-            <aside
-                role="dialog"
-                aria-label="Participants"
-                className="absolute z-20 inset-y-0 right-0 w-72 max-w-[85vw] flex flex-col bg-[#2b2d30] text-white shadow-xl"
-                onClick={(event) => event.stopPropagation()}
-            >
-                <div className="flex items-center justify-between gap-2 px-3 py-3 border-b border-white/10">
-                    <h2 className="text-sm font-medium">Participants ({participants.length + 1})</h2>
-                    <button
-                        type="button"
-                        className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
-                        aria-label="Close participants"
-                        onClick={onClose}
-                    >
-                        ✕
-                    </button>
-                </div>
-                {isSelfHost && (
-                    <label className="flex items-center gap-2 px-3 py-2 border-b border-white/10 text-sm">
-                        <input type="checkbox" checked={forceMuteOnJoin} onChange={onToggleForceMuteOnJoin} className="w-4 h-4" />
-                        Mute new participants on join
-                    </label>
-                )}
-                {isSelfHost && <PasswordSection hasPassword={hasPassword} onSetPassword={onSetPassword} />}
-                {isSelfHost && (
-                    <label className="flex items-center gap-2 px-3 py-2 border-b border-white/10 text-sm">
-                        <input type="checkbox" checked={waitingRoomEnabled} onChange={onToggleWaitingRoomEnabled} className="w-4 h-4" />
-                        Require the host to admit participants
-                    </label>
-                )}
-                {isSelfHost && waitingRoomEnabled && (
-                    <WaitingSection waitingParticipants={waitingParticipants} onAdmit={onAdmit} onDeny={onDeny} />
-                )}
-                <ul className="flex-1 min-h-0 overflow-y-auto p-2 text-sm">
+        <aside
+            role="dialog"
+            aria-label="Participants"
+            className="relative z-10 shrink-0 w-72 max-w-[85vw] h-full flex flex-col bg-[#2b2d30] text-white shadow-xl border-l border-white/10"
+        >
+            <div className="flex items-center justify-between gap-2 px-3 py-3 border-b border-white/10">
+                <h2 className="text-sm font-medium">Participants ({participants.length + 1})</h2>
+                <button
+                    type="button"
+                    className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                    aria-label="Close participants"
+                    onClick={onClose}
+                >
+                    ✕
+                </button>
+            </div>
+            {isSelfHost && (
+                <label className="flex items-center gap-2 px-3 py-2 border-b border-white/10 text-sm">
+                    <input type="checkbox" checked={forceMuteOnJoin} onChange={onToggleForceMuteOnJoin} className="w-4 h-4" />
+                    Mute new participants on join
+                </label>
+            )}
+            {isSelfHost && <PasswordSection hasPassword={hasPassword} onSetPassword={onSetPassword} />}
+            {isSelfHost && (
+                <label className="flex items-center gap-2 px-3 py-2 border-b border-white/10 text-sm">
+                    <input type="checkbox" checked={waitingRoomEnabled} onChange={onToggleWaitingRoomEnabled} className="w-4 h-4" />
+                    Require the host to admit participants
+                </label>
+            )}
+            {isSelfHost && waitingRoomEnabled && (
+                <WaitingSection waitingParticipants={waitingParticipants} onAdmit={onAdmit} onDeny={onDeny} />
+            )}
+            <ul className="flex-1 min-h-0 overflow-y-auto p-2 text-sm">
+                <Row
+                    name={selfName}
+                    isSelf
+                    isHost={isSelfHost}
+                    micMuted={!micOn}
+                    handRaised={handRaised}
+                    hasStick={talkingStickActive && talkingStickHolder === selfPeerId}
+                    canGiveStick={isSelfHost && talkingStickActive}
+                    onGiveStick={() => onGiveTalkingStick(selfPeerId)}
+                />
+                {participants.map((p) => (
                     <Row
-                        name={selfName}
-                        isSelf
-                        isHost={isSelfHost}
-                        micMuted={!micOn}
-                        handRaised={handRaised}
-                        hasStick={talkingStickActive && talkingStickHolder === selfPeerId}
+                        key={p.uid}
+                        name={p.name}
+                        isHost={isParticipantHost(p.uid)}
+                        micMuted={!p.audioOn}
+                        handRaised={p.handRaised}
+                        transport={p.transport}
+                        canModerate={isSelfHost}
+                        onMute={() => onMute(p.uid)}
+                        onKick={() => onKick(p.uid)}
+                        hasStick={talkingStickActive && talkingStickHolder === p.uid}
                         canGiveStick={isSelfHost && talkingStickActive}
-                        onGiveStick={() => onGiveTalkingStick(selfPeerId)}
+                        onGiveStick={() => onGiveTalkingStick(p.uid)}
                     />
-                    {participants.map((p) => (
-                        <Row
-                            key={p.uid}
-                            name={p.name}
-                            isHost={isParticipantHost(p.uid)}
-                            micMuted={!p.audioOn}
-                            handRaised={p.handRaised}
-                            transport={p.transport}
-                            canModerate={isSelfHost}
-                            onMute={() => onMute(p.uid)}
-                            onKick={() => onKick(p.uid)}
-                            hasStick={talkingStickActive && talkingStickHolder === p.uid}
-                            canGiveStick={isSelfHost && talkingStickActive}
-                            onGiveStick={() => onGiveTalkingStick(p.uid)}
-                        />
-                    ))}
-                </ul>
-            </aside>
-        </>
+                ))}
+            </ul>
+        </aside>
     );
 }

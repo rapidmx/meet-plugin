@@ -666,113 +666,115 @@ export default function CallView({
     }
 
     return (
-        <div className="fixed inset-0 z-50 flex flex-col bg-[#202124] text-white overflow-hidden">
+        <div className="fixed inset-0 z-50 flex bg-[#202124] text-white overflow-hidden">
             <style>{`@keyframes meet-float { 0% { transform: translateY(0) scale(.6); opacity: 0; } 12% { opacity: 1; transform: translateY(-4vh) scale(1); } 100% { transform: translateY(-45vh) scale(1); opacity: 0; } }`}</style>
-            <header className="shrink-0 flex items-center justify-between gap-3 px-4 py-3">
-                <h1 className="min-w-0 truncate text-base font-medium">{meetingTitle}</h1>
-                <div className="flex items-center gap-2 shrink-0">
-                    {raisedNames.length > 0 && (
-                        <span className="max-w-[45vw] truncate px-3 py-1.5 rounded-full bg-[#a8c7fa] text-[#062e6f] text-sm font-medium" data-testid="raised-hands">
-                            ✋ {raisedNames.join(", ")}
-                        </span>
-                    )}
-                    {talkingStickActive && (
-                        <span className="max-w-[45vw] truncate px-3 py-1.5 rounded-full bg-[#a8c7fa] text-[#062e6f] text-sm font-medium" data-testid="talking-stick-status">
-                            🎙️ {talkingStickHolderName ? `${talkingStickHolderName} ${talkingStickHolderName === "You" ? "have" : "has"} the floor` : "Waiting for the host to choose a speaker"}
-                        </span>
-                    )}
-                    {isHost && (
+            <div className="relative flex-1 min-w-0 flex flex-col overflow-hidden">
+                <header className="shrink-0 flex items-center justify-between gap-3 px-4 py-3">
+                    <h1 className="min-w-0 truncate text-base font-medium">{meetingTitle}</h1>
+                    <div className="flex items-center gap-2 shrink-0">
+                        {raisedNames.length > 0 && (
+                            <span className="max-w-[45vw] truncate px-3 py-1.5 rounded-full bg-[#a8c7fa] text-[#062e6f] text-sm font-medium" data-testid="raised-hands">
+                                ✋ {raisedNames.join(", ")}
+                            </span>
+                        )}
+                        {talkingStickActive && (
+                            <span className="max-w-[45vw] truncate px-3 py-1.5 rounded-full bg-[#a8c7fa] text-[#062e6f] text-sm font-medium" data-testid="talking-stick-status">
+                                🎙️ {talkingStickHolderName ? `${talkingStickHolderName} ${talkingStickHolderName === "You" ? "have" : "has"} the floor` : "Waiting for the host to choose a speaker"}
+                            </span>
+                        )}
+                        {isHost && (
+                            <button
+                                type="button"
+                                className={`px-3 py-1.5 rounded-full text-sm font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80 ${talkingStickActive ? "bg-[#a8c7fa] text-[#062e6f] hover:bg-[#8ab4f8]" : "bg-[#3c4043] hover:bg-[#4b4f53]"}`}
+                                aria-pressed={talkingStickActive}
+                                onClick={handleToggleTalkingStick}
+                            >
+                                {talkingStickActive ? "End talking stick" : "Talking stick"}
+                            </button>
+                        )}
                         <button
                             type="button"
-                            className={`px-3 py-1.5 rounded-full text-sm font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80 ${talkingStickActive ? "bg-[#a8c7fa] text-[#062e6f] hover:bg-[#8ab4f8]" : "bg-[#3c4043] hover:bg-[#4b4f53]"}`}
-                            aria-pressed={talkingStickActive}
-                            onClick={handleToggleTalkingStick}
+                            className="px-3 py-1.5 rounded-full bg-[#3c4043] hover:bg-[#4b4f53] text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                            aria-label={`${participants.length + 1} participants`}
+                            aria-haspopup="dialog"
+                            aria-expanded={drawerOpen}
+                            onClick={() => setDrawerOpen((prev) => !prev)}
                         >
-                            {talkingStickActive ? "End talking stick" : "Talking stick"}
+                            {participants.length + 1}
                         </button>
-                    )}
+                    </div>
+                </header>
+                {connectError && (
+                    <div role="alert" className="shrink-0 mx-3 mb-2 px-3 py-2 rounded-lg bg-[#601410] text-[#f9dedc] text-sm">
+                        {connectError}
+                    </div>
+                )}
+                {audioBlocked && (
                     <button
                         type="button"
-                        className="px-3 py-1.5 rounded-full bg-[#3c4043] hover:bg-[#4b4f53] text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
-                        aria-label={`${participants.length + 1} participants`}
-                        aria-haspopup="dialog"
-                        aria-expanded={drawerOpen}
-                        onClick={() => setDrawerOpen((prev) => !prev)}
+                        className="shrink-0 mx-3 mb-2 px-3 py-2 rounded-lg bg-[#a8c7fa] text-[#062e6f] text-sm font-medium"
+                        onClick={handleResumeAudio}
                     >
-                        {participants.length + 1}
+                        Click here to turn on sound
                     </button>
-                </div>
-            </header>
-            {connectError && (
-                <div role="alert" className="shrink-0 mx-3 mb-2 px-3 py-2 rounded-lg bg-[#601410] text-[#f9dedc] text-sm">
-                    {connectError}
-                </div>
-            )}
-            {audioBlocked && (
-                <button
-                    type="button"
-                    className="shrink-0 mx-3 mb-2 px-3 py-2 rounded-lg bg-[#a8c7fa] text-[#062e6f] text-sm font-medium"
-                    onClick={handleResumeAudio}
-                >
-                    Click here to turn on sound
-                </button>
-            )}
-            <main className="relative flex-1 min-h-0 px-3 pb-3">
-                {stage}
-                {presenterName && presenterUid !== peerId && (
-                    <p className="absolute top-2 left-5 px-2 py-0.5 rounded bg-black/60 text-sm">{presenterName} is presenting</p>
                 )}
-            </main>
-            <footer className="shrink-0 pt-1 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-                <CallControls
-                    media={media}
-                    selfName={selfName}
-                    participants={participants}
-                    isPresenting={isPresenting}
-                    presentingElsewhereName={presenterUid && presenterUid !== peerId ? presenterName : undefined}
-                    onToggleShare={() => void handleToggleShare()}
-                    screenTransform={screenTransform}
-                    onRotateScreen={handleRotateScreen}
-                    onFlipScreen={handleFlipScreen}
-                    handRaised={handRaised}
-                    onToggleHand={handleToggleHand}
-                    onReaction={handleReaction}
-                    viewMode={viewMode}
-                    onToggleViewMode={() => setViewMode((prev) => (prev === "grid" ? "focus" : "grid"))}
-                    micLocked={micLocked}
-                    onLeave={onLeave}
-                />
-            </footer>
+                <main className="relative flex-1 min-h-0 px-3 pb-3">
+                    {stage}
+                    {presenterName && presenterUid !== peerId && (
+                        <p className="absolute top-2 left-5 px-2 py-0.5 rounded bg-black/60 text-sm">{presenterName} is presenting</p>
+                    )}
+                </main>
+                <footer className="shrink-0 pt-1 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+                    <CallControls
+                        media={media}
+                        selfName={selfName}
+                        participants={participants}
+                        isPresenting={isPresenting}
+                        presentingElsewhereName={presenterUid && presenterUid !== peerId ? presenterName : undefined}
+                        onToggleShare={() => void handleToggleShare()}
+                        screenTransform={screenTransform}
+                        onRotateScreen={handleRotateScreen}
+                        onFlipScreen={handleFlipScreen}
+                        handRaised={handRaised}
+                        onToggleHand={handleToggleHand}
+                        onReaction={handleReaction}
+                        viewMode={viewMode}
+                        onToggleViewMode={() => setViewMode((prev) => (prev === "grid" ? "focus" : "grid"))}
+                        micLocked={micLocked}
+                        onLeave={onLeave}
+                    />
+                </footer>
 
-            {!alone && (
-                <div
-                    className="absolute z-10 right-3 top-14 w-28 sm:top-auto sm:bottom-24 sm:w-52 aspect-video shadow-xl xl:right-4 xl:bottom-4"
-                    data-testid="self-view"
-                >
-                    {selfTile("h-full")}
-                </div>
-            )}
-
-            <div className="pointer-events-none absolute left-4 bottom-28 w-40 h-[45vh]" aria-hidden="true">
-                {reactions.map((reaction) => (
+                {!alone && (
                     <div
-                        key={reaction.id}
-                        className="absolute bottom-0 flex flex-col items-center"
-                        style={{ left: `${(reaction.id % 4) * 36}px`, animation: `meet-float ${REACTION_MS}ms ease-out forwards` }}
-                        data-testid="reaction"
+                        className="absolute z-10 right-3 top-14 w-28 sm:top-auto sm:bottom-24 sm:w-52 aspect-video shadow-xl xl:right-4 xl:bottom-4"
+                        data-testid="self-view"
                     >
-                        <span className="text-4xl leading-none">{reaction.emoji}</span>
-                        <span className="mt-1 px-1.5 rounded-full bg-[#a8c7fa] text-[#062e6f] text-xs">{reaction.name}</span>
+                        {selfTile("h-full")}
                     </div>
-                ))}
-            </div>
+                )}
 
-            {participants.map((p) => {
-                const stream = remoteStreams[p.uid];
-                return stream ? <RemoteAudio key={`${p.uid}:${audioNonce}`} stream={stream} onBlocked={handleAudioBlocked} /> : null;
-            })}
-            <div role="status" aria-live="polite" className="sr-only">
-                {announcement}
+                <div className="pointer-events-none absolute left-4 bottom-28 w-40 h-[45vh]" aria-hidden="true">
+                    {reactions.map((reaction) => (
+                        <div
+                            key={reaction.id}
+                            className="absolute bottom-0 flex flex-col items-center"
+                            style={{ left: `${(reaction.id % 4) * 36}px`, animation: `meet-float ${REACTION_MS}ms ease-out forwards` }}
+                            data-testid="reaction"
+                        >
+                            <span className="text-4xl leading-none">{reaction.emoji}</span>
+                            <span className="mt-1 px-1.5 rounded-full bg-[#a8c7fa] text-[#062e6f] text-xs">{reaction.name}</span>
+                        </div>
+                    ))}
+                </div>
+
+                {participants.map((p) => {
+                    const stream = remoteStreams[p.uid];
+                    return stream ? <RemoteAudio key={`${p.uid}:${audioNonce}`} stream={stream} onBlocked={handleAudioBlocked} /> : null;
+                })}
+                <div role="status" aria-live="polite" className="sr-only">
+                    {announcement}
+                </div>
             </div>
 
             {drawerOpen && (
