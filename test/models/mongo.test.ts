@@ -21,6 +21,7 @@ describe("Mongo model default construction", () => {
         expect(obj.status).toBe(VideoMeetingStatus.SCHEDULED);
         expect(obj.forceMuteOnJoin).toBeUndefined();
         expect(obj.passwordHash).toBeUndefined();
+        expect(obj.waitingRoomEnabled).toBeUndefined();
         expect(obj.startTime).toBeUndefined();
         expect(obj.endTime).toBeUndefined();
     });
@@ -38,6 +39,7 @@ describe("Mongo model default construction", () => {
             status: VideoMeetingStatus.ACTIVE,
             forceMuteOnJoin: true,
             passwordHash: "salt:key",
+            waitingRoomEnabled: true,
             startTime,
             endTime,
         });
@@ -51,6 +53,7 @@ describe("Mongo model default construction", () => {
         expect(obj.status).toBe(VideoMeetingStatus.ACTIVE);
         expect(obj.forceMuteOnJoin).toBe(true);
         expect(obj.passwordHash).toBe("salt:key");
+        expect(obj.waitingRoomEnabled).toBe(true);
         expect(obj.startTime).toBe(startTime);
         expect(obj.endTime).toBe(endTime);
     });
@@ -92,6 +95,13 @@ describe("Mongo model default construction", () => {
         expect(set.passwordHash).toBe("salt:key");
         const cleared = new VideoMeetingMongo({ passwordHash: undefined });
         expect(cleared.passwordHash).toBeUndefined();
+    });
+
+    it("VideoMeetingMongo honors an explicit clear of waitingRoomEnabled.", () => {
+        const set = new VideoMeetingMongo({ waitingRoomEnabled: true });
+        expect(set.waitingRoomEnabled).toBe(true);
+        const cleared = new VideoMeetingMongo({ waitingRoomEnabled: undefined });
+        expect(cleared.waitingRoomEnabled).toBeUndefined();
     });
 
     it("VideoMeetingInviteeMongo falls back to class defaults when constructed with no data.", () => {

@@ -55,6 +55,11 @@ const passwordRequiredResponse = {
     requiresPassword: true,
 };
 
+const admissionRequiredResponse = {
+    meeting: { uid: "m1", title: "Standup", visibility: "public", status: "scheduled", hostDisplayName: "Jane", waitingRoomEnabled: true },
+    requiresAdmission: true,
+};
+
 const authenticatedJoinResponse = {
     meeting: { uid: "m1", title: "Standup", visibility: "public", status: "scheduled", hostDisplayName: "Jane" },
     iceServers: [{ urls: "stun:stun.example.com:19302" }],
@@ -306,5 +311,206 @@ describe("MeetJoinPage - password protection", () => {
         fireEvent.click(screen.getByText("Join meeting"));
 
         expect(await screen.findByText("Something went wrong. Try again.")).toBeInTheDocument();
+    });
+});
+
+describe("MeetJoinPage - waiting room", () => {
+    it("shows an admission-request screen (name only) when the meeting has a waiting room and no password", async () => {
+        mockJoin(admissionRequiredResponse);
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+
+        expect(await screen.findByText("Standup")).toBeInTheDocument();
+        expect(screen.getByText("Hosted by Jane")).toBeInTheDocument();
+        expect(screen.getByText("The host must let you in before you can join.")).toBeInTheDocument();
+        expect(screen.getByLabelText("Your name")).toBeInTheDocument();
+        expect(screen.queryByLabelText("Password")).toBeNull();
+        expect(screen.getByRole("button", { name: "Ask to join" })).toBeDisabled();
+    });
+
+    it("also asks for a password when the meeting requires one too, disabling submit until both are filled", async () => {
+        mockJoin({ ...admissionRequiredResponse, meeting: { ...admissionRequiredResponse.meeting, hasPassword: true } });
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        await screen.findByText("The host must let you in before you can join.");
+
+        const button = screen.getByRole("button", { name: "Ask to join" });
+        expect(button).toBeDisabled();
+        fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "Grace" } });
+        expect(button).toBeDisabled();
+        fireEvent.change(screen.getByLabelText("Password"), { target: { value: "s3cret" } });
+        expect(button).toBeEnabled();
+    });
+
+    it("files the request and shows the waiting screen once submitted", async () => {
+        mockFetch((url, init) => {
+            if (url === "/api/system/branding") return jsonResponse(200, { companyName: "", title: "" });
+            if (url === "/api/mail/video-meetings/join/tok1") return jsonResponse(200, admissionRequiredResponse);
+            if (url === "/api/mail/video-meetings/join/tok1/verify") {
+                expect(JSON.parse(init?.body as string)).toEqual({ name: "Grace" });
+                return jsonResponse(200, { ...admissionRequiredResponse, authenticated: false, selfUid: "guest:1", token: "guest-token" });
+            }
+            if (url === "/api/mail/video-meetings/join/tok1/status") {
+                return jsonResponse(200, admissionRequiredResponse);
+            }
+            throw new Error(`unexpected ${url}`);
+        });
+
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        await screen.findByText("The host must let you in before you can join.");
+        fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "Grace" } });
+        fireEvent.click(screen.getByRole("button", { name: "Ask to join" }));
+
+        expect(await screen.findByText("Waiting for the host to let you in…")).toBeInTheDocument();
+    });
+
+    it("shows an error for an admission request rejected for a reason other than a wrong password", async () => {
+        mockFetch((url) => {
+            if (url === "/api/system/branding") return jsonResponse(200, { companyName: "", title: "" });
+            if (url === "/api/mail/video-meetings/join/tok1") return jsonResponse(200, admissionRequiredResponse);
+            if (url === "/api/mail/video-meetings/join/tok1/verify") return jsonResponse(500, { message: "boom" });
+            throw new Error(`unexpected ${url}`);
+        });
+
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        await screen.findByText("The host must let you in before you can join.");
+        fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "Grace" } });
+        fireEvent.click(screen.getByRole("button", { name: "Ask to join" }));
+
+        expect(await screen.findByText("Something went wrong. Try again.")).toBeInTheDocument();
+    });
+
+    it("enters the lobby once the first poll already finds the request admitted", async () => {
+        mockFetch((url) => {
+            if (url === "/api/system/branding") return jsonResponse(200, { companyName: "", title: "" });
+            if (url === "/api/mail/video-meetings/join/tok1") return jsonResponse(200, admissionRequiredResponse);
+            if (url === "/api/mail/video-meetings/join/tok1/verify") {
+                return jsonResponse(200, { ...admissionRequiredResponse, authenticated: false, selfUid: "guest:1", token: "guest-token" });
+            }
+            if (url === "/api/mail/video-meetings/join/tok1/status") {
+                return jsonResponse(200, joinResponse);
+            }
+            throw new Error(`unexpected ${url}`);
+        });
+
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        await screen.findByText("The host must let you in before you can join.");
+        fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "Grace" } });
+        fireEvent.click(screen.getByRole("button", { name: "Ask to join" }));
+
+        // "Your name" is also the lobby's own field label, so this waits for a marker unique to the lobby instead.
+        expect(await screen.findByText("Join meeting")).toBeInTheDocument();
+        expect(screen.queryByText("The host must let you in before you can join.")).toBeNull();
+        expect(screen.queryByText("Waiting for the host to let you in…")).toBeNull();
+    });
+
+    it("keeps polling on an interval, picking up admission on a later tick rather than only the first check", async () => {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
+        let admitted = false;
+        mockFetch((url) => {
+            if (url === "/api/system/branding") return jsonResponse(200, { companyName: "", title: "" });
+            if (url === "/api/mail/video-meetings/join/tok1") return jsonResponse(200, admissionRequiredResponse);
+            if (url === "/api/mail/video-meetings/join/tok1/verify") {
+                return jsonResponse(200, { ...admissionRequiredResponse, authenticated: false, selfUid: "guest:1", token: "guest-token" });
+            }
+            if (url === "/api/mail/video-meetings/join/tok1/status") {
+                return jsonResponse(200, admitted ? joinResponse : admissionRequiredResponse);
+            }
+            throw new Error(`unexpected ${url}`);
+        });
+
+        try {
+            render(<MeetJoinPage params={{ token: "tok1" }} />);
+            await screen.findByText("The host must let you in before you can join.");
+            fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "Grace" } });
+            fireEvent.click(screen.getByRole("button", { name: "Ask to join" }));
+            await screen.findByText("Waiting for the host to let you in…");
+
+            admitted = true;
+            await act(() => vi.advanceTimersByTimeAsync(3_000));
+
+            expect(await screen.findByText("Join meeting")).toBeInTheDocument();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("shows a denial message once the host declines, and stops polling", async () => {
+        let statusCalls = 0;
+        mockFetch((url) => {
+            if (url === "/api/system/branding") return jsonResponse(200, { companyName: "", title: "" });
+            if (url === "/api/mail/video-meetings/join/tok1") return jsonResponse(200, admissionRequiredResponse);
+            if (url === "/api/mail/video-meetings/join/tok1/verify") {
+                return jsonResponse(200, { ...admissionRequiredResponse, authenticated: false, selfUid: "guest:1", token: "guest-token" });
+            }
+            if (url === "/api/mail/video-meetings/join/tok1/status") {
+                statusCalls++;
+                return jsonResponse(403, { message: "The host denied your request to join." });
+            }
+            throw new Error(`unexpected ${url}`);
+        });
+
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        await screen.findByText("The host must let you in before you can join.");
+        fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "Grace" } });
+        fireEvent.click(screen.getByRole("button", { name: "Ask to join" }));
+
+        expect(await screen.findByText("The host denied your request to join.")).toBeInTheDocument();
+        const callsAtDenial = statusCalls;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(statusCalls).toBe(callsAtDenial);
+    });
+
+    it("keeps polling through a transient failure rather than giving up", async () => {
+        let statusCalls = 0;
+        mockFetch((url) => {
+            if (url === "/api/system/branding") return jsonResponse(200, { companyName: "", title: "" });
+            if (url === "/api/mail/video-meetings/join/tok1") return jsonResponse(200, admissionRequiredResponse);
+            if (url === "/api/mail/video-meetings/join/tok1/verify") {
+                return jsonResponse(200, { ...admissionRequiredResponse, authenticated: false, selfUid: "guest:1", token: "guest-token" });
+            }
+            if (url === "/api/mail/video-meetings/join/tok1/status") {
+                statusCalls++;
+                return jsonResponse(500, { message: "boom" });
+            }
+            throw new Error(`unexpected ${url}`);
+        });
+
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        await screen.findByText("The host must let you in before you can join.");
+        fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "Grace" } });
+        fireEvent.click(screen.getByRole("button", { name: "Ask to join" }));
+
+        await screen.findByText("Waiting for the host to let you in…");
+        await waitFor(() => expect(statusCalls).toBeGreaterThanOrEqual(1));
+        // Still on the waiting screen - a transient failure doesn't bounce the participant to an error state.
+        expect(screen.getByText("Waiting for the host to let you in…")).toBeInTheDocument();
+    });
+
+    it("does not update state after leaving the waiting screen while a poll is still in flight", async () => {
+        let resolveStatus!: (response: Response) => void;
+        mockFetch((url) => {
+            if (url === "/api/system/branding") return jsonResponse(200, { companyName: "", title: "" });
+            if (url === "/api/mail/video-meetings/join/tok1") return jsonResponse(200, admissionRequiredResponse);
+            if (url === "/api/mail/video-meetings/join/tok1/verify") {
+                return jsonResponse(200, { ...admissionRequiredResponse, authenticated: false, selfUid: "guest:1", token: "guest-token" });
+            }
+            if (url === "/api/mail/video-meetings/join/tok1/status") {
+                return new Promise<Response>((resolve) => {
+                    resolveStatus = resolve;
+                });
+            }
+            throw new Error(`unexpected ${url}`);
+        });
+
+        const { unmount } = render(<MeetJoinPage params={{ token: "tok1" }} />);
+        await screen.findByText("The host must let you in before you can join.");
+        fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "Grace" } });
+        fireEvent.click(screen.getByRole("button", { name: "Ask to join" }));
+        await screen.findByText("Waiting for the host to let you in…");
+
+        unmount();
+        resolveStatus(jsonResponse(200, joinResponse));
+        await act(async () => {
+            await Promise.resolve();
+        });
     });
 });

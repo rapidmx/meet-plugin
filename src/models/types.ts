@@ -127,6 +127,14 @@ export interface VideoMeeting extends BaseEntity {
      * account-ownership-based authority than any password could add. */
     passwordHash?: string;
 
+    /** When `true`, nobody but the organizer (`organizerSlug`) joins directly - every other caller's `join()` files
+     * a pending admission instead of granting anything, until the host admits or denies them
+     * (`BaseVideoMeetingRoute`'s `admit()`/`deny()`). Pending admissions are kept in memory only, per server
+     * instance (not a new persisted entity) - the same accepted tradeoff this plugin's in-process relay state
+     * already has: a restart drops anyone currently waiting, who simply requests again. `undefined`/`false`
+     * changes nothing (the ordinary immediate-join behavior). */
+    waitingRoomEnabled?: boolean;
+
     /** Informational only in Phase 1 - not used for any availability or conflict checking (a video meeting has no
      * concept of "busy" the way a `Booking` does). */
     startTime?: Date;

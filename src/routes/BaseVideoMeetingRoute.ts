@@ -117,6 +117,8 @@ export interface CreateVideoMeetingBody {
     /** The plaintext password to require for this meeting, hashed before storage (see `VideoMeeting.passwordHash`) -
      * never stored or returned as given. Omitted or empty means no password is required. */
     password?: string;
+    /** See `VideoMeeting.waitingRoomEnabled`. */
+    waitingRoomEnabled?: boolean;
 }
 
 /** One invitee of a newly created private meeting, as returned by `create()` - everything a caller needs to build
@@ -174,6 +176,10 @@ export interface PublicVideoMeeting {
      * showing a password prompt can also show, say, "password required" copy without a second field. Omitted
      * (reads as `false`) when none is required. */
     hasPassword?: boolean;
+    /** See `VideoMeeting.waitingRoomEnabled`. Present (as `true`) on every response shape this field can appear
+     * on, including `VideoMeetingAdmissionRequiredResult` - so a client already on the admission-request screen
+     * knows one is even needed without a second field. Omitted (reads as `false`) when disabled. */
+    waitingRoomEnabled?: boolean;
 }
 
 /**
@@ -231,9 +237,29 @@ export interface VideoMeetingPasswordRequiredResult {
     requiresPassword: true;
 }
 
-/** `join()`'s actual return type: either a granted `VideoMeetingJoinResult`, or a `VideoMeetingPasswordRequiredResult`
- * demanding a password first. */
-export type VideoMeetingJoinResponse = VideoMeetingJoinResult | VideoMeetingPasswordRequiredResult;
+/**
+ * Returned by `verifyPassword()` (and, once filed, re-returned by `pollAdmission()`) in place of a
+ * `VideoMeetingJoinResult` while a `waitingRoomEnabled` meeting's admission request is still pending - see
+ * `requestAdmission()`'s doc comment. Unlike `VideoMeetingPasswordRequiredResult`, this carries `selfUid` (and,
+ * for a guest, `token`/`expiresAt`) - a caller needs a stable, authenticated identity to poll with, where a
+ * password prompt needed none. `GET /join/:token` itself also answers this shape, with none of those fields, when
+ * a waiting room applies and no admission has been requested yet; `requiresPassword` takes priority at that first
+ * `GET` when a password is set too, so the password is requested at the same time as the name, on one combined
+ * screen, rather than one after the other (see `verifyPassword()`'s doc comment). The literal `true` is a
+ * discriminant: a caller narrows on `"requiresAdmission" in result`.
+ */
+export interface VideoMeetingAdmissionRequiredResult {
+    meeting: PublicVideoMeeting;
+    requiresAdmission: true;
+    authenticated?: boolean;
+    selfUid?: string;
+    token?: string;
+    expiresAt?: string;
+}
+
+/** `join()`'s actual return type: a granted `VideoMeetingJoinResult`, or one of the two "not yet" shapes demanding
+ * a password or an admission decision first. */
+export type VideoMeetingJoinResponse = VideoMeetingJoinResult | VideoMeetingPasswordRequiredResult | VideoMeetingAdmissionRequiredResult;
 
 /**
  * The owner's management of their own `VideoMeeting`s (JWT-authenticated, mailbox-ACL-checked exactly like any
@@ -464,6 +490,15 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     /** The Redis bus `relayHub` runs on, when there is one. */
     private relayBus?: RedisRelayBus;
 
+    /** Every meeting's pending admission requests (`VideoMeeting.waitingRoomEnabled`), keyed by meeting uid then by
+     * the requester's own uid (real or freshly minted guest). In-memory and per server instance only - the same
+     * accepted tradeoff `relayHub` above already has: a restart drops anyone currently waiting, who simply
+     * requests again (see `VideoMeeting.waitingRoomEnabled`'s own doc comment). A request is removed once it
+     * resolves to a final answer and that answer has been polled (`pollAdmission()`) - an abandoned request (the
+     * requester never polls again) is never otherwise cleaned up; there is no GC job, matching this codebase's
+     * existing precedent for other never-expiring state (`Booking.manageToken`, `VideoMeetingInvitee.joinToken`). */
+    private pendingAdmissions = new Map<string, Map<string, { name: string; requestedAt: Date; status: "pending" | "admitted" | "denied" }>>();
+
     /**
      * Exposes the `@Model(...)`-supplied entity class as an instance property so `@Transactional()` on
      * `persistMeeting()` can resolve which datasource to open a transaction against - identical to
@@ -597,6 +632,9 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         if (body.password !== undefined && (typeof body.password !== "string" || body.password.length > MAX_PASSWORD_LENGTH)) {
             throw new ApiError(ApiErrors.INVALID_REQUEST, 400, `'password' must be a string of at most ${MAX_PASSWORD_LENGTH} characters.`);
         }
+        if (body.waitingRoomEnabled !== undefined && typeof body.waitingRoomEnabled !== "boolean") {
+            throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "'waitingRoomEnabled' must be a boolean.");
+        }
         return { mailboxUid: body.mailboxUid, visibility: body.visibility };
     }
 
@@ -652,6 +690,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             organizerSlug,
             forceMuteOnJoin: body.forceMuteOnJoin,
             passwordHash,
+            waitingRoomEnabled: body.waitingRoomEnabled,
         });
         const meeting: VM = await this.meetingRepo!.create(instance, {
             user: strippedUser,
@@ -889,18 +928,18 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         return this.withJoinUrls(meeting);
     }
 
-    @Summary("Updates a video meeting's title, force-mute-on-join setting or password, or cancels it.")
+    @Summary("Updates a video meeting's title, force-mute-on-join/password/waiting-room settings, or cancels it.")
     @Description(
-        "Deliberately minimal for Phase 1: only 'title', 'forceMuteOnJoin', 'password' and cancellation " +
-            "('status': 'cancelled') may be changed. 'password' hashes before storage; 'null' removes password " +
-            "protection entirely, a non-empty string sets/replaces it. Requires UPDATE on the meeting's owning " +
-            "mailbox. The response never carries the stored password hash, same as every other response that " +
-            "includes a meeting.",
+        "Deliberately minimal for Phase 1: only 'title', 'forceMuteOnJoin', 'password', 'waitingRoomEnabled' and " +
+            "cancellation ('status': 'cancelled') may be changed. 'password' hashes before storage; 'null' " +
+            "removes password protection entirely, a non-empty string sets/replaces it. Requires UPDATE on the " +
+            "meeting's owning mailbox. The response never carries the stored password hash, same as every other " +
+            "response that includes a meeting.",
     )
     @Put("/:id")
     public async update(
         @Param("id") id: string,
-        body: { title?: string; status?: string; forceMuteOnJoin?: boolean; password?: string | null } | undefined,
+        body: { title?: string; status?: string; forceMuteOnJoin?: boolean; password?: string | null; waitingRoomEnabled?: boolean } | undefined,
         @AuthUser user?: JWTUser,
     ): Promise<VM> {
         await this.init();
@@ -937,8 +976,24 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
                 patch.passwordHash = await hashPassword(body.password);
             }
         }
-        if (patch.title === undefined && patch.status === undefined && patch.forceMuteOnJoin === undefined && patch.passwordHash === undefined) {
-            throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "Nothing to update: supply 'title', 'forceMuteOnJoin', 'password' and/or 'status'.");
+        if (body?.waitingRoomEnabled !== undefined) {
+            if (typeof body.waitingRoomEnabled !== "boolean") {
+                throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "'waitingRoomEnabled' must be a boolean.");
+            }
+            patch.waitingRoomEnabled = body.waitingRoomEnabled;
+        }
+        if (
+            patch.title === undefined &&
+            patch.status === undefined &&
+            patch.forceMuteOnJoin === undefined &&
+            patch.passwordHash === undefined &&
+            patch.waitingRoomEnabled === undefined
+        ) {
+            throw new ApiError(
+                ApiErrors.INVALID_REQUEST,
+                400,
+                "Nothing to update: supply 'title', 'forceMuteOnJoin', 'password', 'waitingRoomEnabled' and/or 'status'.",
+            );
         }
         const strippedUser: JWTUser | undefined = stripTrustedRoles(user, this.trustedRoles);
         const updated: VM = await this.meetingRepo!.update(patch as any, meeting, { user: strippedUser, ignoreACL: true });
@@ -987,6 +1042,59 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         await this.init();
         const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.UPDATE);
         await this.revokeChannelGrant(meeting.uid, uid);
+    }
+
+    @Summary("Lists a video meeting's pending admission requests.")
+    @Description(
+        "Returns everyone currently waiting to be admitted (VideoMeeting.waitingRoomEnabled), oldest first - " +
+            "never anyone already admitted or denied, since pendingAdmissions drops a request once it reaches a " +
+            "final answer and the requester has polled it. Requires READ on the meeting's owning mailbox.",
+    )
+    @Get("/:id/waiting")
+    public async listWaiting(@Param("id") id: string, @AuthUser user?: JWTUser): Promise<{ uid: string; name: string; requestedAt: string }[]> {
+        await this.init();
+        const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.READ);
+        const pending = this.pendingAdmissions.get(meeting.uid);
+        if (!pending) {
+            return [];
+        }
+        return [...pending.entries()]
+            .filter(([, request]) => request.status === "pending")
+            .sort(([, a], [, b]) => a.requestedAt.getTime() - b.requestedAt.getTime())
+            .map(([uid, request]) => ({ uid, name: request.name, requestedAt: request.requestedAt.toISOString() }));
+    }
+
+    @Summary("Admits a pending admission request.")
+    @Description(
+        "Marks 'uid's pending request admitted - their next GET /join/:token/status poll completes the join and " +
+            "grants their channel access, exactly as join() itself would for a meeting with no waiting room. A " +
+            "no-op (not an error) if 'uid' has no pending request (already resolved, or never requested at all) - " +
+            "there is nothing left to admit either way. Requires UPDATE on the meeting's owning mailbox.",
+    )
+    @Post("/:id/admit/:uid")
+    public async admit(@Param("id") id: string, @Param("uid") uid: string, @AuthUser user?: JWTUser): Promise<void> {
+        await this.init();
+        const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.UPDATE);
+        const request = this.pendingAdmissions.get(meeting.uid)?.get(uid);
+        if (request) {
+            request.status = "admitted";
+        }
+    }
+
+    @Summary("Denies a pending admission request.")
+    @Description(
+        "Marks 'uid's pending request denied - their next GET /join/:token/status poll answers 403 and removes " +
+            "the record, so a second poll (or a fresh admission request under the same identity) starts clean. " +
+            "A no-op if 'uid' has no pending request. Requires UPDATE on the meeting's owning mailbox.",
+    )
+    @Post("/:id/deny/:uid")
+    public async deny(@Param("id") id: string, @Param("uid") uid: string, @AuthUser user?: JWTUser): Promise<void> {
+        await this.init();
+        const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.UPDATE);
+        const request = this.pendingAdmissions.get(meeting.uid)?.get(uid);
+        if (request) {
+            request.status = "denied";
+        }
     }
 
     /**
@@ -1168,6 +1276,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             hostUid,
             forceMuteOnJoin: meeting.forceMuteOnJoin || undefined,
             hasPassword: meeting.passwordHash ? true : undefined,
+            waitingRoomEnabled: meeting.waitingRoomEnabled || undefined,
         };
     }
 
@@ -1190,12 +1299,15 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     }
 
     /**
-     * The actual grant: ICE servers, and either the caller's own real uid or a freshly minted guest identity,
-     * granted `READ`/`CREATE` on the meeting's channel - shared by `join()` (when no password blocks it) and
-     * `verifyPassword()` (once one is confirmed, or was never required). Everything `join()`'s own doc comment
-     * says about the `authenticated`/`selfUid`/`token` shape applies here unchanged.
+     * The actual grant for a *definite*, already-known identity: ICE servers and `READ`/`CREATE` on the meeting's
+     * channel. Shared by `completeJoin()` (which still has to decide whether that identity is the caller's own
+     * real uid or a freshly minted guest) and `pollAdmission()`'s admitted branch (whose identity was already
+     * fixed back when `requestAdmission()` filed it - polling must grant exactly that uid, never mint a different
+     * one, which is why this doesn't call `mintGuestToken()` itself). Never includes `token`/`expiresAt` - a fresh
+     * guest mint (when there is one) is the caller's job, since only `completeJoin()`'s anonymous branch needs it.
      */
-    private async completeJoin(meeting: VM, publicMeeting: PublicVideoMeeting, user: JWTUser | undefined): Promise<VideoMeetingJoinResult> {
+    private async grantJoin(meeting: VM, publicMeeting: PublicVideoMeeting, selfUid: string, authenticated: boolean): Promise<VideoMeetingJoinResult> {
+        await this.ensureChannelGrant(meeting.uid, selfUid);
         const relayEnabled: boolean = this.isRelayEnabled();
         const effectsAssetsUrl: string | undefined = parseEffectsAssetsUrl(this.effectsAssetsUrlSetting);
         const iceServers: IceServerConfig[] = buildIceServers({
@@ -1204,27 +1316,60 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             credential: this.turnCredential,
             sharedSecret: this.turnSharedSecret,
         });
+        return { meeting: publicMeeting, iceServers, authenticated, selfUid, relayEnabled, ...(effectsAssetsUrl && { effectsAssetsUrl }) };
+    }
 
+    /**
+     * Grants the caller's own real uid, or a freshly minted guest identity - shared by `join()` (when neither a
+     * password nor a waiting room blocks it) and `verifyPassword()` (once both are satisfied, or were never
+     * required). Everything `join()`'s own doc comment says about the `authenticated`/`selfUid`/`token` shape
+     * applies here unchanged.
+     */
+    private async completeJoin(meeting: VM, publicMeeting: PublicVideoMeeting, user: JWTUser | undefined): Promise<VideoMeetingJoinResult> {
         // A real, already-authenticated RapidMX identity - never a guest uid from an earlier join() call
         // presenting its own guest JWT back (a guest uid is never a valid mailbox-owning identity anyway, so this
         // prefix check is a safe, cheap discriminator - see this class's doc comment and GUEST_UID_PREFIX).
         if (user && !user.uid.startsWith(GUEST_UID_PREFIX)) {
-            await this.ensureChannelGrant(meeting.uid, user.uid);
-            return { meeting: publicMeeting, iceServers, authenticated: true, selfUid: user.uid, relayEnabled, ...(effectsAssetsUrl && { effectsAssetsUrl }) };
+            return this.grantJoin(meeting, publicMeeting, user.uid, true);
         }
+        const { guestUid, token, expiresAt } = this.mintGuestToken();
+        const granted = await this.grantJoin(meeting, publicMeeting, guestUid, false);
+        return { ...granted, token, expiresAt: expiresAt.toISOString() };
+    }
 
-        const { guestUid, token: guestToken, expiresAt } = this.mintGuestToken();
-        await this.ensureChannelGrant(meeting.uid, guestUid);
-        return {
-            meeting: publicMeeting,
-            iceServers,
-            authenticated: false,
-            selfUid: guestUid,
-            token: guestToken,
-            expiresAt: expiresAt.toISOString(),
-            relayEnabled,
-            ...(effectsAssetsUrl && { effectsAssetsUrl }),
-        };
+    /**
+     * Files `name` as a pending admission for `meeting` under the caller's own identity - their real uid when
+     * already authenticated (never a guest uid - same `GUEST_UID_PREFIX` discriminator `completeJoin()` uses), or
+     * a freshly minted guest identity otherwise, exactly as `completeJoin()` would choose between the two. Grants
+     * nothing: `ensureChannelGrant()` runs only once `pollAdmission()` sees the host admitted this uid, which is
+     * the whole point of a waiting room. The caller gets back enough to identify themselves on every subsequent
+     * poll - their `selfUid`, and a guest's own `token` to poll with (an already-authenticated caller's existing
+     * session cookie already does that job, so none is minted for them).
+     */
+    private requestAdmission(
+        meeting: VM,
+        publicMeeting: PublicVideoMeeting,
+        user: JWTUser | undefined,
+        name: string,
+    ): VideoMeetingAdmissionRequiredResult {
+        const isRealCaller: boolean = !!user && !user.uid.startsWith(GUEST_UID_PREFIX);
+        if (isRealCaller) {
+            this.registerPendingAdmission(meeting.uid, user!.uid, name);
+            return { meeting: publicMeeting, requiresAdmission: true, authenticated: true, selfUid: user!.uid };
+        }
+        const { guestUid, token, expiresAt } = this.mintGuestToken();
+        this.registerPendingAdmission(meeting.uid, guestUid, name);
+        return { meeting: publicMeeting, requiresAdmission: true, authenticated: false, selfUid: guestUid, token, expiresAt: expiresAt.toISOString() };
+    }
+
+    /** Records (or overwrites, for a re-request under the same identity) one pending admission. */
+    private registerPendingAdmission(meetingUid: string, uid: string, name: string): void {
+        let pending = this.pendingAdmissions.get(meetingUid);
+        if (!pending) {
+            pending = new Map();
+            this.pendingAdmissions.set(meetingUid, pending);
+        }
+        pending.set(uid, { name, requestedAt: new Date(), status: "pending" });
     }
 
     @Summary("Joins a video meeting.")
@@ -1239,8 +1384,11 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             "stale/unknown token answers 404. The one exception is a private meeting's organizerSlug, which is " +
             "never an anonymous surface: it additionally requires an already-authenticated caller holding READ on " +
             "the meeting's owning mailbox, and answers the very same 404 for anyone else. If the meeting requires " +
-            "a password (and wasn't resolved via organizerSlug), returns { meeting, requiresPassword: true } " +
-            "instead of granting anything - submit it to POST /join/:token/verify to actually join.",
+            "admission (a waiting room - see VideoMeeting.waitingRoomEnabled) and wasn't resolved via " +
+            "organizerSlug, returns { meeting, requiresAdmission: true } instead - even when a password is also " +
+            "required, since both are requested together on POST /join/:token/verify's one combined screen. " +
+            "Otherwise, if just a password is required, returns { meeting, requiresPassword: true }. Either way " +
+            "nothing is granted until POST /join/:token/verify succeeds.",
     )
     @RateLimit()
     @Get("/join/:token")
@@ -1249,39 +1397,92 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         const { meeting, resolvedVia } = await this.requireMeetingByToken(token);
         await this.requireOrganizerAuth(meeting, resolvedVia, user);
         const publicMeeting: PublicVideoMeeting = await this.buildPublicMeeting(meeting);
-        if (meeting.passwordHash && resolvedVia !== "organizerSlug") {
-            return { meeting: publicMeeting, requiresPassword: true };
+        if (resolvedVia !== "organizerSlug") {
+            if (meeting.waitingRoomEnabled) {
+                return { meeting: publicMeeting, requiresAdmission: true };
+            }
+            if (meeting.passwordHash) {
+                return { meeting: publicMeeting, requiresPassword: true };
+            }
         }
         return this.completeJoin(meeting, publicMeeting, user);
     }
 
-    @Summary("Verifies a video meeting's join password.")
+    @Summary("Verifies a video meeting's join password and/or files an admission request.")
     @Description(
-        "Checks 'password' against the meeting's own stored hash and, on success, completes the join exactly as " +
-            "GET /join/:token would for a meeting with no password at all - the same grant, the same response " +
-            "shape. Returns 403 for a wrong or missing password, never revealing how close a guess was. Calling " +
-            "this on a meeting that doesn't require a password, or via the organizer's own slug, succeeds " +
-            "unconditionally - the password check is skipped entirely in both cases, matching GET /join/:token's " +
-            "own posture. Rate-limited, like GET /join/:token, since this is the one endpoint a brute-force " +
-            "password guesser would actually hit repeatedly.",
+        "Checks 'password' against the meeting's own stored hash when one is required - 403 for a wrong or " +
+            "missing password, never revealing how close a guess was. Once satisfied (or when no password is " +
+            "required at all): if the meeting also has a waiting room (VideoMeeting.waitingRoomEnabled), requires " +
+            "'name' and files a pending admission instead of granting anything, returning " +
+            "{ meeting, requiresAdmission: true, selfUid, token? } - poll GET /join/:token/status, authenticated " +
+            "as that identity, to learn whether the host has responded. Otherwise completes the join exactly as " +
+            "GET /join/:token would for a meeting with neither requirement - the same grant, the same response " +
+            "shape. Calling this via the organizer's own slug bypasses both checks unconditionally, matching GET " +
+            "/join/:token's own posture. Rate-limited, like GET /join/:token, since this is the one endpoint a " +
+            "brute-force password guesser would actually hit repeatedly.",
     )
     @RateLimit()
     @Post("/join/:token/verify")
     public async verifyPassword(
         @Param("token") token: string,
-        body: { password?: string } | undefined,
+        body: { password?: string; name?: string } | undefined,
         @AuthUser user?: JWTUser,
-    ): Promise<VideoMeetingJoinResult> {
+    ): Promise<VideoMeetingJoinResult | VideoMeetingAdmissionRequiredResult> {
         await this.init();
         const { meeting, resolvedVia } = await this.requireMeetingByToken(token);
         await this.requireOrganizerAuth(meeting, resolvedVia, user);
-        if (meeting.passwordHash && resolvedVia !== "organizerSlug") {
+        const bypassed = resolvedVia === "organizerSlug";
+        if (!bypassed && meeting.passwordHash) {
             if (typeof body?.password !== "string" || !(await verifyPasswordHash(body.password, meeting.passwordHash))) {
                 throw new ApiError(ApiErrors.AUTH_PERMISSION_FAILURE, 403, "Incorrect password.");
             }
         }
         const publicMeeting: PublicVideoMeeting = await this.buildPublicMeeting(meeting);
+        if (!bypassed && meeting.waitingRoomEnabled) {
+            if (typeof body?.name !== "string" || !body.name.trim()) {
+                throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "'name' is required to request admission.");
+            }
+            return this.requestAdmission(meeting, publicMeeting, user, body.name.trim());
+        }
         return this.completeJoin(meeting, publicMeeting, user);
+    }
+
+    @Summary("Polls the status of a pending admission request.")
+    @Description(
+        "Authenticated as the identity verifyPassword() (or a previous poll) returned - the cookie session for " +
+            "an already-authenticated real caller, or the 'Authorization: jwt <token>' header for a guest's own " +
+            "minted token. Returns a granted VideoMeetingJoinResult once the host has admitted the request (the " +
+            "same shape and grant GET /join/:token itself would give), re-returns " +
+            "{ requiresAdmission: true } while the host hasn't responded yet, and 403 once the host has denied " +
+            "it (the pending record is then gone - polling again answers 404, the same as never having requested " +
+            "admission at all). 404 if this identity never requested admission to this meeting (or already " +
+            "polled past a final answer).",
+    )
+    @Auth(["jwt"])
+    @Get("/join/:token/status")
+    public async pollAdmission(
+        @Param("token") token: string,
+        @AuthUser user: JWTUser,
+    ): Promise<VideoMeetingJoinResult | VideoMeetingAdmissionRequiredResult> {
+        await this.init();
+        const { meeting } = await this.requireMeetingByToken(token);
+        const pending = this.pendingAdmissions.get(meeting.uid)?.get(user.uid);
+        if (!pending) {
+            throw new ApiError(ApiErrors.NOT_FOUND, 404, ApiErrorMessages.NOT_FOUND);
+        }
+        if (pending.status === "denied") {
+            this.pendingAdmissions.get(meeting.uid)?.delete(user.uid);
+            throw new ApiError(ApiErrors.AUTH_PERMISSION_FAILURE, 403, "The host denied your request to join.");
+        }
+        const publicMeeting: PublicVideoMeeting = await this.buildPublicMeeting(meeting);
+        if (pending.status === "pending") {
+            return { meeting: publicMeeting, requiresAdmission: true, authenticated: !user.uid.startsWith(GUEST_UID_PREFIX), selfUid: user.uid };
+        }
+        this.pendingAdmissions.get(meeting.uid)?.delete(user.uid);
+        // Grants exactly the uid that was admitted - never completeJoin(), which would mint a brand new guest
+        // identity instead of recognizing this poller as the one requestAdmission() already filed (see
+        // grantJoin()'s own doc comment).
+        return this.grantJoin(meeting, publicMeeting, user.uid, !user.uid.startsWith(GUEST_UID_PREFIX));
     }
 
     /** Whether the WebSocket media relay is enabled - `mail:videoconf:relay:enabled`, see `parseRelayEnabled()`. */

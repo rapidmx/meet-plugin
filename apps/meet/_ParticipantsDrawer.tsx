@@ -19,11 +19,16 @@
  *
  * The header also gets a host-only "Mute on join" checkbox (`forceMuteOnJoin`/`onToggleForceMuteOnJoin`) - a
  * setting for whoever joins *next*, not an action on anyone already here (muting someone already in the call is
- * what each row's own "Mute" button is for) - and a host-only password section (`hasPassword`/`onSetPassword`),
- * the same "next joiner" scope: setting or changing it never affects anyone already in the call.
+ * what each row's own "Mute" button is for) - a host-only password section (`hasPassword`/`onSetPassword`), the
+ * same "next joiner" scope: setting or changing it never affects anyone already in the call - and a host-only
+ * waiting-room toggle plus list (`waitingRoomEnabled`/`onToggleWaitingRoomEnabled`,
+ * `waitingParticipants`/`onAdmit`/`onDeny`): `_CallView.tsx` polls the list while this drawer is open and the
+ * caller is the host (there is no push signal for a newly filed admission request), so it stays current without
+ * the host needing to close and reopen the drawer.
  */
 import React, { useEffect, useState } from "react";
 import type { MeshParticipant } from "../shared/webrtc/types.js";
+import type { WaitingParticipant } from "./_meetApi.js";
 import { TRANSPORT_BADGES } from "./_ParticipantTile.js";
 import { MicOffIcon } from "./_icons.js";
 
@@ -49,6 +54,15 @@ export interface ParticipantsDrawerProps {
     /** Sets (a non-empty string), replaces, or removes (`null`) the join password. Rejecting lets
      * `PasswordSection` show its own inline error without this drawer needing to know anything about it. */
     onSetPassword: (password: string | null) => Promise<void>;
+    /** Whether the meeting currently requires the host to admit each participant - the header checkbox's own
+     * state, host-only. */
+    waitingRoomEnabled: boolean;
+    onToggleWaitingRoomEnabled: () => void;
+    /** Everyone currently waiting to be admitted - `_CallView.tsx`'s own polled, always-current list; empty
+     * whenever this drawer isn't open and host, by construction. */
+    waitingParticipants: WaitingParticipant[];
+    onAdmit: (uid: string) => void;
+    onDeny: (uid: string) => void;
     onClose: () => void;
 }
 
@@ -113,6 +127,52 @@ function PasswordSection({ hasPassword, onSetPassword }: { hasPassword: boolean;
                 </button>
             )}
             {error && <p className="text-[#f2b8b5] text-xs mt-1.5">{error}</p>}
+        </div>
+    );
+}
+
+/** The host-only "who's waiting" list - shown only while `waitingRoomEnabled` is on, since there is otherwise never
+ * anyone to list. Says so explicitly when the list is empty, rather than rendering nothing (silence here would be
+ * indistinguishable from the list just not having loaded yet). */
+function WaitingSection({
+    waitingParticipants,
+    onAdmit,
+    onDeny,
+}: {
+    waitingParticipants: WaitingParticipant[];
+    onAdmit: (uid: string) => void;
+    onDeny: (uid: string) => void;
+}) {
+    return (
+        <div className="px-3 py-2 border-b border-white/10 text-sm">
+            <p className="text-xs font-semibold uppercase tracking-wide text-white/60 mb-1.5">Waiting to join</p>
+            {waitingParticipants.length === 0 ? (
+                <p className="text-white/70">Nobody is waiting right now.</p>
+            ) : (
+                <ul>
+                    {waitingParticipants.map((p) => (
+                        <li key={p.uid} className="flex items-center gap-2 py-1">
+                            <span className="flex-1 min-w-0 truncate">{p.name}</span>
+                            <button
+                                type="button"
+                                className="px-2 py-0.5 rounded text-xs whitespace-nowrap bg-[#a8c7fa] text-[#062e6f] hover:bg-[#8ab4f8] focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                                aria-label={`Admit ${p.name}`}
+                                onClick={() => onAdmit(p.uid)}
+                            >
+                                Admit
+                            </button>
+                            <button
+                                type="button"
+                                className="px-2 py-0.5 rounded text-xs whitespace-nowrap bg-white/10 hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                                aria-label={`Deny ${p.name}`}
+                                onClick={() => onDeny(p.uid)}
+                            >
+                                Deny
+                            </button>
+                        </li>
+                    ))}
+                </ul>
+            )}
         </div>
     );
 }
@@ -206,6 +266,11 @@ export default function ParticipantsDrawer({
     onToggleForceMuteOnJoin,
     hasPassword,
     onSetPassword,
+    waitingRoomEnabled,
+    onToggleWaitingRoomEnabled,
+    waitingParticipants,
+    onAdmit,
+    onDeny,
     onClose,
 }: ParticipantsDrawerProps) {
     useEffect(() => {
@@ -245,6 +310,15 @@ export default function ParticipantsDrawer({
                     </label>
                 )}
                 {isSelfHost && <PasswordSection hasPassword={hasPassword} onSetPassword={onSetPassword} />}
+                {isSelfHost && (
+                    <label className="flex items-center gap-2 px-3 py-2 border-b border-white/10 text-sm">
+                        <input type="checkbox" checked={waitingRoomEnabled} onChange={onToggleWaitingRoomEnabled} className="w-4 h-4" />
+                        Require the host to admit participants
+                    </label>
+                )}
+                {isSelfHost && waitingRoomEnabled && (
+                    <WaitingSection waitingParticipants={waitingParticipants} onAdmit={onAdmit} onDeny={onDeny} />
+                )}
                 <ul className="flex-1 min-h-0 overflow-y-auto p-2 text-sm">
                     <Row name={selfName} isSelf isHost={isSelfHost} micMuted={!micOn} handRaised={handRaised} />
                     {participants.map((p) => (

@@ -86,6 +86,11 @@ export class VideoMeetingMongo extends BaseMongoEntity implements VideoMeeting {
     public passwordHash?: string;
 
     @Column({ nullable: true })
+    @Description("When true, nobody but the organizer joins directly - everyone else waits for the host to admit them.")
+    @Nullable
+    public waitingRoomEnabled?: boolean;
+
+    @Column({ nullable: true })
     @Description("Informational only: not used for any availability or conflict checking.")
     @Nullable
     public startTime?: Date;
@@ -108,6 +113,7 @@ export class VideoMeetingMongo extends BaseMongoEntity implements VideoMeeting {
             this.status = other.status !== undefined ? other.status : this.status;
             this.forceMuteOnJoin = "forceMuteOnJoin" in other ? other.forceMuteOnJoin : this.forceMuteOnJoin;
             this.passwordHash = "passwordHash" in other ? other.passwordHash : this.passwordHash;
+            this.waitingRoomEnabled = "waitingRoomEnabled" in other ? other.waitingRoomEnabled : this.waitingRoomEnabled;
             this.startTime = "startTime" in other ? other.startTime : this.startTime;
             this.endTime = "endTime" in other ? other.endTime : this.endTime;
         }

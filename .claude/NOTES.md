@@ -1118,3 +1118,48 @@ only on confirmed success is itself the right feedback.
 
 Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
 clean at 100%/98.67%/100%/100% (1472 tests). B5 (waiting room) is the last of the seven.
+
+## 2026-09-30 (Phase B5 of the 7-item batch): waiting room
+
+**State lives in memory, per route instance, not a new model.** A `VideoMeetingAdmission` table would mean another
+migration-equivalent round trip for data nobody needs once the meeting ends - this plugin already has exactly this
+trade-off for `RelayHub`'s in-process relay state (a restart drops it, accepted). `BaseVideoMeetingRoute` gained
+`private pendingAdmissions: Map<meetingUid, Map<uid, { name, requestedAt, status: "pending"|"admitted"|"denied" }>>`,
+written by `registerPendingAdmission()`, read by the new `GET /join/:token/status` poll and the host's
+`GET /:id/waiting` list.
+
+**Waiting room and password share one gate, but waiting room wins when a meeting has both.** `join()` (the GET)
+checks `waitingRoomEnabled` before `passwordHash` - a protected-and-gated meeting goes straight to
+`requiresAdmission: true` rather than a password step first, because the admission-request form (`verifyPassword()`,
+despite the name, now does double duty) collects the name *and* the password together in one POST, then files the
+pending admission only after the password check passes. Two separate sequential prompts for the same meeting would
+mean a guest fills in a password just to land on a second screen - collapsing it to one form is both less friction
+and one fewer place a guess-the-password brute force could probe.
+
+**Bug caught by the refactor, not before it**: the first pass had `pollAdmission()`'s admitted branch call the
+existing `completeJoin()`, same as the organizer/direct-join paths. That's wrong for a guest - `completeJoin()`
+decides real-vs-guest by checking `authenticated`, and for a non-authenticated caller it *mints a new guest uid*
+unconditionally. A guest who filed a pending admission already has a uid (from `requestAdmission()`'s own mint,
+returned as the token the client polls with); routing them back through `completeJoin()` on admission would hand
+them a second, different uid with no pending record of its own, failing the ACL grant silently. Fixed by splitting
+`completeJoin()` into `grantJoin(meeting, publicMeeting, selfUid, authenticated)` - the actual grant for an already-
+settled identity - and having `completeJoin()` be the only caller that ever mints a guest, deciding real-vs-guest
+once and then calling `grantJoin()`. `pollAdmission()` calls `grantJoin()` directly with the uid already on file.
+
+**Host side**: the participants drawer gained a "waiting room" section (host-only, same `isSelfHost` gate as every
+other B-phase control) listing pending names with Admit/Deny buttons, backed by `GET /:id/waiting` and new
+`POST /:id/admit/:uid` / `POST /:id/deny/:uid` routes (both `requireOwnedMeeting(id, user, ACLAction.UPDATE)`, same
+authority as every other host mutation this phase added). `_CallView.tsx` polls `listWaitingParticipants()` every
+3s, but only while `isHost && drawerOpen` - no reason to poll a list nobody's looking at, same reasoning as every
+other polling loop in this app being gated on visibility.
+
+**Guest side**: `[token].tsx` gained `"admission-request"` (name + password, if the meeting also has one) and
+`"waiting"` phases between `password` and `lobby`, polling `GET /join/:token/status` every 3s with the guest's own
+JWT once minted (`Authorization: jwt <token>`, sent only when present - the organizer/authenticated path never
+needs it). A `403` from the poll means denied: shown as its own `"denied"` phase with the server's message, not a
+silent fallback to `not-found`, since "the host said no" and "this link doesn't exist" are different situations
+worth telling a guest apart.
+
+Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
+clean at 100%/98.54%/100%/100% (1553 tests). This closes all seven items from the approved plan
+(A1-A3 additive UI, B1-B5 host identity and moderation) - no further phases remain unless new work is raised.

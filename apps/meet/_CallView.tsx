@@ -47,7 +47,16 @@ import type { MeshParticipant, RelayTransportLike } from "../shared/webrtc/types
 import { createRelayTransport } from "../shared/relay/RelayTransport.js";
 import { GuestSignalingClient } from "../shared/push/GuestSignalingClient.js";
 import CallControls, { type CallViewMode } from "./_CallControls.js";
-import { kickParticipant, setForceMuteOnJoin as apiSetForceMuteOnJoin, setMeetingPassword } from "./_meetApi.js";
+import {
+    admitParticipant,
+    denyParticipant,
+    kickParticipant,
+    listWaitingParticipants,
+    setForceMuteOnJoin as apiSetForceMuteOnJoin,
+    setMeetingPassword,
+    setWaitingRoomEnabled as apiSetWaitingRoomEnabled,
+    type WaitingParticipant,
+} from "./_meetApi.js";
 import ParticipantTile from "./_ParticipantTile.js";
 import ParticipantsDrawer from "./_ParticipantsDrawer.js";
 
@@ -78,6 +87,9 @@ export interface CallViewProps {
      * section in the participants drawer, same "owned and kept current by this view" shape as
      * `initialForceMuteOnJoin`. */
     initialHasPassword?: boolean;
+    /** `PublicVideoMeeting.waitingRoomEnabled` as of this call's own `join()` - the starting value for the host's
+     * waiting-room toggle, same "owned and kept current by this view" shape as `initialForceMuteOnJoin`. */
+    initialWaitingRoomEnabled?: boolean;
     /** The camera and microphone, owned by the page (`[token].tsx`) - the lobby's tracks carried into the call. */
     media: LocalMedia;
     /** Called once the participant leaves, for any reason. `reason` is set only when the call ended without the
@@ -90,6 +102,8 @@ export interface CallViewProps {
 const REACTION_MS = 4_000;
 /** The most reactions shown at once - a burst beyond this drops the oldest. */
 const MAX_REACTIONS = 12;
+/** How often the host's drawer refreshes its own waiting-room list while open. */
+const DEFAULT_WAITING_POLL_MS = 3_000;
 
 interface Reaction {
     id: number;
@@ -145,6 +159,7 @@ export default function CallView({
     hostUid,
     initialForceMuteOnJoin,
     initialHasPassword,
+    initialWaitingRoomEnabled,
     media,
     onLeave,
 }: CallViewProps) {
@@ -168,6 +183,8 @@ export default function CallView({
     const [drawerOpen, setDrawerOpen] = useState(false);
     const [forceMuteOnJoin, setForceMuteOnJoinState] = useState(!!initialForceMuteOnJoin);
     const [hasPassword, setHasPassword] = useState(!!initialHasPassword);
+    const [waitingRoomEnabled, setWaitingRoomEnabledState] = useState(!!initialWaitingRoomEnabled);
+    const [waitingParticipants, setWaitingParticipants] = useState<WaitingParticipant[]>([]);
 
     const managerRef = useRef<MeshConnectionManager | null>(null);
     /** The raw capture from `getDisplayMedia()` - only ever used to stop it (releasing the OS's own share
@@ -437,6 +454,28 @@ export default function CallView({
         setHasPassword(!!password);
     }
 
+    /** Flips the host's waiting-room setting - same optimistic-and-revert shape as `handleToggleForceMuteOnJoin()`,
+     * for the same reason. Takes effect for whoever joins next; nobody already admitted is retroactively gated. */
+    function handleToggleWaitingRoomEnabled() {
+        const next = !waitingRoomEnabled;
+        setWaitingRoomEnabledState(next);
+        apiSetWaitingRoomEnabled(channel, next).catch(() => setWaitingRoomEnabledState(!next));
+    }
+
+    /** Admits one pending request - optimistically removed from the drawer's own list (the next poll would drop it
+     * anyway, once the requester's own next poll completes their join; removing it here just avoids the visible
+     * delay). Re-added if the save itself fails, so a failure doesn't silently lose the request from the list. */
+    function handleAdmitParticipant(uid: string) {
+        setWaitingParticipants((prev) => prev.filter((p) => p.uid !== uid));
+        admitParticipant(channel, uid).catch(() => void listWaitingParticipants(channel).then(setWaitingParticipants, () => undefined));
+    }
+
+    /** Denies one pending request - same optimistic-removal shape as `handleAdmitParticipant()`. */
+    function handleDenyParticipant(uid: string) {
+        setWaitingParticipants((prev) => prev.filter((p) => p.uid !== uid));
+        denyParticipant(channel, uid).catch(() => void listWaitingParticipants(channel).then(setWaitingParticipants, () => undefined));
+    }
+
     function handleAudioBlocked() {
         setAudioBlocked(true);
     }
@@ -452,6 +491,30 @@ export default function CallView({
     // prop): nobody's tab is prevented from claiming it, only from being shown host controls for it.
     const isHost = !!hostUid && selfUid === hostUid;
     const isParticipantHost = (uid: string): boolean => !!hostUid && uid.startsWith(`${hostUid}~`);
+
+    // Refreshes the drawer's own waiting-room list while the host has the drawer open - there is no push signal
+    // for a newly filed admission request, so polling is the only way the list stays current without the host
+    // having to close and reopen the drawer. Stops (and the list is dropped) the moment either condition ends.
+    useEffect(() => {
+        if (!isHost || !drawerOpen) {
+            setWaitingParticipants([]);
+            return;
+        }
+        let cancelled = false;
+        const poll = () => {
+            listWaitingParticipants(channel).then((list) => {
+                if (!cancelled) {
+                    setWaitingParticipants(list);
+                }
+            }, () => undefined);
+        };
+        poll();
+        const interval = setInterval(poll, DEFAULT_WAITING_POLL_MS);
+        return () => {
+            cancelled = true;
+            clearInterval(interval);
+        };
+    }, [isHost, drawerOpen, channel]);
     const otherUids = participants.map((p) => p.uid);
     // A pin or an active-speaker pick can name someone who has just left, until the state catches up.
     const stillHere = (uid: string | undefined) => (uid && otherUids.includes(uid) ? uid : undefined);
@@ -648,6 +711,11 @@ export default function CallView({
                     onToggleForceMuteOnJoin={handleToggleForceMuteOnJoin}
                     hasPassword={hasPassword}
                     onSetPassword={handleSetPassword}
+                    waitingRoomEnabled={waitingRoomEnabled}
+                    onToggleWaitingRoomEnabled={handleToggleWaitingRoomEnabled}
+                    waitingParticipants={waitingParticipants}
+                    onAdmit={handleAdmitParticipant}
+                    onDeny={handleDenyParticipant}
                     onClose={() => setDrawerOpen(false)}
                 />
             )}

@@ -748,6 +748,223 @@ describe("Route:VideoMeetingMongo Tests", () => {
         });
     });
 
+    describe("waiting room (GET /join/:token, POST /join/:token/verify, GET /join/:token/status, waiting/admit/deny)", () => {
+        const createWaiting = async (extra: Record<string, any> = {}) => {
+            const created = await authed(ownerToken)
+                .post(baseUrl)
+                .send({ mailboxUid: mailbox.uid, title: "Waiting Room", visibility: "public", waitingRoomEnabled: true, ...extra });
+            return created.body.meeting as { uid: string; publicSlug: string; organizerSlug?: string };
+        };
+
+        it("Sets and clears waitingRoomEnabled via PUT /:id.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const uid = created.body.meeting.uid;
+
+            const set = await authed(ownerToken).put(`${baseUrl}/${uid}`).send({ waitingRoomEnabled: true });
+            expect(set.status).toBe(200);
+            expect(set.body.waitingRoomEnabled).toBe(true);
+
+            const cleared = await authed(ownerToken).put(`${baseUrl}/${uid}`).send({ waitingRoomEnabled: false });
+            expect(cleared.status).toBe(200);
+            expect(cleared.body.waitingRoomEnabled).toBe(false);
+        });
+
+        it("Rejects a non-boolean waitingRoomEnabled on create and update (400).", async () => {
+            const create = await authed(ownerToken)
+                .post(baseUrl)
+                .send({ mailboxUid: mailbox.uid, title: "x", visibility: "public", waitingRoomEnabled: "yes" });
+            expect(create.status).toBe(400);
+
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const update = await authed(ownerToken).put(`${baseUrl}/${created.body.meeting.uid}`).send({ waitingRoomEnabled: "yes" });
+            expect(update.status).toBe(400);
+        });
+
+        it("Returns requiresAdmission with no grant at all from GET /join/:token when enabled.", async () => {
+            const meeting = await createWaiting();
+            const result = await request(server.getApplication()).get(`${baseUrl}/join/${meeting.publicSlug}`);
+
+            expect(result.status).toBe(200);
+            expect(result.body.requiresAdmission).toBe(true);
+            expect(result.body.meeting.waitingRoomEnabled).toBe(true);
+            expect(result.body.iceServers).toBeUndefined();
+            expect(result.body.selfUid).toBeUndefined();
+        });
+
+        it("Rejects an admission request with no name (400).", async () => {
+            const meeting = await createWaiting();
+            const result = await request(server.getApplication()).post(`${baseUrl}/join/${meeting.publicSlug}/verify`).send({});
+            expect(result.status).toBe(400);
+        });
+
+        it("Files a guest's admission request, returning a usable guest token to poll with, still gated.", async () => {
+            const meeting = await createWaiting();
+            const result = await request(server.getApplication()).post(`${baseUrl}/join/${meeting.publicSlug}/verify`).send({ name: "Grace" });
+
+            expect(result.status).toBe(200);
+            expect(result.body.requiresAdmission).toBe(true);
+            expect(result.body.authenticated).toBe(false);
+            expect(result.body.selfUid).toMatch(/^guest:/);
+            expect(result.body.token).toBeTruthy();
+            expect(result.body.iceServers).toBeUndefined();
+        });
+
+        it("Lists nothing for a meeting nobody has ever requested admission to.", async () => {
+            const meeting = await createWaiting();
+            const waiting = await authed(ownerToken).get(`${baseUrl}/${meeting.uid}/waiting`);
+            expect(waiting.status).toBe(200);
+            expect(waiting.body).toEqual([]);
+        });
+
+        it("Lists more than one pending request, oldest first.", async () => {
+            const meeting = await createWaiting();
+            await request(server.getApplication()).post(`${baseUrl}/join/${meeting.publicSlug}/verify`).send({ name: "Alice" });
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            await request(server.getApplication()).post(`${baseUrl}/join/${meeting.publicSlug}/verify`).send({ name: "Bob" });
+
+            const waiting = await authed(ownerToken).get(`${baseUrl}/${meeting.uid}/waiting`);
+            expect(waiting.body.map((r: any) => r.name)).toEqual(["Alice", "Bob"]);
+        });
+
+        it("Lists a filed request to the host, admits it, and grants full access once the guest polls again.", async () => {
+            const meeting = await createWaiting();
+            const filed = await request(server.getApplication()).post(`${baseUrl}/join/${meeting.publicSlug}/verify`).send({ name: "Grace" });
+            const guestUid = filed.body.selfUid;
+            const guestToken = filed.body.token;
+
+            const waiting = await authed(ownerToken).get(`${baseUrl}/${meeting.uid}/waiting`);
+            expect(waiting.status).toBe(200);
+            expect(waiting.body).toEqual([{ uid: guestUid, name: "Grace", requestedAt: expect.any(String) }]);
+
+            const stillPending = await authed(guestToken).get(`${baseUrl}/join/${meeting.publicSlug}/status`);
+            expect(stillPending.status).toBe(200);
+            expect(stillPending.body.requiresAdmission).toBe(true);
+
+            const admitted = await authed(ownerToken).post(`${baseUrl}/${meeting.uid}/admit/${guestUid}`);
+            expect(admitted.status).toBe(204);
+
+            const granted = await authed(guestToken).get(`${baseUrl}/join/${meeting.publicSlug}/status`);
+            expect(granted.status).toBe(200);
+            expect(granted.body.requiresAdmission).toBeUndefined();
+            expect(granted.body.authenticated).toBe(false);
+            expect(granted.body.selfUid).toBe(guestUid);
+            expect(granted.body.iceServers.length).toBeGreaterThanOrEqual(2);
+
+            // Resolved, so the host's waiting list is empty again and a repeat poll answers 404.
+            expect((await authed(ownerToken).get(`${baseUrl}/${meeting.uid}/waiting`)).body).toEqual([]);
+            expect((await authed(guestToken).get(`${baseUrl}/join/${meeting.publicSlug}/status`)).status).toBe(404);
+        });
+
+        it("Denies a request, answering 403 on the next poll and removing it from the waiting list.", async () => {
+            const meeting = await createWaiting();
+            const filed = await request(server.getApplication()).post(`${baseUrl}/join/${meeting.publicSlug}/verify`).send({ name: "Grace" });
+            const guestUid = filed.body.selfUid;
+            const guestToken = filed.body.token;
+
+            const denied = await authed(ownerToken).post(`${baseUrl}/${meeting.uid}/deny/${guestUid}`);
+            expect(denied.status).toBe(204);
+
+            const result = await authed(guestToken).get(`${baseUrl}/join/${meeting.publicSlug}/status`);
+            expect(result.status).toBe(403);
+
+            expect((await authed(guestToken).get(`${baseUrl}/join/${meeting.publicSlug}/status`)).status).toBe(404);
+        });
+
+        it("Is a no-op (still 204) to admit or deny a uid with no pending request.", async () => {
+            const meeting = await createWaiting();
+            expect((await authed(ownerToken).post(`${baseUrl}/${meeting.uid}/admit/${uuid.v4()}`)).status).toBe(204);
+            expect((await authed(ownerToken).post(`${baseUrl}/${meeting.uid}/deny/${uuid.v4()}`)).status).toBe(204);
+        });
+
+        it("Rejects polling with no authentication at all.", async () => {
+            const meeting = await createWaiting();
+            await request(server.getApplication()).post(`${baseUrl}/join/${meeting.publicSlug}/verify`).send({ name: "Grace" });
+            const result = await request(server.getApplication()).get(`${baseUrl}/join/${meeting.publicSlug}/status`);
+            expect(result.status).toBeGreaterThanOrEqual(400);
+        });
+
+        it("Returns 404 polling for an identity that never requested admission.", async () => {
+            const meeting = await createWaiting();
+            const result = await authed(strangerToken).get(`${baseUrl}/join/${meeting.publicSlug}/status`);
+            expect(result.status).toBe(404);
+        });
+
+        it("Grants an already-authenticated real caller their own uid directly, with no guest token minted.", async () => {
+            const meeting = await createWaiting();
+            const filed = await authed(strangerToken).post(`${baseUrl}/join/${meeting.publicSlug}/verify`).send({ name: "Stranger" });
+            expect(filed.body.authenticated).toBe(true);
+            expect(filed.body.selfUid).toBe(stranger.uid);
+            expect(filed.body.token).toBeUndefined();
+
+            await authed(ownerToken).post(`${baseUrl}/${meeting.uid}/admit/${stranger.uid}`);
+            const granted = await authed(strangerToken).get(`${baseUrl}/join/${meeting.publicSlug}/status`);
+            expect(granted.status).toBe(200);
+            expect(granted.body.authenticated).toBe(true);
+            expect(granted.body.selfUid).toBe(stranger.uid);
+        });
+
+        it("Lets the organizer bypass the waiting room entirely via their own organizerSlug.", async () => {
+            const created = await authed(ownerToken)
+                .post(baseUrl)
+                .send({ mailboxUid: mailbox.uid, title: "x", visibility: "private", invitees: [{ email: "a@example.com" }], waitingRoomEnabled: true });
+            const result = await authed(ownerToken).get(`${baseUrl}/join/${created.body.meeting.organizerSlug}`);
+            expect(result.status).toBe(200);
+            expect(result.body.requiresAdmission).toBeUndefined();
+            expect(result.body.authenticated).toBe(true);
+        });
+
+        it("Reports requiresAdmission, not requiresPassword, from GET /join/:token when both are set - and verify() requires both on one combined submission.", async () => {
+            const meeting = await createWaiting({ password: "s3cret" });
+            const result = await request(server.getApplication()).get(`${baseUrl}/join/${meeting.publicSlug}`);
+            expect(result.body.requiresAdmission).toBe(true);
+            expect(result.body.requiresPassword).toBeUndefined();
+            expect(result.body.meeting.hasPassword).toBe(true);
+
+            const wrongPassword = await request(server.getApplication())
+                .post(`${baseUrl}/join/${meeting.publicSlug}/verify`)
+                .send({ password: "wrong", name: "Grace" });
+            expect(wrongPassword.status).toBe(403);
+
+            const noName = await request(server.getApplication()).post(`${baseUrl}/join/${meeting.publicSlug}/verify`).send({ password: "s3cret" });
+            expect(noName.status).toBe(400);
+
+            const both = await request(server.getApplication())
+                .post(`${baseUrl}/join/${meeting.publicSlug}/verify`)
+                .send({ password: "s3cret", name: "Grace" });
+            expect(both.status).toBe(200);
+            expect(both.body.requiresAdmission).toBe(true);
+        });
+
+        describe("waiting-room host route authorization", () => {
+            it("Rejects a caller with no account at all on every host route.", async () => {
+                const meeting = await createWaiting();
+                expect((await request(server.getApplication()).get(`${baseUrl}/${meeting.uid}/waiting`)).status).toBeGreaterThanOrEqual(400);
+                expect((await request(server.getApplication()).post(`${baseUrl}/${meeting.uid}/admit/${uuid.v4()}`)).status).toBeGreaterThanOrEqual(400);
+                expect((await request(server.getApplication()).post(`${baseUrl}/${meeting.uid}/deny/${uuid.v4()}`)).status).toBeGreaterThanOrEqual(400);
+            });
+
+            it("Rejects a stranger with no grant on the mailbox (403) on every host route.", async () => {
+                const meeting = await createWaiting();
+                expect((await authed(strangerToken).get(`${baseUrl}/${meeting.uid}/waiting`)).status).toBe(403);
+                expect((await authed(strangerToken).post(`${baseUrl}/${meeting.uid}/admit/${uuid.v4()}`)).status).toBe(403);
+                expect((await authed(strangerToken).post(`${baseUrl}/${meeting.uid}/deny/${uuid.v4()}`)).status).toBe(403);
+            });
+
+            it("Rejects a trusted+elevated administrator with no explicit grant (403) on every host route.", async () => {
+                const meeting = await createWaiting();
+                expect((await authed(adminToken).get(`${baseUrl}/${meeting.uid}/waiting`)).status).toBe(403);
+                expect((await authed(adminToken).post(`${baseUrl}/${meeting.uid}/admit/${uuid.v4()}`)).status).toBe(403);
+                expect((await authed(adminToken).post(`${baseUrl}/${meeting.uid}/deny/${uuid.v4()}`)).status).toBe(403);
+            });
+
+            it("Returns 404 for an unknown meeting id on every host route.", async () => {
+                expect((await authed(ownerToken).get(`${baseUrl}/${uuid.v4()}/waiting`)).status).toBe(404);
+                expect((await authed(ownerToken).post(`${baseUrl}/${uuid.v4()}/admit/${uuid.v4()}`)).status).toBe(404);
+                expect((await authed(ownerToken).post(`${baseUrl}/${uuid.v4()}/deny/${uuid.v4()}`)).status).toBe(404);
+            });
+        });
+    });
+
     describe("ensureChannelGrant (ACL grant race handling)", () => {
         it("Is idempotent: granting the same uid twice does not re-save the ACL or duplicate the record.", async () => {
             const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });

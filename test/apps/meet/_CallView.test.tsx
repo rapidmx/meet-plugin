@@ -102,15 +102,31 @@ vi.mock("../../../apps/shared/media/deviceMedia.js", async (importOriginal) => {
 });
 vi.mock("../../../apps/shared/media/chime.js", () => ({ playRaisedHandChime: chimeMock }));
 
-const { kickParticipantMock, setForceMuteOnJoinMock, setMeetingPasswordMock } = vi.hoisted(() => ({
+const {
+    kickParticipantMock,
+    setForceMuteOnJoinMock,
+    setMeetingPasswordMock,
+    setWaitingRoomEnabledMock,
+    listWaitingParticipantsMock,
+    admitParticipantMock,
+    denyParticipantMock,
+} = vi.hoisted(() => ({
     kickParticipantMock: vi.fn().mockResolvedValue(undefined),
     setForceMuteOnJoinMock: vi.fn().mockResolvedValue(undefined),
     setMeetingPasswordMock: vi.fn().mockResolvedValue(undefined),
+    setWaitingRoomEnabledMock: vi.fn().mockResolvedValue(undefined),
+    listWaitingParticipantsMock: vi.fn().mockResolvedValue([]),
+    admitParticipantMock: vi.fn().mockResolvedValue(undefined),
+    denyParticipantMock: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("../../../apps/meet/_meetApi.js", () => ({
     kickParticipant: kickParticipantMock,
     setForceMuteOnJoin: setForceMuteOnJoinMock,
     setMeetingPassword: setMeetingPasswordMock,
+    setWaitingRoomEnabled: setWaitingRoomEnabledMock,
+    listWaitingParticipants: listWaitingParticipantsMock,
+    admitParticipant: admitParticipantMock,
+    denyParticipant: denyParticipantMock,
 }));
 
 import CallView, { accountUidOf, computeMainUid, newPeerId } from "../../../apps/meet/_CallView.js";
@@ -1092,5 +1108,173 @@ describe("CallView - host password section", () => {
 
         expect(await screen.findByText("Could not save - try again.")).toBeInTheDocument();
         expect(screen.getByText("No password required to join.")).toBeInTheDocument();
+    });
+});
+
+describe("CallView - host waiting room", () => {
+    it("shows the checkbox only to the host, reflecting the initial setting", async () => {
+        await connected({ selfUid: "local-me", hostUid: "local-me", initialWaitingRoomEnabled: true });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        expect(screen.getByRole("checkbox", { name: "Require the host to admit participants" })).toBeChecked();
+    });
+
+    it("hides the checkbox from a non-host", async () => {
+        await connected();
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        expect(screen.queryByRole("checkbox", { name: "Require the host to admit participants" })).toBeNull();
+    });
+
+    it("toggles optimistically and persists the new value", async () => {
+        await connected({ selfUid: "local-me", hostUid: "local-me" });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        const checkbox = screen.getByRole("checkbox", { name: "Require the host to admit participants" });
+        expect(checkbox).not.toBeChecked();
+
+        fireEvent.click(checkbox);
+        expect(checkbox).toBeChecked();
+        expect(setWaitingRoomEnabledMock).toHaveBeenCalledWith("meeting-1", true);
+    });
+
+    it("reverts the checkbox when persisting the change fails", async () => {
+        setWaitingRoomEnabledMock.mockRejectedValueOnce(new Error("network error"));
+        await connected({ selfUid: "local-me", hostUid: "local-me" });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        const checkbox = screen.getByRole("checkbox", { name: "Require the host to admit participants" });
+
+        fireEvent.click(checkbox);
+        expect(checkbox).toBeChecked();
+        await waitFor(() => expect(checkbox).not.toBeChecked());
+    });
+
+    it("does not show the waiting list when the waiting room is off", async () => {
+        await connected({ selfUid: "local-me", hostUid: "local-me" });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        expect(screen.queryByText("Waiting to join")).toBeNull();
+    });
+
+    it("hides the waiting list from a non-host even if somehow enabled", async () => {
+        await connected({ initialWaitingRoomEnabled: true });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        expect(screen.queryByText("Waiting to join")).toBeNull();
+    });
+
+    it("says nobody is waiting when the list is empty", async () => {
+        await connected({ selfUid: "local-me", hostUid: "local-me", initialWaitingRoomEnabled: true });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        expect(await screen.findByText("Nobody is waiting right now.")).toBeInTheDocument();
+    });
+
+    it("lists pending requests and lets the host admit one", async () => {
+        listWaitingParticipantsMock.mockResolvedValue([{ uid: "guest:abc", name: "Grace", requestedAt: "2026-01-01T00:00:00.000Z" }]);
+        await connected({ selfUid: "local-me", hostUid: "local-me", initialWaitingRoomEnabled: true });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+
+        expect(await screen.findByText("Grace")).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Admit Grace" }));
+
+        expect(admitParticipantMock).toHaveBeenCalledWith("meeting-1", "guest:abc");
+        await waitFor(() => expect(screen.queryByText("Grace")).toBeNull());
+    });
+
+    it("lets the host deny a pending request", async () => {
+        listWaitingParticipantsMock.mockResolvedValue([{ uid: "guest:abc", name: "Grace", requestedAt: "2026-01-01T00:00:00.000Z" }]);
+        await connected({ selfUid: "local-me", hostUid: "local-me", initialWaitingRoomEnabled: true });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+
+        expect(await screen.findByText("Grace")).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Deny Grace" }));
+
+        expect(denyParticipantMock).toHaveBeenCalledWith("meeting-1", "guest:abc");
+        await waitFor(() => expect(screen.queryByText("Grace")).toBeNull());
+    });
+
+    it("re-fetches the waiting list from the server when admitting fails", async () => {
+        listWaitingParticipantsMock.mockResolvedValue([{ uid: "guest:abc", name: "Grace", requestedAt: "2026-01-01T00:00:00.000Z" }]);
+        admitParticipantMock.mockRejectedValueOnce(new Error("network error"));
+        await connected({ selfUid: "local-me", hostUid: "local-me", initialWaitingRoomEnabled: true });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+
+        expect(await screen.findByText("Grace")).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Admit Grace" }));
+
+        // Removed optimistically, then put back once the re-fetch (listWaitingParticipants is still mocked to
+        // return Grace) completes.
+        await waitFor(() => expect(screen.getByText("Grace")).toBeInTheDocument());
+    });
+
+    it("tolerates a failed poll without crashing", async () => {
+        listWaitingParticipantsMock.mockRejectedValueOnce(new Error("network error"));
+        await connected({ selfUid: "local-me", hostUid: "local-me", initialWaitingRoomEnabled: true });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        expect(await screen.findByText("Nobody is waiting right now.")).toBeInTheDocument();
+    });
+
+    it("re-fetches the waiting list from the server when denying fails", async () => {
+        listWaitingParticipantsMock.mockResolvedValue([{ uid: "guest:abc", name: "Grace", requestedAt: "2026-01-01T00:00:00.000Z" }]);
+        denyParticipantMock.mockRejectedValueOnce(new Error("network error"));
+        await connected({ selfUid: "local-me", hostUid: "local-me", initialWaitingRoomEnabled: true });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+
+        expect(await screen.findByText("Grace")).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Deny Grace" }));
+
+        await waitFor(() => expect(screen.getByText("Grace")).toBeInTheDocument());
+    });
+
+    it("gives up quietly if the re-fetch after a failed admit also fails", async () => {
+        listWaitingParticipantsMock.mockResolvedValueOnce([{ uid: "guest:abc", name: "Grace", requestedAt: "2026-01-01T00:00:00.000Z" }]);
+        admitParticipantMock.mockRejectedValueOnce(new Error("network error"));
+        listWaitingParticipantsMock.mockRejectedValueOnce(new Error("network error"));
+        await connected({ selfUid: "local-me", hostUid: "local-me", initialWaitingRoomEnabled: true });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+
+        expect(await screen.findByText("Grace")).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Admit Grace" }));
+
+        // No crash is the whole point here - the optimistic removal simply stands uncorrected.
+        await waitFor(() => expect(screen.queryByText("Grace")).toBeNull());
+    });
+
+    it("gives up quietly if the re-fetch after a failed deny also fails", async () => {
+        listWaitingParticipantsMock.mockResolvedValueOnce([{ uid: "guest:abc", name: "Grace", requestedAt: "2026-01-01T00:00:00.000Z" }]);
+        denyParticipantMock.mockRejectedValueOnce(new Error("network error"));
+        listWaitingParticipantsMock.mockRejectedValueOnce(new Error("network error"));
+        await connected({ selfUid: "local-me", hostUid: "local-me", initialWaitingRoomEnabled: true });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+
+        expect(await screen.findByText("Grace")).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Deny Grace" }));
+
+        await waitFor(() => expect(screen.queryByText("Grace")).toBeNull());
+    });
+
+    it("ignores a poll that resolves after the drawer was already closed", async () => {
+        let resolveList!: (value: unknown) => void;
+        listWaitingParticipantsMock.mockImplementationOnce(
+            () =>
+                new Promise((resolve) => {
+                    resolveList = resolve;
+                }),
+        );
+        await connected({ selfUid: "local-me", hostUid: "local-me", initialWaitingRoomEnabled: true });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+
+        fireEvent.click(screen.getByRole("button", { name: "Close participants" }));
+        resolveList([{ uid: "guest:abc", name: "Grace", requestedAt: "2026-01-01T00:00:00.000Z" }]);
+        await act(() => Promise.resolve());
+
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        expect(screen.queryByText("Grace")).toBeNull();
+    });
+
+    it("stops polling once the drawer is closed", async () => {
+        await connected({ selfUid: "local-me", hostUid: "local-me", initialWaitingRoomEnabled: true });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        await waitFor(() => expect(listWaitingParticipantsMock).toHaveBeenCalled());
+        const callsSoFar = listWaitingParticipantsMock.mock.calls.length;
+
+        fireEvent.click(screen.getByRole("button", { name: "Close participants" }));
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(listWaitingParticipantsMock.mock.calls.length).toBe(callsSoFar);
     });
 });

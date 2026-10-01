@@ -5,7 +5,10 @@
 /**
  * The public join/lobby/in-call page, `GET /meet/:token` - resolves an invitee's join token or a public meeting's
  * slug (`BaseVideoMeetingRoute.join()`, both shapes accepted identically - see `_meetApi.ts`), then walks through
- * `loading` -> (`password`, only when the meeting requires one) -> `lobby` -> `in-call` -> `ended`.
+ * `loading` -> (`password`, only when a password is required) -> (`admission-request` then `waiting`, only when
+ * the meeting has a waiting room - see that phase's own render branch) -> `lobby` -> `in-call` -> `ended`. A
+ * waiting room takes over the entire gate (asking for a password too, on the same form) rather than stacking
+ * after a separate password screen - see `BaseVideoMeetingRoute.join()`'s own doc comment for why.
  *
  * ## Session-based name prefill - NOT implemented, and why
  *
@@ -40,9 +43,21 @@ import { MeetCard, MeetPageShell } from "./_MeetChrome.js";
 import { useLocalMedia } from "../shared/media/useLocalMedia.js";
 import MeetLobby from "./_MeetLobby.js";
 import CallView from "./_CallView.js";
-import { type PublicVideoMeeting, type VideoMeetingJoinResult, joinMeeting, verifyMeetingPassword } from "./_meetApi.js";
+import {
+    type PublicVideoMeeting,
+    type VideoMeetingJoinResult,
+    joinMeeting,
+    pollAdmission,
+    requestAdmission,
+    verifyMeetingPassword,
+} from "./_meetApi.js";
 
-type Phase = "loading" | "not-found" | "password" | "lobby" | "in-call" | "ended";
+type Phase = "loading" | "not-found" | "password" | "admission-request" | "waiting" | "denied" | "lobby" | "in-call" | "ended";
+
+const INPUT_CLASS = "w-full text-base py-2.5 px-3.5 border border-border rounded-md bg-surface text-text focus:outline-none focus:border-primary";
+
+/** How often `MeetJoinContent` polls while in the `"waiting"` phase. */
+const ADMISSION_POLL_MS = 3_000;
 
 export default function MeetJoinPage({ params }: { params: { token: string } }) {
     const { branding } = useBranding();
@@ -63,6 +78,16 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
     const [passwordMeeting, setPasswordMeeting] = useState<PublicVideoMeeting | null>(null);
     const [passwordInput, setPasswordInput] = useState("");
     const [passwordError, setPasswordError] = useState<string | null>(null);
+    /** The restricted `PublicVideoMeeting` `joinMeeting()`/`requestAdmission()` returned while this meeting has a
+     * waiting room - read on both the `"admission-request"` and `"waiting"` screens. */
+    const [admissionMeeting, setAdmissionMeeting] = useState<PublicVideoMeeting | null>(null);
+    const [admissionName, setAdmissionName] = useState("");
+    const [admissionPassword, setAdmissionPassword] = useState("");
+    const [admissionError, setAdmissionError] = useState<string | null>(null);
+    /** The guest token `requestAdmission()` minted, to poll with (`Authorization` header - a guest has no session
+     * cookie of their own). `undefined` for an already-authenticated real caller, whose existing session cookie
+     * already identifies them to `pollAdmission()` with no header needed. */
+    const [pendingGuestToken, setPendingGuestToken] = useState<string | undefined>(undefined);
     /** Set only when the call ended without the participant's own action (currently: kicked by the host) - see
      * `CallView`'s `onLeave` doc comment. Shown instead of the ordinary "you left" message; also hides "Rejoin
      * meeting", since a kicked participant's server-side channel grant has just been revoked and a rejoin attempt
@@ -76,6 +101,11 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
         joinMeeting(token)
             .then((result) => {
                 if (cancelled) {
+                    return;
+                }
+                if ("requiresAdmission" in result) {
+                    setAdmissionMeeting(result.meeting);
+                    setPhase("admission-request");
                     return;
                 }
                 if ("requiresPassword" in result) {
@@ -119,6 +149,54 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
         }
     }
 
+    async function handleRequestAdmission(e: React.FormEvent) {
+        e.preventDefault();
+        setAdmissionError(null);
+        try {
+            const result = await requestAdmission(token, {
+                name: admissionName.trim(),
+                ...(admissionMeeting?.hasPassword && { password: admissionPassword }),
+            });
+            setName(admissionName.trim());
+            setPendingGuestToken(result.token);
+            setPhase("waiting");
+        } catch (err) {
+            setAdmissionError(err instanceof ApiRequestError && err.status === 403 ? "Incorrect password." : "Something went wrong. Try again.");
+        }
+    }
+
+    // Polls while waiting for the host to respond - stops as soon as this phase is left, one way or the other.
+    React.useEffect(() => {
+        if (phase !== "waiting") {
+            return;
+        }
+        let cancelled = false;
+        const poll = async () => {
+            try {
+                const result = await pollAdmission(token, pendingGuestToken);
+                if (cancelled || "requiresAdmission" in result) {
+                    return;
+                }
+                setJoinResult(result);
+                setPhase("lobby");
+            } catch (err) {
+                if (cancelled || !(err instanceof ApiRequestError) || err.status !== 403) {
+                    // A transient failure (network blip, server hiccup) - stay on this screen and try again next
+                    // tick, rather than giving up on what might just be one bad request.
+                    return;
+                }
+                setAdmissionError(err.message || "The host did not admit you to this meeting.");
+                setPhase("denied");
+            }
+        };
+        void poll();
+        const interval = setInterval(() => void poll(), ADMISSION_POLL_MS);
+        return () => {
+            cancelled = true;
+            clearInterval(interval);
+        };
+    }, [phase, token, pendingGuestToken]);
+
     function handleLeave(reason?: string) {
         release();
         setEndedReason(reason);
@@ -143,6 +221,7 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
                 hostUid={joinResult.meeting.hostUid}
                 initialForceMuteOnJoin={!!joinResult.meeting.forceMuteOnJoin}
                 initialHasPassword={!!joinResult.meeting.hasPassword}
+                initialWaitingRoomEnabled={!!joinResult.meeting.waitingRoomEnabled}
                 media={media}
                 onLeave={handleLeave}
             />
@@ -174,7 +253,7 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
                             id="meet-password"
                             type="password"
                             autoFocus
-                            className="w-full text-base py-2.5 px-3.5 border border-border rounded-md bg-surface text-text focus:outline-none focus:border-primary"
+                            className={INPUT_CLASS}
                             value={passwordInput}
                             onChange={(e) => setPasswordInput(e.target.value)}
                         />
@@ -184,6 +263,58 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
                         Join meeting
                     </Button>
                 </form>
+            </MeetCard>
+        );
+    } else if (phase === "admission-request") {
+        content = (
+            <MeetCard>
+                <h1 className="text-2xl font-bold tracking-tight">{admissionMeeting?.title}</h1>
+                {admissionMeeting?.hostDisplayName && <p className="text-sm text-text-muted mt-1">Hosted by {admissionMeeting.hostDisplayName}</p>}
+                <p className="text-base text-text-muted mt-4 mb-3">The host must let you in before you can join.</p>
+                <form onSubmit={(e) => void handleRequestAdmission(e)}>
+                    <FormField label="Your name" htmlFor="admission-name">
+                        <input
+                            id="admission-name"
+                            type="text"
+                            autoFocus
+                            className={INPUT_CLASS}
+                            value={admissionName}
+                            onChange={(e) => setAdmissionName(e.target.value)}
+                        />
+                    </FormField>
+                    {admissionMeeting?.hasPassword && (
+                        <FormField label="Password" htmlFor="admission-password">
+                            <input
+                                id="admission-password"
+                                type="password"
+                                className={`${INPUT_CLASS} mt-3`}
+                                value={admissionPassword}
+                                onChange={(e) => setAdmissionPassword(e.target.value)}
+                            />
+                        </FormField>
+                    )}
+                    {admissionError && <Alert>{admissionError}</Alert>}
+                    <Button
+                        type="submit"
+                        className="!w-auto mt-3"
+                        disabled={!admissionName.trim() || (!!admissionMeeting?.hasPassword && !admissionPassword)}
+                    >
+                        Ask to join
+                    </Button>
+                </form>
+            </MeetCard>
+        );
+    } else if (phase === "waiting") {
+        content = (
+            <MeetCard>
+                <h1 className="text-2xl font-bold tracking-tight">{admissionMeeting?.title}</h1>
+                <p className="text-base text-text-muted mt-4">Waiting for the host to let you in&hellip;</p>
+            </MeetCard>
+        );
+    } else if (phase === "denied") {
+        content = (
+            <MeetCard>
+                <Alert>{admissionError ?? "The host did not admit you to this meeting."}</Alert>
             </MeetCard>
         );
     } else if (phase === "ended") {
