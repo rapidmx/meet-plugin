@@ -841,4 +841,62 @@ describe("CallView - participants drawer", () => {
         fireEvent.click(screen.getByRole("button", { name: /participants/ }));
         expect(within(screen.getByRole("dialog", { name: "Participants" })).getByText("Can't connect")).toHaveClass("bg-[#601410]");
     });
+
+    it("tags the local participant's own row as host when their uid matches hostUid", async () => {
+        await withParticipant({ selfUid: "local-me", hostUid: "local-me" });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        const selfRow = within(screen.getByRole("dialog", { name: "Participants" })).getByText("Alice (you)").closest("li");
+        expect(within(selfRow!).getByText("Host")).toBeInTheDocument();
+    });
+
+    it("tags a remote participant's row as host when their peer id names hostUid's account, and nobody else's", async () => {
+        const { client } = await connected({ hostUid: "zzz" });
+        client.emit({ type: "video-meeting-signal", kind: "hello", from: "zzz", peer: "zzz~tab", name: "Zed", state: STATE });
+        await screen.findAllByText("Zed");
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        const drawer = screen.getByRole("dialog", { name: "Participants" });
+        expect(within(within(drawer).getByText("Zed").closest("li")!).getByText("Host")).toBeInTheDocument();
+        expect(within(within(drawer).getByText("Alice (you)").closest("li")!).queryByText("Host")).toBeNull();
+    });
+
+    it("shows no host tag anywhere when hostUid could not be resolved", async () => {
+        await withParticipant();
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        expect(within(screen.getByRole("dialog", { name: "Participants" })).queryByText("Host")).toBeNull();
+    });
+});
+
+describe("CallView - host moderation signals", () => {
+    it("mutes the microphone on a received mute request", async () => {
+        const media = fakeLocalMedia({ micOn: true });
+        const { client } = await connected({ media });
+        client.emit({ type: "video-meeting-signal", kind: "mute-request", from: "zzz", to: SELF });
+        expect(media.toggleMic).toHaveBeenCalledTimes(1);
+    });
+
+    it("never unmutes via a mute request - it is already muted", async () => {
+        const media = fakeLocalMedia({ micOn: false });
+        const { client } = await connected({ media });
+        client.emit({ type: "video-meeting-signal", kind: "mute-request", from: "zzz", to: SELF });
+        expect(media.toggleMic).not.toHaveBeenCalled();
+    });
+
+    it("ignores a mute request addressed to a different tab", async () => {
+        const media = fakeLocalMedia({ micOn: true });
+        const { client } = await connected({ media });
+        client.emit({ type: "video-meeting-signal", kind: "mute-request", from: "zzz", to: "someone-else" });
+        expect(media.toggleMic).not.toHaveBeenCalled();
+    });
+
+    it("leaves with a distinct reason when kicked", async () => {
+        const { client, onLeave } = await connected();
+        client.emit({ type: "video-meeting-signal", kind: "kicked", from: "zzz", to: SELF });
+        expect(onLeave).toHaveBeenCalledWith("The host removed you from this call.");
+    });
+
+    it("ignores a kick addressed to a different tab", async () => {
+        const { client, onLeave } = await connected();
+        client.emit({ type: "video-meeting-signal", kind: "kicked", from: "zzz", to: "someone-else" });
+        expect(onLeave).not.toHaveBeenCalled();
+    });
 });

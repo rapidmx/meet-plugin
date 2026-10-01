@@ -29,9 +29,16 @@ export const REACTION_EMOJIS = ["👍", "👏", "❤️", "🎉", "😂", "😮"
  * grows other push consumers) can cheaply recognize and skip anything that isn't one of these.
  *
  * `hello`/`bye`/`presenter-claim`/`presenter-release`/`state`/`reaction` are broadcast (`to` left unset - every
- * participant is relevant); `offer`/`answer`/`ice-candidate` are point-to-point (`to` is the intended peer's uid) -
- * a recipient that isn't `to` (when set) ignores the message, since a channel's pub/sub fans every message out to
- * every subscriber, sender included.
+ * participant is relevant); `offer`/`answer`/`ice-candidate`/`mute-request`/`kicked` are point-to-point (`to` is the
+ * intended peer's uid) - a recipient that isn't `to` (when set) ignores the message, since a channel's pub/sub fans
+ * every message out to every subscriber, sender included.
+ *
+ * `mute-request`/`kicked` are host moderation signals (see `MeshConnectionManager`'s doc comment) - purely
+ * cooperative, like every other message here: the recipient's own client decides whether to honor one, and nothing
+ * on the wire distinguishes a genuine host's message from any other participant's, since this client protocol has
+ * no host identity of its own to check against server-side. `kicked` is paired with the sender also revoking the
+ * recipient's server-side channel grant (`BaseVideoMeetingRoute.revokeChannelGrant()`), which is enforced and does
+ * not depend on the recipient's client cooperating.
  */
 export interface SignalMessage {
     type: "video-meeting-signal";
@@ -45,7 +52,9 @@ export interface SignalMessage {
         | "presenter-release"
         | "state"
         | "reaction"
-        | "relay-fallback";
+        | "relay-fallback"
+        | "mute-request"
+        | "kicked";
     /** The sender's authenticated uid - the real caller's own uid when `join()` returned `authenticated: true`, else
      * the `guest:<random>` uid `BaseVideoMeetingRoute.join()` minted. The server refuses a published message whose
      * `from` isn't the authenticated caller's uid (it stops one participant speaking as another), so this must be
@@ -193,4 +202,10 @@ export type MeshEvent =
     | { type: "remote-stream"; uid: string; stream: MediaStream }
     | { type: "hand-raised"; uid: string; name: string }
     | { type: "reaction"; uid: string; name: string; emoji: string }
-    | { type: "presenter-changed"; uid: string | undefined };
+    | { type: "presenter-changed"; uid: string | undefined }
+    /** Someone (implicitly the host, on the client's own say-so - see `SignalMessage`'s doc comment) asked the local
+     * participant to mute. The caller (`_CallView.tsx`) mutes only if currently unmuted; this never unmutes anyone. */
+    | { type: "mute-requested" }
+    /** The local participant was removed from the call. The caller tears down the mesh and shows a distinct
+     * "removed by the host" state rather than the ordinary "you left" one. */
+    | { type: "kicked" };

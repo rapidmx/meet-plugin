@@ -662,6 +662,77 @@ describe("Route:VideoMeetingMongo Tests", () => {
         });
     });
 
+    describe("revokeChannelGrant (ACL revoke race handling, kick()'s own enforcement)", () => {
+        it("Is a no-op, saving nothing, for a uid holding no grant at all.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const meetingUid = created.body.meeting.uid;
+            const route: any = objectFactory.getInstance("routes.VideoMeetingRoute");
+            const aclUtils: any = objectFactory.getInstance(ACLUtils);
+            const saveSpy = vi.spyOn(aclUtils, "saveACL");
+            try {
+                await route.revokeChannelGrant(meetingUid, "guest:never-joined");
+                expect(saveSpy).not.toHaveBeenCalled();
+            } finally {
+                saveSpy.mockRestore();
+            }
+        });
+
+        it("Retries and succeeds after a transient optimistic-lock conflict on the meeting's ACL.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const meetingUid = created.body.meeting.uid;
+            const route: any = objectFactory.getInstance("routes.VideoMeetingRoute");
+            await route.ensureChannelGrant(meetingUid, "guest:revoke-retry-success");
+            const aclUtils: any = objectFactory.getInstance(ACLUtils);
+            const original = aclUtils.saveACL.bind(aclUtils);
+            let calls = 0;
+            const spy = vi.spyOn(aclUtils, "saveACL").mockImplementation(async (acl: any) => {
+                calls++;
+                if (calls === 1) {
+                    throw new Error("must be of the same version");
+                }
+                return original(acl);
+            });
+            try {
+                await route.revokeChannelGrant(meetingUid, "guest:revoke-retry-success");
+                expect(calls).toBe(2);
+            } finally {
+                spy.mockRestore();
+            }
+            const acl: any = await aclRepo.findOne({ uid: meetingUid });
+            expect(acl.records.some((r: any) => r.userOrRoleId === "guest:revoke-retry-success")).toBe(false);
+        });
+
+        it("Gives up after the max retry attempts on a persistent optimistic-lock conflict.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const meetingUid = created.body.meeting.uid;
+            const route: any = objectFactory.getInstance("routes.VideoMeetingRoute");
+            await route.ensureChannelGrant(meetingUid, "guest:revoke-persistent-conflict");
+            const aclUtils: any = objectFactory.getInstance(ACLUtils);
+            const spy = vi.spyOn(aclUtils, "saveACL").mockRejectedValue(new Error("must be of the same version"));
+            try {
+                await expect(route.revokeChannelGrant(meetingUid, "guest:revoke-persistent-conflict")).rejects.toThrow(/must be of the same version/);
+                expect(spy).toHaveBeenCalledTimes(5);
+            } finally {
+                spy.mockRestore();
+            }
+        });
+
+        it("Rethrows immediately on a non-version-conflict saveACL error, without retrying.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const meetingUid = created.body.meeting.uid;
+            const route: any = objectFactory.getInstance("routes.VideoMeetingRoute");
+            await route.ensureChannelGrant(meetingUid, "guest:revoke-other-error");
+            const aclUtils: any = objectFactory.getInstance(ACLUtils);
+            const spy = vi.spyOn(aclUtils, "saveACL").mockRejectedValue(new Error("boom"));
+            try {
+                await expect(route.revokeChannelGrant(meetingUid, "guest:revoke-other-error")).rejects.toThrow("boom");
+                expect(spy).toHaveBeenCalledTimes(1);
+            } finally {
+                spy.mockRestore();
+            }
+        });
+    });
+
     const suiteContext = {
         app: () => server.getApplication(),
         baseUrl,
@@ -871,6 +942,66 @@ describe("Route:VideoMeetingMongo Tests", () => {
             const guestB: any = { uid: joinedB.body.selfUid, roles: [], scopes: [], elevated: -1 };
             expect(await (await connectPush(guestA)).granted([created.body.meeting.uid])).toEqual([created.body.meeting.uid]);
             expect(await (await connectPush(guestB)).granted([created.body.meeting.uid])).toEqual([created.body.meeting.uid]);
+        });
+
+        it("Revokes a joined guest's grant on kick(), so a channel subscription they'd have been granted no longer is.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const meetingUid = created.body.meeting.uid;
+            const joined = await request(server.getApplication()).get(`${baseUrl}/join/${created.body.meeting.publicSlug}`);
+            const guest: any = { uid: joined.body.selfUid, roles: [], scopes: [], elevated: -1 };
+            expect(await (await connectPush(guest)).granted([meetingUid])).toEqual([meetingUid]);
+
+            const kicked = await authed(ownerToken).post(`${baseUrl}/${meetingUid}/kick/${encodeURIComponent(guest.uid)}`);
+            expect(kicked.status).toBe(204);
+
+            expect(await (await connectPush(guest)).granted([meetingUid])).toEqual([]);
+        });
+
+        it("Leaves the owner's own grant untouched when a different, unrelated uid is kicked.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const meetingUid = created.body.meeting.uid;
+
+            await authed(ownerToken).post(`${baseUrl}/${meetingUid}/kick/${encodeURIComponent(stranger.uid)}`);
+
+            const { granted } = await connectPush(owner);
+            expect(await granted([meetingUid])).toEqual([meetingUid]);
+        });
+    });
+
+    describe("POST /:id/kick/:uid", () => {
+        it("Resolves hostUid on join() to the mailbox's own ownerUserUid.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const joined = await request(server.getApplication()).get(`${baseUrl}/join/${created.body.meeting.publicSlug}`);
+            expect(joined.body.meeting.hostUid).toBe(mailbox.ownerUserUid);
+        });
+
+        it("Is a no-op (still 204) for a uid holding no grant on the meeting at all.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const result = await authed(ownerToken).post(`${baseUrl}/${created.body.meeting.uid}/kick/${uuid.v4()}`);
+            expect(result.status).toBe(204);
+        });
+
+        it("Rejects a caller with no account at all.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const result = await request(server.getApplication()).post(`${baseUrl}/${created.body.meeting.uid}/kick/${uuid.v4()}`);
+            expect(result.status).toBeGreaterThanOrEqual(400);
+        });
+
+        it("Rejects a stranger with no grant on the mailbox (403).", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const result = await authed(strangerToken).post(`${baseUrl}/${created.body.meeting.uid}/kick/${uuid.v4()}`);
+            expect(result.status).toBe(403);
+        });
+
+        it("Rejects a trusted+elevated administrator with no explicit grant - the superuser shortcut never applies here either.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const result = await authed(adminToken).post(`${baseUrl}/${created.body.meeting.uid}/kick/${uuid.v4()}`);
+            expect(result.status).toBe(403);
+        });
+
+        it("Returns 404 for an unknown meeting id.", async () => {
+            const result = await authed(ownerToken).post(`${baseUrl}/${uuid.v4()}/kick/${uuid.v4()}`);
+            expect(result.status).toBe(404);
         });
     });
 });

@@ -62,6 +62,15 @@
  *
  * Sharing a screen is `setLocalTrack("video", screenTrack)`; stopping is `setLocalTrack("video", cameraTrack)`.
  *
+ * ## Host moderation (`mute-request`, `kicked`)
+ *
+ * `sendMuteRequest()`/`sendKick()` send a point-to-point signal to one peer; the manager itself does not decide who
+ * may send one - a "host" identity exists only in `_CallView.tsx`, which shows the controls that call these
+ * methods to nobody but the host (see `types.ts`'s `SignalMessage` doc comment for why this is cooperative, not
+ * enforced, at the signaling layer). Receiving one emits `mute-requested`/`kicked` for the caller to act on; this
+ * manager takes no action of its own beyond that - it doesn't mute a track or tear itself down, since a kicked
+ * participant's actual departure is `stop()`, which the caller decides to call.
+ *
  * ## Three media paths, tried in order
  *
  * Each pair of participants reaches for the best path that works, and `MeshParticipant.transport` says which one it
@@ -296,6 +305,20 @@ export class MeshConnectionManager {
         this.emit({ type: "presenter-changed", uid: undefined });
     }
 
+    /** Asks `peerUid`'s participant to mute - a cooperative signal (see this module's doc comment on host
+     * moderation), not enforcement. Nothing here checks that the local participant is actually the host; the caller
+     * is responsible for only offering this to one. */
+    sendMuteRequest(peerUid: string): void {
+        this.send({ kind: "mute-request", to: peerUid });
+    }
+
+    /** Tells `peerUid`'s participant they have been removed from the call. Sends only the cooperative signal - it
+     * does not itself revoke `peerUid`'s server-side channel grant (see `BaseVideoMeetingRoute.revokeChannelGrant()`,
+     * which the caller is expected to call alongside this for an enforced removal). */
+    sendKick(peerUid: string): void {
+        this.send({ kind: "kicked", to: peerUid });
+    }
+
     private sendHello(): void {
         this.send({ kind: "hello", name: this.options.selfName, state: this.localState });
     }
@@ -355,6 +378,12 @@ export class MeshConnectionManager {
                 return;
             case "relay-fallback":
                 this.handleRelayFallback(message.from);
+                return;
+            case "mute-request":
+                this.emit({ type: "mute-requested" });
+                return;
+            case "kicked":
+                this.emit({ type: "kicked" });
                 return;
         }
     }

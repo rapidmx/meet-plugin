@@ -56,6 +56,11 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
     const [name, setName] = useState("");
     const [loadError, setLoadError] = useState<string | null>(null);
     const [joinResult, setJoinResult] = useState<VideoMeetingJoinResult | null>(null);
+    /** Set only when the call ended without the participant's own action (currently: kicked by the host) - see
+     * `CallView`'s `onLeave` doc comment. Shown instead of the ordinary "you left" message; also hides "Rejoin
+     * meeting", since a kicked participant's server-side channel grant has just been revoked and a rejoin attempt
+     * would only fail. */
+    const [endedReason, setEndedReason] = useState<string | undefined>(undefined);
     const media = useLocalMedia({ effectsAssetsUrl: joinResult?.effectsAssetsUrl });
     const { release } = media;
 
@@ -89,8 +94,9 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
         setPhase("in-call");
     }
 
-    function handleLeave() {
+    function handleLeave(reason?: string) {
         release();
+        setEndedReason(reason);
         setPhase("ended");
     }
 
@@ -109,6 +115,7 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
                 meetingTitle={joinResult.meeting.title}
                 iceServers={joinResult.iceServers}
                 relayEnabled={joinResult.relayEnabled}
+                hostUid={joinResult.meeting.hostUid}
                 media={media}
                 onLeave={handleLeave}
             />
@@ -131,11 +138,13 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
     } else if (phase === "ended") {
         content = (
             <MeetCard>
-                <h1 className="text-xl font-bold tracking-tight mb-2">You left the meeting</h1>
-                <p className="text-base text-text-muted mb-4">You can close this page now, or rejoin.</p>
-                <Button type="button" className="!w-auto" onClick={() => setPhase("lobby")}>
-                    Rejoin meeting
-                </Button>
+                <h1 className="text-xl font-bold tracking-tight mb-2">{endedReason ? "Removed from the meeting" : "You left the meeting"}</h1>
+                <p className="text-base text-text-muted mb-4">{endedReason ?? "You can close this page now, or rejoin."}</p>
+                {!endedReason && (
+                    <Button type="button" className="!w-auto" onClick={() => setPhase("lobby")}>
+                        Rejoin meeting
+                    </Button>
+                )}
             </MeetCard>
         );
     } else {

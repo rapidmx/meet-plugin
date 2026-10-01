@@ -960,3 +960,53 @@ Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx v
 clean at 100%/98.63%/100%/100% (1356 tests). This closes Phase A - screen rotate/flip, diagnostics, and the
 participants drawer are all in; Phase B (host identity, mute/kick, force-mute-on-join, password, waiting room)
 is next, per the approved plan's sequencing.
+
+## 2026-09-30 (Phase B1 of the 7-item batch): host identity, mute-request/kicked signals, kick() enforcement
+
+First of Phase B (the host-authority half of the batch - see the Phase A2 entry above for the full seven-item
+context and the plan's own reasoning for why this client protocol had no "host" identity at all going in). Shared
+plumbing only - the mute/kick buttons that actually call this are Phase B2.
+
+**`hostUid`**: the simplest correct source of "who is the host" turned out to be `Mailbox.ownerUserUid` - the
+mailbox's own owning account, a plain field, not an ACL computation (an ACL can list several people with full
+rights; a mailbox has exactly one `ownerUserUid`). `BaseVideoMeetingRoute.join()` now resolves it alongside
+`hostDisplayName` (one `mailboxRepo.findOne()` for both, via the new combined `hostInfo()` - was two separate
+lookups' worth of plumbing for one record read) and returns it on `PublicVideoMeeting.hostUid`, omitted when the
+mailbox no longer exists. `_CallView.tsx` compares it against `selfUid` for `isHost`, and against the
+`<accountUid>~` prefix of a participant's own tab-scoped `uid` for `isParticipantHost` - purely client-side, same
+trust level `presenter-claim` already has (flagged in the plan as a known limit, not silently promised away). The
+participants drawer now tags the host's row "Host" - informational only in this phase, same as everyone else's row
+shape; the buttons that read `isHost` to decide who *sees* them arrive in B2.
+
+**`mute-request`/`kicked`**: two new point-to-point `SignalMessage` kinds, `MeshConnectionManager.sendMuteRequest()`/
+`sendKick()` to send them and `mute-requested`/`kicked` `MeshEvent`s on receipt - the exact same point-to-point
+`to: <peer id>` shape `offer`/`answer`/`relay-fallback` already use, so `handleMessage()`'s existing `to` filter
+covers them with no new logic there. `_CallView.tsx` reacts: a `mute-requested` mutes (never unmutes - if already
+muted, nothing happens) via a `mediaRef` added for this purpose (the mesh-event effect runs once at mount, so
+without it `media.toggleMic`/`micOn` would be frozen at mount-time's values); a `kicked` calls the now-widened
+`onLeave(reason?: string)` with a fixed message, which `[token].tsx` shows on a distinct "Removed from the
+meeting" screen instead of the ordinary "You left the meeting" one - and hides "Rejoin meeting" there, since a
+kicked participant's server-side grant was just revoked and a rejoin attempt (which reuses the already-fetched
+`joinResult` rather than calling `join()` again) would only fail anyway.
+
+**Found and fixed in passing**: `_CallControls.tsx`'s leave button was `onClick={onLeave}`, so a click's own
+`SyntheticEvent` was passed as `onLeave`'s first argument - harmless while `onLeave` took no parameters, but now
+that it takes an optional `reason: string`, the event object itself was about to render as `{endedReason}`'s text
+("Objects are not valid as a React child" - caught immediately by the existing `[token].test.tsx` leave tests).
+Fixed to `onClick={() => onLeave()}`; the test suite's own mock `CallView`'s "Leave (test)" button had the exact
+same bug, fixed the same way.
+
+**Enforcement**: `kicked` alone is cooperative, like every signal here - nothing stops a client from ignoring it.
+New `BaseVideoMeetingRoute.revokeChannelGrant()` is the real teeth: the mirror image of `ensureChannelGrant()`
+(same optimistic-lock retry, filters the uid's record out instead of adding one), wired to a new host-only
+`POST /:id/kick/:uid` (`requireOwnedMeeting(id, user, ACLAction.UPDATE)`, matching `update()`'s own authorization) -
+a kicked uid can no longer subscribe to or publish on the meeting's `/push` channel at all, regardless of whether
+their client cooperates. Verified end-to-end against the real ACL store (the existing `connectPush()` harness in
+both route test files' "push channel access" suite - a joined guest's channel grant works, then is gone after
+`kick()`), plus the usual owner/stranger/admin-403 authorization-boundary tests and `revokeChannelGrant()`'s own
+retry/give-up/non-conflict-rethrow races (mirroring `ensureChannelGrant()`'s existing race tests, mongo-only, same
+as that method's own tests - the retry logic is backend-agnostic).
+
+Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
+clean at 100%/98.6%/100%/100% (1389 tests). Next: B2 (the mute/kick buttons in the participants drawer, now that
+`isHost`/`sendMuteRequest`/`sendKick` all exist to wire up), then B3-B5 (force-mute-on-join, password, waiting room).

@@ -762,5 +762,65 @@ describe("Route:VideoMeetingSQL Tests", () => {
             expect(await (await connectPush(guestA)).granted([created.body.meeting.uid])).toEqual([created.body.meeting.uid]);
             expect(await (await connectPush(guestB)).granted([created.body.meeting.uid])).toEqual([created.body.meeting.uid]);
         });
+
+        it("Revokes a joined guest's grant on kick(), so a channel subscription they'd have been granted no longer is.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const meetingUid = created.body.meeting.uid;
+            const joined = await request(server.getApplication()).get(`${baseUrl}/join/${created.body.meeting.publicSlug}`);
+            const guest: any = { uid: joined.body.selfUid, roles: [], scopes: [], elevated: -1 };
+            expect(await (await connectPush(guest)).granted([meetingUid])).toEqual([meetingUid]);
+
+            const kicked = await authed(ownerToken).post(`${baseUrl}/${meetingUid}/kick/${encodeURIComponent(guest.uid)}`);
+            expect(kicked.status).toBe(204);
+
+            expect(await (await connectPush(guest)).granted([meetingUid])).toEqual([]);
+        });
+
+        it("Leaves the owner's own grant untouched when a different, unrelated uid is kicked.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const meetingUid = created.body.meeting.uid;
+
+            await authed(ownerToken).post(`${baseUrl}/${meetingUid}/kick/${encodeURIComponent(stranger.uid)}`);
+
+            const { granted } = await connectPush(owner);
+            expect(await granted([meetingUid])).toEqual([meetingUid]);
+        });
+    });
+
+    describe("POST /:id/kick/:uid", () => {
+        it("Resolves hostUid on join() to the mailbox's own ownerUserUid.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const joined = await request(server.getApplication()).get(`${baseUrl}/join/${created.body.meeting.publicSlug}`);
+            expect(joined.body.meeting.hostUid).toBe(mailbox.ownerUserUid);
+        });
+
+        it("Is a no-op (still 204) for a uid holding no grant on the meeting at all.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const result = await authed(ownerToken).post(`${baseUrl}/${created.body.meeting.uid}/kick/${uuid.v4()}`);
+            expect(result.status).toBe(204);
+        });
+
+        it("Rejects a caller with no account at all.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const result = await request(server.getApplication()).post(`${baseUrl}/${created.body.meeting.uid}/kick/${uuid.v4()}`);
+            expect(result.status).toBeGreaterThanOrEqual(400);
+        });
+
+        it("Rejects a stranger with no grant on the mailbox (403).", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const result = await authed(strangerToken).post(`${baseUrl}/${created.body.meeting.uid}/kick/${uuid.v4()}`);
+            expect(result.status).toBe(403);
+        });
+
+        it("Rejects a trusted+elevated administrator with no explicit grant - the superuser shortcut never applies here either.", async () => {
+            const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+            const result = await authed(adminToken).post(`${baseUrl}/${created.body.meeting.uid}/kick/${uuid.v4()}`);
+            expect(result.status).toBe(403);
+        });
+
+        it("Returns 404 for an unknown meeting id.", async () => {
+            const result = await authed(ownerToken).post(`${baseUrl}/${uuid.v4()}/kick/${uuid.v4()}`);
+            expect(result.status).toBe(404);
+        });
     });
 });

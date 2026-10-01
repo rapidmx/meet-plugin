@@ -29,6 +29,10 @@ export interface PublicVideoMeeting {
     visibility: VideoMeetingVisibility;
     status: VideoMeetingStatus;
     hostDisplayName?: string;
+    /** The account uid that owns the meeting - the sole source of a "host" identity on the client. Absent when the
+     * server can't resolve one (an orphaned mailbox, or a server that predates this field), in which case no host
+     * controls are shown to anyone. */
+    hostUid?: string;
 }
 
 /**

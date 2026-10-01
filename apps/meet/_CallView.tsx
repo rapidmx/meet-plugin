@@ -63,9 +63,17 @@ export interface CallViewProps {
     /** Whether the server offers the WebSocket media relay, the last-resort path for a participant neither a direct
      * connection nor the TURN server can reach - `VideoMeetingJoinResult.relayEnabled`. Off when absent. */
     relayEnabled?: boolean;
+    /** The meeting's host account uid (`PublicVideoMeeting.hostUid`) - this client's only source of a "host"
+     * identity, purely for deciding which controls to show (see `BaseVideoMeetingRoute`'s class doc comment on why
+     * this is a client-side-only check, not a server-enforced one for every moderation action). Absent when the
+     * server couldn't resolve one, in which case nobody sees host controls. */
+    hostUid?: string;
     /** The camera and microphone, owned by the page (`[token].tsx`) - the lobby's tracks carried into the call. */
     media: LocalMedia;
-    onLeave: () => void;
+    /** Called once the participant leaves, for any reason. `reason` is set only when the call ended without the
+     * participant's own action - currently, being kicked by the host - so the caller can show a distinct message
+     * instead of the ordinary "you left" one; omitted for an ordinary voluntary leave. */
+    onLeave: (reason?: string) => void;
 }
 
 /** How long a reaction floats on screen. */
@@ -106,7 +114,7 @@ export function newPeerId(selfUid: string): string {
     return `${selfUid}~${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)}`;
 }
 
-export default function CallView({ channel, token, selfUid, selfName, meetingTitle, iceServers, relayEnabled, media, onLeave }: CallViewProps) {
+export default function CallView({ channel, token, selfUid, selfName, meetingTitle, iceServers, relayEnabled, hostUid, media, onLeave }: CallViewProps) {
     const [peerId] = useState(() => newPeerId(selfUid));
     const [connectError, setConnectError] = useState<string | null>(null);
     const [participants, setParticipants] = useState<MeshParticipant[]>([]);
@@ -135,6 +143,12 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
     const levelMetersRef = useRef<Record<string, LevelMeterHandle>>({});
     const reactionSeqRef = useRef(0);
     const reactionTimersRef = useRef(new Set<ReturnType<typeof setTimeout>>());
+    /** The latest `media`, for the mesh-event handler below - that effect runs once at mount (see its own comment),
+     * so it would otherwise see only the mic state/toggle function from that first render. */
+    const mediaRef = useRef(media);
+    useEffect(() => {
+        mediaRef.current = media;
+    }, [media]);
     const isPresenting = !!screenStream;
 
     const showReaction = useCallback((emoji: string, name: string) => {
@@ -205,6 +219,14 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
                         // own capture without re-sending a release the manager already handled internally.
                         stopLocalPresentation(false);
                     }
+                    return;
+                case "mute-requested":
+                    if (mediaRef.current.micOn) {
+                        void mediaRef.current.toggleMic();
+                    }
+                    return;
+                case "kicked":
+                    onLeave("The host removed you from this call.");
                     return;
             }
         });
@@ -353,6 +375,12 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
         setAudioNonce((prev) => prev + 1);
     }
 
+    // A participant's `uid` is their tab-scoped peer id (`<account uid>~<random>` - see `newPeerId()`), while
+    // `hostUid` is the plain account uid `PublicVideoMeeting.hostUid` names - so telling the host's own tab(s) apart
+    // needs the prefix match, not equality. Purely a client-side check (see `hostUid`'s own doc comment on this
+    // prop): nobody's tab is prevented from claiming it, only from being shown host controls for it.
+    const isHost = !!hostUid && selfUid === hostUid;
+    const isParticipantHost = (uid: string): boolean => !!hostUid && uid.startsWith(`${hostUid}~`);
     const otherUids = participants.map((p) => p.uid);
     // A pin or an active-speaker pick can name someone who has just left, until the state catches up.
     const stillHere = (uid: string | undefined) => (uid && otherUids.includes(uid) ? uid : undefined);
@@ -541,6 +569,8 @@ export default function CallView({ channel, token, selfUid, selfName, meetingTit
                     micOn={media.micOn}
                     handRaised={handRaised}
                     participants={participants}
+                    isSelfHost={isHost}
+                    isParticipantHost={isParticipantHost}
                     onClose={() => setDrawerOpen(false)}
                 />
             )}

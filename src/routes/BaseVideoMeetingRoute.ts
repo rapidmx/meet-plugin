@@ -150,6 +150,11 @@ export interface PublicVideoMeeting {
     status: VideoMeetingStatus;
     /** The host mailbox's `displayName`, when it has one. */
     hostDisplayName?: string;
+    /** The account uid that owns the meeting's mailbox - the client's sole source of a "host" identity, since this
+     * protocol otherwise has none (see `BaseVideoMeetingRoute`'s class doc comment). `undefined` when the mailbox no
+     * longer exists or (in a deployment shape where that's possible) has no single owning account; a client then
+     * simply shows no host controls, rather than guessing. */
+    hostUid?: string;
 }
 
 /**
@@ -885,6 +890,21 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         await this.meetingRepo!.delete(meeting.uid, { user: strippedUser, ignoreACL: true });
     }
 
+    @Summary("Removes a participant from a video meeting.")
+    @Description(
+        "Revokes 'uid's grant on the meeting's own push channel (revokeChannelGrant()), so they can no longer " +
+            "subscribe to or publish on it - and therefore can no longer signal or relay media, even if their " +
+            "client ignores the cooperative 'kicked' signal the host's own UI also sends over the mesh (see " +
+            "SignalMessage's doc comment for why that signal alone isn't enforcement). A no-op if 'uid' holds no " +
+            "grant (already removed, or never joined). Requires UPDATE on the meeting's owning mailbox.",
+    )
+    @Post("/:id/kick/:uid")
+    public async kick(@Param("id") id: string, @Param("uid") uid: string, @AuthUser user?: JWTUser): Promise<void> {
+        await this.init();
+        const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.UPDATE);
+        await this.revokeChannelGrant(meeting.uid, uid);
+    }
+
     /**
      * Resolves `token` to the meeting it names, and to *how* it named it: an invitee's `joinToken` (43 base64url
      * characters - `JOIN_TOKEN_PATTERN`), or one of the two 11-character slugs (`PUBLIC_SLUG_PATTERN`) - a public
@@ -992,6 +1012,33 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     }
 
     /**
+     * Removes `uid`'s `ACLRecord` from `meetingUid`'s own `AccessControlList`, if it has one - the mirror image of
+     * `ensureChannelGrant()`, used to enforce a kick (see `kick()`): once removed, `uid` can no longer subscribe to
+     * or publish on the meeting's `/push` channel, so even a client that ignores the cooperative `"kicked"` signal
+     * (`SignalMessage`'s doc comment) cannot keep participating. A no-op when `uid` holds no grant (already kicked,
+     * or never joined) or the meeting has no ACL, rather than an error - the caller wants "not able to rejoin",
+     * which is already true either way. Same optimistic-lock retry as `ensureChannelGrant()`, for the same reason:
+     * a concurrent joiner or the owner editing the ACL directly may save first.
+     */
+    private async revokeChannelGrant(meetingUid: string, uid: string): Promise<void> {
+        for (let attempt = 0; attempt < GUEST_GRANT_MAX_ATTEMPTS; attempt++) {
+            const acl: AccessControlList | undefined = await this.aclUtils!.findACL(meetingUid, [], { skipCache: true, skipParents: true });
+            if (!acl || !acl.records.some((record) => record.userOrRoleId === uid)) {
+                return;
+            }
+            acl.records = acl.records.filter((record) => record.userOrRoleId !== uid);
+            try {
+                await this.aclUtils!.saveACL(acl);
+                return;
+            } catch (err: any) {
+                if (attempt === GUEST_GRANT_MAX_ATTEMPTS - 1 || !/must be of the same version/.test(err?.message ?? "")) {
+                    throw err;
+                }
+            }
+        }
+    }
+
+    /**
      * Mints a short-lived, scope-limited guest identity - see this class's doc comment on the channel-ACL-grant
      * mechanism. Only called for the true-anonymous case (`join()`'s `user` is absent, or presents a prior guest
      * uid rather than a real one). The deployment's real `auth` config normally carries its own `options.expiresIn`
@@ -1015,11 +1062,12 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         return { guestUid, token, expiresAt };
     }
 
-    /** The host mailbox's `displayName`, or `undefined` when the mailbox has none (or no longer exists - an
-     * orphaned meeting should still be joinable, just without a host name to show). */
-    private async hostDisplayName(mailboxUid: string): Promise<string | undefined> {
+    /** The host mailbox's `displayName` and owning account uid, or both `undefined` when the mailbox has none (or no
+     * longer exists - an orphaned meeting should still be joinable, just without a host to show or grant controls
+     * to). One lookup for both fields, since `join()` needs them together. */
+    private async hostInfo(mailboxUid: string): Promise<{ hostDisplayName?: string; hostUid?: string }> {
         const mailbox: M | undefined = await this.mailboxRepo!.findOne(mailboxUid, { ignoreACL: true });
-        return mailbox?.displayName || undefined;
+        return { hostDisplayName: mailbox?.displayName || undefined, hostUid: mailbox?.ownerUserUid || undefined };
     }
 
     @Summary("Joins a video meeting.")
@@ -1060,12 +1108,14 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
 
         const relayEnabled: boolean = this.isRelayEnabled();
         const effectsAssetsUrl: string | undefined = parseEffectsAssetsUrl(this.effectsAssetsUrlSetting);
+        const { hostDisplayName, hostUid } = await this.hostInfo(meeting.mailboxUid);
         const publicMeeting: PublicVideoMeeting = {
             uid: meeting.uid,
             title: meeting.title,
             visibility: meeting.visibility,
             status: meeting.status,
-            hostDisplayName: await this.hostDisplayName(meeting.mailboxUid),
+            hostDisplayName,
+            hostUid,
         };
         const iceServers: IceServerConfig[] = buildIceServers({
             url: this.turnUrl,

@@ -11,6 +11,10 @@
  *
  * Closes on Escape, on a click on the backdrop behind it, or its own close button - never on a click inside the
  * drawer itself, matching `_CallControls.tsx`'s menus.
+ *
+ * A "Host" tag marks the host's own row (`isSelfHost`/`isParticipantHost` - see `_CallView.tsx`'s doc comment on
+ * `hostUid` for what that identity is and isn't) - informational only in this phase; the mute/kick buttons that
+ * actually use `isSelfHost` to decide who sees them arrive in a later phase.
  */
 import React, { useEffect } from "react";
 import type { MeshParticipant } from "../shared/webrtc/types.js";
@@ -22,10 +26,26 @@ export interface ParticipantsDrawerProps {
     micOn: boolean;
     handRaised: boolean;
     participants: MeshParticipant[];
+    isSelfHost: boolean;
+    isParticipantHost: (uid: string) => boolean;
     onClose: () => void;
 }
 
-function Row({ name, isSelf, micMuted, handRaised, transport }: { name: string; isSelf?: boolean; micMuted: boolean; handRaised: boolean; transport?: MeshParticipant["transport"] }) {
+function Row({
+    name,
+    isSelf,
+    isHost,
+    micMuted,
+    handRaised,
+    transport,
+}: {
+    name: string;
+    isSelf?: boolean;
+    isHost: boolean;
+    micMuted: boolean;
+    handRaised: boolean;
+    transport?: MeshParticipant["transport"];
+}) {
     const badge = transport ? TRANSPORT_BADGES[transport] : undefined;
     return (
         <li className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-white/5">
@@ -33,6 +53,7 @@ function Row({ name, isSelf, micMuted, handRaised, transport }: { name: string; 
                 {name}
                 {isSelf ? " (you)" : ""}
             </span>
+            {isHost && <span className="px-2 py-0.5 rounded text-xs whitespace-nowrap bg-[#a8c7fa] text-[#062e6f]">Host</span>}
             {handRaised && (
                 <span role="img" aria-label="Hand raised">
                     ✋
@@ -55,7 +76,7 @@ function Row({ name, isSelf, micMuted, handRaised, transport }: { name: string; 
     );
 }
 
-export default function ParticipantsDrawer({ selfName, micOn, handRaised, participants, onClose }: ParticipantsDrawerProps) {
+export default function ParticipantsDrawer({ selfName, micOn, handRaised, participants, isSelfHost, isParticipantHost, onClose }: ParticipantsDrawerProps) {
     useEffect(() => {
         const onKeyDown = (event: KeyboardEvent) => {
             if (event.key === "Escape") {
@@ -87,9 +108,16 @@ export default function ParticipantsDrawer({ selfName, micOn, handRaised, partic
                     </button>
                 </div>
                 <ul className="flex-1 min-h-0 overflow-y-auto p-2 text-sm">
-                    <Row name={selfName} isSelf micMuted={!micOn} handRaised={handRaised} />
+                    <Row name={selfName} isSelf isHost={isSelfHost} micMuted={!micOn} handRaised={handRaised} />
                     {participants.map((p) => (
-                        <Row key={p.uid} name={p.name} micMuted={!p.audioOn} handRaised={p.handRaised} transport={p.transport} />
+                        <Row
+                            key={p.uid}
+                            name={p.name}
+                            isHost={isParticipantHost(p.uid)}
+                            micMuted={!p.audioOn}
+                            handRaised={p.handRaised}
+                            transport={p.transport}
+                        />
                     ))}
                 </ul>
             </aside>

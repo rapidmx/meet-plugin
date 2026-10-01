@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import React from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fakeMediaDevices, fakeMediaStream, fakeTrack, installFakeMediaStream, installMediaDevices, jsonResponse, mockFetch, removeMediaDevices } from "../testUtils.js";
 import type { CallViewProps } from "../../../apps/meet/_CallView.js";
@@ -33,7 +33,7 @@ vi.mock("../../../apps/meet/_CallView.js", () => ({
                 <p>Meeting: {props.meetingTitle}</p>
                 <p>Signaling token: {props.token ?? "(none - authenticated)"}</p>
                 <p>Self uid: {props.selfUid}</p>
-                <button type="button" onClick={props.onLeave}>
+                <button type="button" onClick={() => props.onLeave()}>
                     Leave (test)
                 </button>
             </div>
@@ -113,6 +113,25 @@ describe("MeetJoinPage", () => {
         expect(await screen.findByText("You left the meeting")).toBeInTheDocument();
         expect(audio.stop).toHaveBeenCalled();
         expect(video.stop).toHaveBeenCalled();
+    });
+
+    it("shows a distinct message and hides rejoin when onLeave reports the participant was kicked", async () => {
+        installMediaDevices(fakeMediaDevices({ userMediaStream: () => fakeMediaStream([fakeTrack("audio"), fakeTrack("video")]) }));
+        mockJoin(joinResponse);
+
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        expect(await screen.findByText("Standup")).toBeInTheDocument();
+        fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "Guest" } });
+        await waitFor(() => expect(screen.getByText("Join meeting")).toBeEnabled());
+        fireEvent.click(screen.getByText("Join meeting"));
+        await screen.findByText("In call as Guest");
+
+        const props = calls[calls.length - 1] as CallViewProps;
+        act(() => props.onLeave("The host removed you from this call."));
+
+        expect(await screen.findByText("Removed from the meeting")).toBeInTheDocument();
+        expect(screen.getByText("The host removed you from this call.")).toBeInTheDocument();
+        expect(screen.queryByText("Rejoin meeting")).toBeNull();
     });
 
     it("lets a participant who left rejoin, asking for the camera and microphone again", async () => {

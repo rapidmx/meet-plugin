@@ -320,7 +320,7 @@ export default function CallControls({
                 )}
             </div>
 
-            <button type="button" className={`${BUTTON} w-16 bg-[#d93025] text-white hover:bg-[#b3261e]`} aria-label="Leave call" onClick={onLeave}>
+            <button type="button" className={`${BUTTON} w-16 bg-[#d93025] text-white hover:bg-[#b3261e]`} aria-label="Leave call" onClick={() => onLeave()}>
                 <LeaveIcon />
             </button>
         </div>

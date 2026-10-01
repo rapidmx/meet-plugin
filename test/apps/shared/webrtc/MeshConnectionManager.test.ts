@@ -1276,3 +1276,39 @@ describe("MeshConnectionManager - diagnostics polling", () => {
         expect(manager.participants[0]?.diagnostics).toBeUndefined();
     });
 });
+
+describe("MeshConnectionManager - host moderation (mute-request, kicked)", () => {
+    it("sends a mute request to one peer, point-to-point", () => {
+        const { manager, channel } = setup({ peerId: "a~tab" });
+        manager.start();
+        manager.sendMuteRequest("z~tab");
+        expect(channel.sent).toContainEqual({ type: "video-meeting-signal", kind: "mute-request", from: "a", peer: "a~tab", to: "z~tab" });
+    });
+
+    it("sends a kick to one peer, point-to-point", () => {
+        const { manager, channel } = setup({ peerId: "a~tab" });
+        manager.start();
+        manager.sendKick("z~tab");
+        expect(channel.sent).toContainEqual({ type: "video-meeting-signal", kind: "kicked", from: "a", peer: "a~tab", to: "z~tab" });
+    });
+
+    it("emits mute-requested on receiving one addressed to this peer, and ignores one addressed elsewhere", () => {
+        const { manager, channel, events } = setup({ peerId: "a~tab" });
+        manager.start();
+        channel.emit(signal("mute-request", "z", { to: "someone-else" }));
+        expect(events).not.toContainEqual({ type: "mute-requested" });
+
+        channel.emit(signal("mute-request", "z", { to: "a~tab" }));
+        expect(events).toContainEqual({ type: "mute-requested" });
+    });
+
+    it("emits kicked on receiving one addressed to this peer, and ignores one addressed elsewhere", () => {
+        const { manager, channel, events } = setup({ peerId: "a~tab" });
+        manager.start();
+        channel.emit(signal("kicked", "z", { to: "someone-else" }));
+        expect(events).not.toContainEqual({ type: "kicked" });
+
+        channel.emit(signal("kicked", "z", { to: "a~tab" }));
+        expect(events).toContainEqual({ type: "kicked" });
+    });
+});
