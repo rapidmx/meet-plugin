@@ -121,6 +121,65 @@ describe("ParticipantTile transport badge", () => {
     });
 });
 
+describe("ParticipantTile local video options (hide self)", () => {
+    it("omits the '…' button when onHideSelf is not given, even alongside a muted badge", () => {
+        render(<ParticipantTile name="Me" isLocal micMuted />);
+        expect(screen.queryByRole("button", { name: "Local video options" })).toBeNull();
+    });
+
+    it("opens the menu, shows 'Hide self', and calls onHideSelf while closing the menu", () => {
+        const onHideSelf = vi.fn();
+        render(<ParticipantTile name="Me" isLocal micMuted onHideSelf={onHideSelf} />);
+        // The muted badge and the options button coexist.
+        expect(screen.getByRole("img", { name: "Muted" })).toBeInTheDocument();
+
+        const button = screen.getByRole("button", { name: "Local video options" });
+        expect(button.getAttribute("aria-expanded")).toBe("false");
+        fireEvent.click(button);
+        expect(button.getAttribute("aria-expanded")).toBe("true");
+
+        const item = screen.getByRole("menuitem", { name: "Hide self" });
+        fireEvent.click(item);
+        expect(onHideSelf).toHaveBeenCalledTimes(1);
+        expect(screen.queryByRole("menu")).toBeNull();
+    });
+
+    it("closes the menu on a press outside it, without calling onHideSelf", () => {
+        const onHideSelf = vi.fn();
+        render(
+            <div>
+                <div data-testid="outside" />
+                <ParticipantTile name="Me" isLocal onHideSelf={onHideSelf} />
+            </div>,
+        );
+        fireEvent.click(screen.getByRole("button", { name: "Local video options" }));
+        expect(screen.getByRole("menu")).toBeInTheDocument();
+
+        fireEvent.pointerDown(screen.getByTestId("outside"));
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(onHideSelf).not.toHaveBeenCalled();
+    });
+
+    it("closes the menu on Escape", () => {
+        render(<ParticipantTile name="Me" isLocal onHideSelf={vi.fn()} />);
+        fireEvent.click(screen.getByRole("button", { name: "Local video options" }));
+        expect(screen.getByRole("menu")).toBeInTheDocument();
+
+        fireEvent.keyDown(document, { key: "Escape" });
+        expect(screen.queryByRole("menu")).toBeNull();
+    });
+
+    it("a press inside the menu's own button does not close it via the outside-press handler", () => {
+        render(<ParticipantTile name="Me" isLocal onHideSelf={vi.fn()} />);
+        const button = screen.getByRole("button", { name: "Local video options" });
+        fireEvent.click(button);
+        expect(screen.getByRole("menu")).toBeInTheDocument();
+
+        fireEvent.pointerDown(button);
+        expect(screen.getByRole("menu")).toBeInTheDocument();
+    });
+});
+
 describe("ParticipantTile status", () => {
     it("shows the status with a spinner under the initial while there is no video", () => {
         render(<ParticipantTile name="Bob" status="Awaiting connection…" />);

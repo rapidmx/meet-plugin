@@ -31,6 +31,8 @@ function renderControls(overrides: Partial<CallControlsProps> = {}) {
         onSetTransportMode: vi.fn(),
         onOpenDiagnostics: vi.fn(),
         onOpenSettings: vi.fn(),
+        selfHidden: false,
+        onToggleSelfHidden: vi.fn(),
         onLeave: vi.fn(),
         ...overrides,
     };
@@ -405,6 +407,18 @@ describe("CallControls - the \"…\" menu", () => {
         fireEvent.click(screen.getByRole("menuitem", { name: "Diagnostics" }));
         expect(props.onOpenDiagnostics).toHaveBeenCalledTimes(1);
         expect(screen.queryByRole("menu")).toBeNull();
+    });
+
+    it("toggles hiding the local tile, labeled by its current state, and closes the menu on pick", () => {
+        const { props, rerender } = renderControls({ selfHidden: false });
+        fireEvent.click(screen.getByRole("button", { name: "More options" }));
+        fireEvent.click(screen.getByRole("menuitem", { name: "Hide self" }));
+        expect(props.onToggleSelfHidden).toHaveBeenCalledTimes(1);
+        expect(screen.queryByRole("menu")).toBeNull();
+
+        rerender(<CallControls {...{ ...props, selfHidden: true }} />);
+        fireEvent.click(screen.getByRole("button", { name: "More options" }));
+        expect(screen.getByRole("menuitem", { name: "Show self" })).toBeInTheDocument();
     });
 
     it("lists the four connection-method options, reflecting the current one, and closes the menu on pick", () => {

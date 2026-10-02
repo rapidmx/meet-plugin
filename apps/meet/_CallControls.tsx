@@ -21,8 +21,11 @@
  * their own: "Diagnostics" (`onOpenDiagnostics`) and "Settings" (`onOpenSettings`, host-only) each open their own
  * persistent window/modal in `_CallView.tsx` and close this menu; "Connection method" is a four-way
  * `menuitemradio` group (`TransportMode` - see `MeshConnectionManager.setTransportMode()`'s own doc comment)
- * forcing how *this tab's* media reaches everyone else, independent of what anyone else has chosen. Otherwise an
- * ordinary menu of this bar's own shape (`openMenu`, closes on Escape/outside click like every other one here).
+ * forcing how *this tab's* media reaches everyone else, independent of what anyone else has chosen; "Hide self"/
+ * "Show self" (`selfHidden`/`onToggleSelfHidden`) is the only way to bring the local tile back once hidden from
+ * grid view, where there's no tile left to offer its own "show" control - see `_CallView.tsx`'s doc comment on
+ * where the local tile appears. Otherwise an ordinary menu of this bar's own shape (`openMenu`, closes on
+ * Escape/outside click like every other one here).
  */
 import React, { useEffect, useRef, useState } from "react";
 import { filtersActive } from "../shared/media/filters/filterTypes.js";
@@ -86,6 +89,10 @@ export interface CallControlsProps {
     onSetTransportMode: (mode: TransportMode) => void;
     onOpenDiagnostics: () => void;
     onOpenSettings: () => void;
+    /** Whether the local tile is currently hidden - the "…" menu's "Hide self"/"Show self" item reflects and
+     * toggles this; see `_CallView.tsx`'s doc comment on where the local tile appears. */
+    selfHidden: boolean;
+    onToggleSelfHidden: () => void;
     onLeave: () => void;
 }
 
@@ -131,6 +138,8 @@ export default function CallControls({
     onSetTransportMode,
     onOpenDiagnostics,
     onOpenSettings,
+    selfHidden,
+    onToggleSelfHidden,
     onLeave,
 }: CallControlsProps) {
     const [openMenu, setOpenMenu] = useState<OpenMenu>(null);
@@ -363,6 +372,17 @@ export default function CallControls({
                             }}
                         >
                             Diagnostics
+                        </button>
+                        <button
+                            type="button"
+                            role="menuitem"
+                            className="w-full px-3 py-2 text-left hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                            onClick={() => {
+                                onToggleSelfHidden();
+                                setOpenMenu(null);
+                            }}
+                        >
+                            {selfHidden ? "Show self" : "Hide self"}
                         </button>
                         <div className="my-1 border-t border-white/10" />
                         <p className="px-3 pt-1 pb-0.5 text-xs font-semibold uppercase tracking-wide text-white/60">Connection method</p>

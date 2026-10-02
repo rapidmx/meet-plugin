@@ -325,23 +325,35 @@ describe("CallView - layout", () => {
         expect(within(footer).getByRole("toolbar", { name: "Call controls" })).toBeInTheDocument();
     });
 
-    it("shows the local participant large while alone, and in a corner tile once anyone else joins", async () => {
+    it("shows the local participant large while alone, and as an ordinary grid tile (not a corner overlay) once anyone else joins", async () => {
         const { client } = await connected();
         expect(screen.queryByTestId("self-view")).toBeNull();
         expect(within(screen.getByRole("main")).getByText(/Alice \(you\)/)).toBeInTheDocument();
 
         client.emit(hello("zzz", "Zed"));
         await screen.findByText("Zed");
-        expect(within(screen.getByTestId("self-view")).getByText(/Alice \(you\)/)).toBeInTheDocument();
-        // Only the other participant is in the main tile area.
-        expect(within(screen.getByRole("main")).queryByText(/\(you\)/)).toBeNull();
+        // In plain grid view, the local tile is a grid member alongside everyone else - no separate corner tile.
+        expect(screen.queryByTestId("self-view")).toBeNull();
+        expect(within(screen.getByRole("main")).getByText(/Alice \(you\)/)).toBeInTheDocument();
         expect(within(screen.getByRole("main")).getByText("Zed")).toBeInTheDocument();
         expect(screen.getByLabelText("2 participants")).toBeInTheDocument();
 
         client.emit({ type: "video-meeting-signal", kind: "bye", from: "zzz" });
         await waitFor(() => expect(screen.queryByText("Zed")).toBeNull());
         expect(screen.queryByTestId("self-view")).toBeNull();
+        expect(within(screen.getByRole("main")).getByText(/Alice \(you\)/)).toBeInTheDocument();
         expect(screen.getByLabelText("1 participants")).toBeInTheDocument();
+    });
+
+    it("shows the local participant in a corner tile in focus view instead of the grid", async () => {
+        const { client } = await withParticipant();
+        client.emit(hello("yyy", "Yan"));
+        await screen.findAllByText("Yan");
+        fireEvent.click(screen.getByRole("button", { name: "Switch to focused view" }));
+        expect(within(screen.getByTestId("self-view")).getByText(/Alice \(you\)/)).toBeInTheDocument();
+        // Only other participants are in the main tile area/thumbnail strip.
+        expect(within(screen.getByTestId("main-tile")).queryByText(/\(you\)/)).toBeNull();
+        expect(within(screen.getByTestId("thumbnails")).queryByText(/\(you\)/)).toBeNull();
     });
 
     it("shows a shared screen large while alone", async () => {

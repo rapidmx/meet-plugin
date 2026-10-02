@@ -14,10 +14,13 @@
  * natural - this is a local display transform only, never applied to the video actually sent to anyone, so
  * everyone else always sees the participant the right way round. `mirrored={false}` (`_CallView.tsx`, when a custom
  * background image is on) turns that off: the picture the participant chose is a fixed reference, not a live
- * reflection, and mirroring it would show it backwards to no one but themselves. */
-import React, { useEffect, useRef } from "react";
+ * reflection, and mirroring it would show it backwards to no one but themselves.
+ *
+ * `onHideSelf` adds a small "…" menu to the tile's corner, local-tile-only - see `_CallView.tsx`'s doc comment on
+ * hiding the local tile from grid view. */
+import React, { useEffect, useRef, useState } from "react";
 import type { MediaTransport } from "../shared/webrtc/types.js";
-import { MicOffIcon } from "./_icons.js";
+import { MicOffIcon, OverflowIcon } from "./_icons.js";
 
 /** What a tile says about how its participant's media is arriving, for the paths that are not the ordinary direct one
  * (which needs no comment). Text rather than only an icon, so the reason a picture is degraded is never a guess.
@@ -74,6 +77,10 @@ export interface ParticipantTileProps {
     /** Whether the local tile is shown mirrored, like a real mirror - ignored for a remote tile, which is never
      * mirrored. Default `true`; see this module's doc comment. */
     mirrored?: boolean;
+    /** Offers a small "…" menu in the tile's top-right corner with one item, "Hide self" - see `_CallView.tsx`'s
+     * doc comment on hiding the local tile. Omitted everywhere that shouldn't offer it: every remote tile, and the
+     * local tile while alone in the call, where hiding it would just blank the only thing on screen. */
+    onHideSelf?: () => void;
     onClick?: () => void;
     className?: string;
 }
@@ -94,12 +101,15 @@ export default function ParticipantTile({
     isFocused,
     contain,
     mirrored = true,
+    onHideSelf,
     onClick,
     className,
 }: ParticipantTileProps) {
     const badge = transport ? TRANSPORT_BADGES[transport] : undefined;
     const videoRef = useRef<HTMLVideoElement>(null);
     const showVideo = !!stream && !cameraOff;
+    const [hideMenuOpen, setHideMenuOpen] = useState(false);
+    const hideMenuRef = useRef<HTMLDivElement>(null);
 
     // The `<video>` element only exists while `showVideo`, so its stream is bound whenever it (re)appears too.
     useEffect(() => {
@@ -107,6 +117,30 @@ export default function ParticipantTile({
             videoRef.current.srcObject = stream ?? null;
         }
     }, [stream, showVideo]);
+
+    // The tile's own "…" menu closes on Escape or a press anywhere outside it, same shape as every other menu in
+    // this app.
+    useEffect(() => {
+        if (!hideMenuOpen) {
+            return;
+        }
+        const onPointerDown = (event: PointerEvent) => {
+            if (!hideMenuRef.current?.contains(event.target as Node)) {
+                setHideMenuOpen(false);
+            }
+        };
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key === "Escape") {
+                setHideMenuOpen(false);
+            }
+        };
+        document.addEventListener("pointerdown", onPointerDown);
+        document.addEventListener("keydown", onKeyDown);
+        return () => {
+            document.removeEventListener("pointerdown", onPointerDown);
+            document.removeEventListener("keydown", onKeyDown);
+        };
+    }, [hideMenuOpen]);
 
     return (
         <div
@@ -142,12 +176,51 @@ export default function ParticipantTile({
                     ✋
                 </span>
             )}
-            {micMuted && (
-                <span className="absolute top-2 right-2 flex items-center justify-center w-7 h-7 rounded-full bg-black/60 text-white" role="img" aria-label="Muted">
-                    <span className="w-4 h-4 [&>svg]:w-4 [&>svg]:h-4">
-                        <MicOffIcon />
-                    </span>
-                </span>
+            {(micMuted || onHideSelf) && (
+                <div className="absolute top-2 right-2 flex items-center gap-1">
+                    {micMuted && (
+                        <span className="flex items-center justify-center w-7 h-7 rounded-full bg-black/60 text-white" role="img" aria-label="Muted">
+                            <span className="w-4 h-4 [&>svg]:w-4 [&>svg]:h-4">
+                                <MicOffIcon />
+                            </span>
+                        </span>
+                    )}
+                    {onHideSelf && (
+                        <div className="relative" ref={hideMenuRef}>
+                            <button
+                                type="button"
+                                className="flex items-center justify-center w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                                aria-label="Local video options"
+                                aria-haspopup="menu"
+                                aria-expanded={hideMenuOpen}
+                                onClick={() => setHideMenuOpen((prev) => !prev)}
+                            >
+                                <span className="w-4 h-4 [&>svg]:w-4 [&>svg]:h-4">
+                                    <OverflowIcon />
+                                </span>
+                            </button>
+                            {hideMenuOpen && (
+                                <div
+                                    role="menu"
+                                    aria-label="Local video options"
+                                    className="absolute top-full right-0 mt-1 w-32 rounded-xl bg-[#2b2d30] text-white shadow-xl py-1 text-sm"
+                                >
+                                    <button
+                                        type="button"
+                                        role="menuitem"
+                                        className="w-full px-3 py-1.5 text-left hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                                        onClick={() => {
+                                            setHideMenuOpen(false);
+                                            onHideSelf();
+                                        }}
+                                    >
+                                        Hide self
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
             )}
             {badge && (
                 <span

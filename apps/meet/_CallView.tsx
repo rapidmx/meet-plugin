@@ -15,10 +15,24 @@
  *
  * The call fills the viewport (`fixed inset-0`) as three rows - a slim header, the tiles (which take whatever room
  * is left and never scroll the page), and the control bar pinned to the bottom - instead of being laid out inside
- * the branded page shell, whose header, footer and padding pushed it off the screen. The local participant's own
- * tile is a small tile in the bottom-right corner while anyone else is in the call (above the control bar on a narrower
- * window, and at the top on a phone, where the bar wraps onto a second row), and fills the tile area while they are
- * alone.
+ * the branded page shell, whose header, footer and padding pushed it off the screen.
+ *
+ * ## Where the local tile appears
+ *
+ * In plain grid view (not focus, not presenting), the local tile is an ordinary member of the grid, same size as
+ * everyone else's, rather than a floating corner overlay - so with exactly two participants, the local tile is
+ * genuinely one of the two grid cells, not a small picture-in-picture over the other person's. The floating corner
+ * tile (above the control bar on a narrower window, at the top on a phone, where the bar wraps onto a second row)
+ * is reserved for focus/presentation layouts, where there's already a single large tile the local one would
+ * otherwise compete with for space. Either way, alone in the call, the local tile simply fills the whole stage
+ * (see the `alone` branch of the `stage` computation).
+ *
+ * `selfHidden` (`handleHideSelf()`/`handleToggleSelfHidden()`) removes the local tile from view entirely, wherever
+ * it would otherwise appear - set from the tile's own corner "…" menu (`_ParticipantTile.tsx`'s `onHideSelf`, one
+ * directional: there's no tile left to click "show" on once it's gone) or toggled back on from the navbar's own
+ * "…" menu (`_CallControls.tsx`), which is the only way to re-show it from grid view, where there'd otherwise be
+ * nothing left bearing a "show self" control. Never honored while `alone`: hiding the only tile on screen would
+ * just blank it, so the local tile ignores `selfHidden` there and always shows.
  *
  * ## Who is heard
  *
@@ -223,6 +237,7 @@ export default function CallView({
     const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [transportMode, setTransportModeState] = useState<TransportMode>("auto");
+    const [selfHidden, setSelfHidden] = useState(false);
 
     const managerRef = useRef<MeshConnectionManager | null>(null);
     /** The raw capture from `getDisplayMedia()` - only ever used to stop it (releasing the OS's own share
@@ -469,6 +484,17 @@ export default function CallView({
         setHandRaised((prev) => !prev);
     }
 
+    /** Hides the local tile - the tile's own "…" menu calls this directly (one-directional: there is no "show
+     * self" from in-grid, since a hidden tile isn't there to click on). Re-showing it is the navbar "…" menu's
+     * `handleToggleSelfHidden()` instead. */
+    function handleHideSelf() {
+        setSelfHidden(true);
+    }
+
+    function handleToggleSelfHidden() {
+        setSelfHidden((prev) => !prev);
+    }
+
     function handleReaction(emoji: string) {
         if (managerRef.current?.sendReaction(emoji)) {
             showReaction(emoji, "You");
@@ -636,7 +662,7 @@ export default function CallView({
         />
     );
 
-    const selfTile = (className?: string) => (
+    const selfTile = (className?: string, canHide?: boolean) => (
         <ParticipantTile
             name={selfName}
             stream={media.videoStream}
@@ -648,6 +674,7 @@ export default function CallView({
             // A custom background is a fixed picture, not a live reflection - mirroring it would show it backwards
             // to no one but the participant themselves (see `_ParticipantTile.tsx`'s doc comment).
             mirrored={media.filters.background !== "image"}
+            onHideSelf={canHide ? handleHideSelf : undefined}
             className={className}
         />
     );
@@ -657,7 +684,8 @@ export default function CallView({
 
     let stage: React.ReactNode;
     if (alone) {
-        // Nobody else yet: the local participant fills the tile area, presenting or not.
+        // Nobody else yet: the local participant fills the tile area, presenting or not - and is never hideable,
+        // since there'd be nothing left to look at (see this module's doc comment on hiding the local tile).
         stage = isPresenting ? (
             <ParticipantTile name={selfName} stream={screenStream} isLocal contain isFocused className="h-full" />
         ) : (
@@ -685,8 +713,11 @@ export default function CallView({
             </div>
         );
     } else {
+        // Plain grid, nobody presenting: the local tile joins the grid as an ordinary tile (unless hidden) instead
+        // of floating in a corner - see this module's doc comment.
         stage = (
             <div className="h-full grid gap-2 auto-rows-fr [grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr))]">
+                {!selfHidden && selfTile("h-full", true)}
                 {participants.map((p) => remoteTile(p, "h-full"))}
             </div>
         );
@@ -769,6 +800,8 @@ export default function CallView({
                         viewMode={viewMode}
                         onToggleViewMode={() => setViewMode((prev) => (prev === "grid" ? "focus" : "grid"))}
                         micLocked={micLocked}
+                        selfHidden={selfHidden}
+                        onToggleSelfHidden={handleToggleSelfHidden}
                         isHost={isHost}
                         transportMode={transportMode}
                         onSetTransportMode={handleSetTransportMode}
@@ -778,12 +811,12 @@ export default function CallView({
                     />
                 </footer>
 
-                {!alone && (
+                {!alone && !selfHidden && showFocusLayout && (
                     <div
                         className="absolute z-10 right-3 top-14 w-28 sm:top-auto sm:bottom-24 sm:w-52 aspect-video shadow-xl xl:right-4 xl:bottom-4"
                         data-testid="self-view"
                     >
-                        {selfTile("h-full")}
+                        {selfTile("h-full", true)}
                     </div>
                 )}
 
