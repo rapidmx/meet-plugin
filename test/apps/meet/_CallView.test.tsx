@@ -356,6 +356,17 @@ describe("CallView - layout", () => {
         expect(within(screen.getByTestId("thumbnails")).queryByText(/\(you\)/)).toBeNull();
     });
 
+    it("hides the local tile from the grid via its own \"…\" menu", async () => {
+        const { client } = await connected();
+        client.emit(hello("zzz", "Zed"));
+        await screen.findByText("Zed");
+
+        fireEvent.click(screen.getByRole("button", { name: "Local video options" }));
+        fireEvent.click(screen.getByRole("menuitem", { name: "Hide self" }));
+        expect(screen.queryByText(/Alice \(you\)/)).toBeNull();
+        expect(within(screen.getByRole("main")).getByText("Zed")).toBeInTheDocument();
+    });
+
     it("shows a shared screen large while alone", async () => {
         await connected();
         displayMediaMock.mockResolvedValueOnce({ ok: true, value: fakeMediaStream([fakeTrack("video", "screen")]) });
@@ -1203,6 +1214,21 @@ describe("CallView - the \"…\" menu", () => {
         fireEvent.click(screen.getByRole("menuitemradio", { name: "Auto" }));
         expect(client.sent).not.toContainEqual(expect.objectContaining({ kind: "restart-connection" }));
         expect(screen.queryByRole("menu")).toBeNull();
+    });
+
+    it("shows a \"Hide self\"/\"Show self\" item that toggles the local tile, re-showing it even once it was hidden from the grid", async () => {
+        const { client } = await connected();
+        client.emit(hello("zzz", "Zed"));
+        await screen.findByText("Zed");
+
+        fireEvent.click(screen.getByRole("button", { name: "More options" }));
+        fireEvent.click(screen.getByRole("menuitem", { name: "Hide self" }));
+        expect(screen.queryByText(/Alice \(you\)/)).toBeNull();
+
+        fireEvent.click(screen.getByRole("button", { name: "More options" }));
+        expect(screen.getByRole("menuitem", { name: "Show self" })).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("menuitem", { name: "Show self" }));
+        expect(screen.getByText(/Alice \(you\)/)).toBeInTheDocument();
     });
 });
 
