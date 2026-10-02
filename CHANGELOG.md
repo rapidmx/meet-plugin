@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-10-02
+
+### Changed
+- Move the "..." menu to the bottom control bar
+- The navbar's "..." menu wasn't opening in the browser - the button's
+- own active state toggled correctly on click (confirmed via frame-by-
+- frame inspection of a screen recording), but the dropdown itself never
+- appeared anywhere on screen, even after a hard refresh. jsdom doesn't
+- do real layout, so this plugin's test suite structurally can't catch
+- a pure rendering-position bug like this.
+- Rather than keep debugging blind, moved the button into
+- _CallControls.tsx's bottom bar (between the grid/focus toggle and
+- Leave, as requested), reusing its already-working openMenu pattern -
+- the same shape the effects/emoji/device menus already use
+- successfully. _CallView.tsx now just passes callback props
+- (isHost, transportMode, onSetTransportMode, onOpenDiagnostics,
+- onOpenSettings) instead of owning the menu's open/close state itself.
+- Also fixed test/apps/meet/_CallControls.test.tsx's renderControls()
+- helper, which was silently missing the five new required props -
+- neither tsc command catches this, since tsconfig.apps.json only
+- includes apps/, not test/.
+
 ## [0.14.0] - 2026-10-02
 
 ### Added
@@ -535,7 +557,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/rapidmx/meet-plugin/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/rapidmx/meet-plugin/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/rapidmx/meet-plugin/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/rapidmx/meet-plugin/compare/v0.12.1...v0.13.0
