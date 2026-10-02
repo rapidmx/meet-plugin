@@ -1333,3 +1333,51 @@ already exposes - the fake had everything needed to model this honestly once ask
 
 Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
 clean at 100%/98.58%/100%/100% (1579 tests).
+
+## 2026-10-02 (new feature, foundation layer): a per-tab TransportMode - auto/p2p/relay/websocket
+
+JP wants a button to force which media path a call uses - useful for troubleshooting ("is this lag the relay, or
+is it my network?"), with four options: Auto (today's existing waterfall), P2P, Relay (TURN), WebSocket Relay. This
+entry covers just the `MeshConnectionManager`/`types.ts` mechanics; the navbar UI (a "..." overflow menu replacing
+the standalone diagnostics button) is a separate, not-yet-done piece.
+
+**Semantics**, each a deliberate choice: `"p2p"` offers ICE no TURN servers at all (`stunOnlyServers()` strips any
+`iceServers` entry naming a `turn:`/`turns:` url) and never degrades further - a pair that can't connect directly
+stays `"failed"`. `"relay"` sets `RTCPeerConnectionLike`'s `iceTransportPolicy: "relay"` (a real `RTCConfiguration`
+field, so `realPeerConnection.ts` needed no changes at all - it already forwards the whole config object through to
+`new RTCPeerConnection(config)`) - still real WebRTC, just never direct, and likewise never degrades further.
+`"websocket"` skips WebRTC negotiation entirely and jumps straight to the server relay for every peer, via the
+exact same `fallBack()` the `"auto"` waterfall already uses once it gives up (same `relay-fallback` notification,
+same "no relay available -> `failed`" handling) - forced mode just calls it immediately rather than after a
+timeout/failure. `"p2p"`/`"relay"` skip the waterfall in the other direction: new `giveUpOnWebRTC()` is what a
+connect timeout and `handleConnectionState()`'s `disconnected`/`failed` branches call instead of `fallBack()`
+directly now, and it marks the pair `"failed"` outright in forced mode rather than quietly becoming the relay - a
+participant who explicitly chose "peer-to-peer only" to troubleshoot does not want it silently turning into
+something else.
+
+**Switching mode mid-call (not just at join) is the part that needed real design work.** A participant cannot
+rebuild their own half of a WebRTC pair without the other side rebuilding its matching half at (almost) the same
+moment, or the two ends negotiate against two different `RTCPeerConnection` objects with no idea about each other.
+New broadcast `SignalMessage` kind `restart-connection` (no payload beyond the envelope - `from` already says whose
+connection to rebuild) handles this: `setTransportMode()` sends it once and calls new `restartPeer()` for every
+current peer; every recipient calls `restartPeer()` for just that one sender's connection in response. Each side
+always rebuilds under whatever mode *it* currently has configured, never the sender's - this is a personal, per-tab
+troubleshooting choice, never something a meeting agrees on together. `restartPeer()` closes the old
+`RTCPeerConnection` and builds a fresh one (reusing `createPeer()`), but keeps the existing roster entry
+(name/audioOn/videoOn/handRaised) and emits `participant-updated` rather than a `participant-left`/`participant-joined`
+pair - from the UI's perspective this is the same `"connecting"` state any other reconnect already shows, not
+someone leaving and rejoining.
+
+**One `/* v8 ignore */`, written deliberately rather than contrived around**: `giveUpOnWebRTC()`'s own
+"already-superseded peer" guard looks identical to `fallBack()`'s (which this file already had, and which real
+usage does reach - `handleRelayFallback()` can call `fallBack()` a second time directly for an already-relayed
+peer). `giveUpOnWebRTC()` has no such second caller - its only callers are timer callbacks and a connection-state
+switch branch, and every transition that could make its guard's condition true already clears this peer's pending
+timers first, so the timer it's guarding against never actually fires stale. Tried to construct a real test for it
+before reaching for the ignore comment; concluded genuinely unreachable (unlike `fallBack()`'s), and said exactly
+why, matching this codebase's established precedent for a defensive branch that's unreachable via real usage today
+(see `PasswordUtils.ts`) rather than silently leaving it uncovered or deleting defensive code that still guards
+against a future caller introducing the exact bug it exists to catch.
+
+Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
+clean at 100%/98.6%/100%/100%.

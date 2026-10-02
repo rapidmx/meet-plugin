@@ -103,7 +103,35 @@
  * unavailable (turned off by the operator, or a browser without WebCodecs) the pair is marked `"failed"` and stays
  * in the roster, rather than the participant vanishing with no explanation as it used to.
  *
- * A pair never moves back up: once on the relay it stays there for the rest of the call.
+ * A pair never moves back up: once on the relay it stays there for the rest of the call - except that the whole
+ * waterfall is itself only what `"auto"` mode does; see the next section.
+ *
+ * ## Forcing a transport (`setTransportMode()`)
+ *
+ * `TransportMode` (`types.ts`) lets a participant override the waterfall above for their own tab: `"p2p"` offers
+ * ICE no TURN servers at all and never falls back past a failed direct attempt; `"relay"` sets
+ * `RTCPeerConnectionLike`'s `iceTransportPolicy: "relay"` (still real WebRTC, just never direct) and likewise never
+ * falls back further; `"websocket"` skips WebRTC negotiation entirely and jumps straight to the server relay for
+ * every peer, via the very same `fallBack()` the `"auto"` waterfall uses once it gives up (same cooperative
+ * `relay-fallback` notification, same "no relay available -> `failed`" handling - `"websocket"` mode just calls it
+ * immediately instead of after a timeout). `"p2p"`/`"relay"` skip the waterfall in the other direction:
+ * `giveUpOnWebRTC()` is what `createPeer()`'s connect timeout and `handleConnectionState()`'s `disconnected`/
+ * `failed` branches call instead of `fallBack()` directly, and it marks the pair `"failed"` outright in forced
+ * `"p2p"`/`"relay"` mode rather than degrading to the relay - a participant who explicitly chose "peer-to-peer
+ * only" or "TURN relay only" to troubleshoot a connection does not want it quietly becoming something else.
+ *
+ * Switching modes mid-call (not just at join) rebuilds every current peer connection under the new policy
+ * (`restartPeer()`): the old `RTCPeerConnection` is closed and a fresh one created in its place, exactly as
+ * `createPeer()` builds one for a brand-new peer, but keeping the existing roster entry (name/audioOn/videoOn/
+ * handRaised) and emitting `participant-updated` rather than a `participant-left`/`participant-joined` pair - from
+ * the UI's perspective this looks like the existing `"connecting"` state any reconnect already uses, not someone
+ * leaving and rejoining. This can't be done unilaterally: a participant cannot rebuild their own half of a pair
+ * without the other side rebuilding its matching half at (almost) the same moment, or the two ends negotiate
+ * against two different objects that have no idea about each other. `setTransportMode()` therefore also broadcasts
+ * `restart-connection` (no payload beyond the envelope - `types.ts`'s `SignalMessage` doc comment), and every
+ * recipient calls `restartPeer()` for just that one sender's connection in response - each side always rebuilds
+ * using whatever mode *it* currently has configured, never the sender's, since this is a personal, per-tab choice,
+ * not something a meeting agrees on together.
  */
 import {
     type MediaTransport,
@@ -116,6 +144,7 @@ import {
     type RelayTransportLike,
     type SignalMessage,
     type SignalingChannel,
+    type TransportMode,
     REACTION_EMOJIS,
 } from "./types.js";
 
@@ -188,6 +217,8 @@ export interface MeshConnectionManagerOptions {
     disconnectedGraceMs?: number;
     /** Defaults to `DEFAULT_DIAGNOSTICS_POLL_MS`. */
     diagnosticsPollMs?: number;
+    /** Defaults to `"auto"` - see this module's doc comment on `setTransportMode()`. */
+    transportMode?: TransportMode;
 }
 
 export class MeshConnectionManager {
@@ -200,10 +231,12 @@ export class MeshConnectionManager {
     private started = false;
     private stopped = false;
     private currentPresenterUid: string | undefined;
+    private currentTransportMode: TransportMode;
     private readonly selfId: string;
 
     constructor(private readonly options: MeshConnectionManagerOptions) {
         this.selfId = options.peerId ?? options.selfUid;
+        this.currentTransportMode = options.transportMode ?? "auto";
         this.localTracks = { audio: options.localAudioTrack ?? null, video: options.localVideoTrack ?? null };
         this.localState = {
             audioOn: !!options.localAudioTrack,
@@ -221,6 +254,10 @@ export class MeshConnectionManager {
 
     get presenterUid(): string | undefined {
         return this.currentPresenterUid;
+    }
+
+    get transportMode(): TransportMode {
+        return this.currentTransportMode;
     }
 
     onEvent(listener: (event: MeshEvent) => void): () => void {
@@ -342,6 +379,22 @@ export class MeshConnectionManager {
         this.emit({ type: "talking-stick-changed", active, holder });
     }
 
+    /** Switches this tab's own transport policy - see this module's doc comment on `TransportMode`. A no-op for the
+     * mode it already has. Rebuilds every current peer connection under the new policy and, once `start()` has
+     * run, tells every peer to rebuild their matching half too (`restart-connection`) - see `restartPeer()`. */
+    setTransportMode(mode: TransportMode): void {
+        if (this.currentTransportMode === mode) {
+            return;
+        }
+        this.currentTransportMode = mode;
+        if (this.started && !this.stopped) {
+            this.send({ kind: "restart-connection" });
+        }
+        for (const uid of [...this.peers.keys()]) {
+            this.restartPeer(uid);
+        }
+    }
+
     private sendHello(): void {
         this.send({ kind: "hello", name: this.options.selfName, state: this.localState });
     }
@@ -411,6 +464,9 @@ export class MeshConnectionManager {
             case "talking-stick":
                 this.emit({ type: "talking-stick-changed", active: message.active === true, holder: typeof message.holder === "string" ? message.holder : undefined });
                 return;
+            case "restart-connection":
+                this.restartPeer(message.from);
+                return;
         }
     }
 
@@ -427,6 +483,11 @@ export class MeshConnectionManager {
         // Let a newcomer who couldn't have seen our own original `hello` learn about us too - see this module's
         // doc comment on roster discovery.
         this.sendHello();
+        if (this.currentTransportMode === "websocket") {
+            // Forced relay-only: don't negotiate WebRTC at all - see this module's doc comment on `setTransportMode()`.
+            this.fallBack(peer, true);
+            return;
+        }
         if (offerer) {
             void this.initiateOffer(peer);
         }
@@ -489,7 +550,7 @@ export class MeshConnectionManager {
     }
 
     private createPeer(uid: string, name: string, state: ParticipantState | undefined, offerer: boolean): PeerState {
-        const pc = this.options.createPeerConnection({ iceServers: this.options.iceServers });
+        const pc = this.options.createPeerConnection(this.pcConfig());
         const peer: PeerState = {
             uid,
             name,
@@ -524,8 +585,23 @@ export class MeshConnectionManager {
         };
         pc.onconnectionstatechange = () => this.handleConnectionState(peer);
         // Cleared the moment the connection comes up, so this only ever fires for a pair still waiting on WebRTC.
-        peer.connectTimer = setTimeout(() => this.fallBack(peer), this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS);
+        peer.connectTimer = setTimeout(() => this.giveUpOnWebRTC(peer), this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS);
         return peer;
+    }
+
+    /** The `RTCPeerConnection` config for a peer created right now - `this.options.iceServers` as given for `"auto"`
+     * and `"websocket"` (the latter never actually uses them - see `handleHello()`/`handleOffer()`), STUN-only (no
+     * TURN offered to ICE at all) for `"p2p"`, and the same servers with `iceTransportPolicy: "relay"` for
+     * `"relay"` - see this module's doc comment on `TransportMode`. */
+    private pcConfig(): { iceServers: RTCIceServer[]; iceTransportPolicy?: "all" | "relay" } {
+        switch (this.currentTransportMode) {
+            case "p2p":
+                return { iceServers: stunOnlyServers(this.options.iceServers) };
+            case "relay":
+                return { iceServers: this.options.iceServers, iceTransportPolicy: "relay" };
+            default:
+                return { iceServers: this.options.iceServers };
+        }
     }
 
     /** Reacts to the peer connection's state: notes which path a connected pair got, and gives up on WebRTC for a
@@ -541,10 +617,10 @@ export class MeshConnectionManager {
                 return;
             case "disconnected":
                 // ICE often recovers from this on its own, so it is only given up on after a grace period.
-                peer.disconnectTimer ??= setTimeout(() => this.fallBack(peer), this.options.disconnectedGraceMs ?? DEFAULT_DISCONNECTED_GRACE_MS);
+                peer.disconnectTimer ??= setTimeout(() => this.giveUpOnWebRTC(peer), this.options.disconnectedGraceMs ?? DEFAULT_DISCONNECTED_GRACE_MS);
                 return;
             case "failed":
-                this.fallBack(peer);
+                this.giveUpOnWebRTC(peer);
                 return;
             case "closed":
                 this.handleBye(peer.uid);
@@ -613,6 +689,32 @@ export class MeshConnectionManager {
         peer.disconnectTimer = undefined;
     }
 
+    /** What a connect timeout or a `"disconnected"`/`"failed"` connection state means for `peer`: `fallBack()` to
+     * the relay for `"auto"` mode (unchanged from before `TransportMode` existed), but `"failed"` outright for a
+     * forced `"p2p"`/`"relay"` mode - see this module's doc comment on why those two never degrade further.
+     * `"websocket"` mode never reaches here at all: `handleHello()`/`handleOffer()` call `fallBack()` immediately
+     * on peer creation, well before a connect timeout could ever fire. */
+    private giveUpOnWebRTC(peer: PeerState): void {
+        if (this.currentTransportMode !== "p2p" && this.currentTransportMode !== "relay") {
+            this.fallBack(peer);
+            return;
+        }
+        /* v8 ignore if -- unreachable via real usage: unlike `fallBack()` (also callable directly from
+           `handleRelayFallback()`, which is how its own identical-looking guard is actually exercised),
+           `giveUpOnWebRTC()`'s only callers are `createPeer()`'s connect timer and `handleConnectionState()`'s
+           disconnect timer/`"failed"` case - and every transition that could make either side of this true
+           (`fallBack()` moving a peer to `"websocket"`, `restartPeer()` replacing the map entry) clears this
+           peer's pending timers first, so a stale timer referencing this exact peer object never fires. Kept for
+           the same reason `fallBack()`'s guard is - a future caller that doesn't pre-clear timers should fail
+           safe, not corrupt an already-superseded peer. */
+        if (peer.transport === "websocket" || this.peers.get(peer.uid) !== peer) {
+            return;
+        }
+        this.clearTimers(peer);
+        this.stopDiagnosticsPolling(peer);
+        this.setTransport(peer, "failed");
+    }
+
     /**
      * Gives up on WebRTC for `peer` and moves the pair to the WebSocket relay (the third path - see this module's doc
      * comment), or marks it `"failed"` when there is no relay to move to. `notify` tells the other side, which may not
@@ -659,6 +761,41 @@ export class MeshConnectionManager {
         this.options.relay?.setSending([...this.peers.values()].some((peer) => peer.transport === "websocket"));
     }
 
+    /** Rebuilds `uid`'s connection from scratch under the current `TransportMode` - see this module's doc comment
+     * on `setTransportMode()`. A no-op if `uid` isn't a known peer (already left). Keeps the roster entry (name and
+     * announced state) and emits `participant-updated`, not a `participant-left`/`participant-joined` pair - from
+     * the UI's perspective this is the same `"connecting"` state any other reconnect already shows, not someone
+     * leaving and rejoining. */
+    private restartPeer(uid: string): void {
+        const old = this.peers.get(uid);
+        if (!old) {
+            return;
+        }
+        this.clearTimers(old);
+        this.stopDiagnosticsPolling(old);
+        // Stop listening to the dying connection before closing it - same ordering `fallBack()` uses, and for the
+        // same reason: closing it must never be mistaken for the peer leaving.
+        old.pc.onconnectionstatechange = null;
+        old.pc.onicecandidate = null;
+        old.pc.ontrack = null;
+        old.pc.close();
+        if (old.transport === "websocket") {
+            this.options.relay?.stopReceivingFrom(uid);
+        }
+        const offerer = isOfferer(this.selfId, uid);
+        const fresh = this.createPeer(uid, old.name, { audioOn: old.audioOn, videoOn: old.videoOn, handRaised: old.handRaised }, offerer);
+        if (this.currentTransportMode === "websocket") {
+            this.fallBack(fresh, true);
+            return;
+        }
+        // In case `old` was the relay's only remaining user - `fresh` starts on WebRTC, not the relay.
+        this.syncRelaySending();
+        this.emit({ type: "participant-updated", participant: toParticipant(fresh) });
+        if (offerer) {
+            void this.initiateOffer(fresh);
+        }
+    }
+
     private async initiateOffer(peer: PeerState): Promise<void> {
         const offer = await peer.pc.createOffer();
         await peer.pc.setLocalDescription(offer);
@@ -674,6 +811,17 @@ export class MeshConnectionManager {
         if (!peer) {
             peer = this.createPeer(message.from, message.from, undefined, false);
         }
+        if (isNew) {
+            this.emit({ type: "participant-joined", participant: toParticipant(peer) });
+            this.sendHello();
+        }
+        if (this.currentTransportMode === "websocket") {
+            // Forced relay-only: don't bother negotiating this offer at all - see this module's doc comment on
+            // `setTransportMode()`. Also tells the offerer (`relay-fallback`), so they don't wait out their own
+            // connect timeout for an answer that was never coming.
+            this.fallBack(peer, true);
+            return;
+        }
         await peer.pc.setRemoteDescription(message.sdp);
         this.flushPendingCandidates(peer);
         if (!peer.senders.audio && !peer.senders.video) {
@@ -685,10 +833,6 @@ export class MeshConnectionManager {
                     await peer.senders[kind]?.replaceTrack(track);
                 }
             }
-        }
-        if (isNew) {
-            this.emit({ type: "participant-joined", participant: toParticipant(peer) });
-            this.sendHello();
         }
         const answer = await peer.pc.createAnswer();
         await peer.pc.setLocalDescription(answer);
@@ -792,4 +936,14 @@ function sanitizeState(state: ParticipantState): ParticipantState {
 
 function isReactionEmoji(emoji: unknown): emoji is (typeof REACTION_EMOJIS)[number] {
     return (REACTION_EMOJIS as readonly unknown[]).includes(emoji);
+}
+
+/** `servers` with every entry that names so much as one `turn:`/`turns:` url dropped - what `"p2p"` mode gives ICE,
+ * so it has no TURN relay candidate to ever produce. A `stun:`/`stuns:`-only entry (the normal shape this app's own
+ * `buildIceServers()` produces - one STUN entry, one TURN entry) is kept as-is. */
+function stunOnlyServers(servers: RTCIceServer[]): RTCIceServer[] {
+    return servers.filter((server) => {
+        const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+        return urls.every((url) => url.startsWith("stun:") || url.startsWith("stuns:"));
+    });
 }

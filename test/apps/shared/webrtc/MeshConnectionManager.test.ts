@@ -64,6 +64,7 @@ async function flush(): Promise<void> {
 function setup(overrides: Partial<MeshConnectionManagerOptions> = {}) {
     const channel = manualChannel();
     const created: FakeRTCPeerConnection[] = [];
+    const configs: { iceServers: RTCIceServer[]; iceTransportPolicy?: "all" | "relay" }[] = [];
     const events: MeshEvent[] = [];
     const audio = fakeTrack("audio", "local-audio");
     const video = fakeTrack("video", "local-video");
@@ -72,7 +73,8 @@ function setup(overrides: Partial<MeshConnectionManagerOptions> = {}) {
         selfName: "Alice",
         iceServers: [],
         channel,
-        createPeerConnection: () => {
+        createPeerConnection: (config) => {
+            configs.push(config);
             const pc = fakeRTCPeerConnection();
             created.push(pc);
             return pc;
@@ -83,7 +85,7 @@ function setup(overrides: Partial<MeshConnectionManagerOptions> = {}) {
         ...overrides,
     });
     manager.onEvent((e) => events.push(e));
-    return { manager, channel, created, events, audio, video };
+    return { manager, channel, created, configs, events, audio, video };
 }
 
 const hello = (from: string, name?: string, state?: SignalMessage["state"]): SignalMessage => ({
@@ -1353,5 +1355,211 @@ describe("MeshConnectionManager - talking stick", () => {
         manager.start();
         channel.emit(signal("talking-stick", "z", { active: "yes" as unknown as boolean, holder: 42 as unknown as string }));
         expect(events).toContainEqual({ type: "talking-stick-changed", active: false, holder: undefined });
+    });
+});
+
+describe("MeshConnectionManager - transport mode", () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it("defaults to auto, exposed via the transportMode getter, and setting it to its current value is a no-op", () => {
+        const { manager, channel } = setup();
+        expect(manager.transportMode).toBe("auto");
+        manager.setTransportMode("auto");
+        expect(channel.sent).toEqual([]);
+        expect(manager.transportMode).toBe("auto");
+
+        manager.setTransportMode("relay");
+        expect(manager.transportMode).toBe("relay");
+    });
+
+    it("updates the mode but broadcasts nothing before start() - there is no peer to tell yet", () => {
+        const { manager, channel } = setup();
+        manager.setTransportMode("p2p");
+        expect(manager.transportMode).toBe("p2p");
+        expect(channel.sent).toEqual([]);
+    });
+
+    it("broadcasts restart-connection once started, so every current peer rebuilds its matching half", async () => {
+        const { manager, channel } = await setupWithPeer(undefined);
+        channel.sent.length = 0;
+        manager.setTransportMode("p2p");
+        expect(channel.sent).toContainEqual({ type: "video-meeting-signal", kind: "restart-connection", from: "a" });
+    });
+
+    it("leaves ICE unconstrained in auto mode", async () => {
+        const iceServers = [{ urls: "stun:stun.example.com" }, { urls: "turn:turn.example.com" }];
+        const { configs } = await setupWithPeer(undefined, { iceServers });
+        expect(configs.at(-1)).toEqual({ iceServers });
+    });
+
+    it("offers ICE only STUN servers in p2p mode, dropping any entry naming a TURN url", async () => {
+        const iceServers = [
+            { urls: "stun:stun.example.com" },
+            { urls: ["turn:turn.example.com", "turn:turn.example.com?transport=tcp"] },
+            { urls: "stuns:stuns.example.com" },
+        ];
+        const { manager, channel, configs } = setup({ iceServers });
+        manager.setTransportMode("p2p");
+        manager.start();
+        channel.emit(hello("z", "Zed"));
+        await flush();
+        expect(configs.at(-1)).toEqual({ iceServers: [iceServers[0], iceServers[2]] });
+    });
+
+    it("forces iceTransportPolicy 'relay' in relay mode, keeping every ice server", async () => {
+        const iceServers = [{ urls: "stun:stun.example.com" }, { urls: "turn:turn.example.com" }];
+        const { manager, channel, configs } = setup({ iceServers });
+        manager.setTransportMode("relay");
+        manager.start();
+        channel.emit(hello("z", "Zed"));
+        await flush();
+        expect(configs.at(-1)).toEqual({ iceServers, iceTransportPolicy: "relay" });
+    });
+
+    it("marks a pair failed, never relayed, when p2p mode's own connect timeout fires", async () => {
+        vi.useFakeTimers();
+        const relay = fakeRelay();
+        const { manager, channel } = setup({ relay });
+        manager.setTransportMode("p2p");
+        manager.start();
+        channel.emit(hello("z", "Zed"));
+        await vi.advanceTimersByTimeAsync(DEFAULT_CONNECT_TIMEOUT_MS);
+        expect(manager.participants[0]?.transport).toBe("failed");
+        expect(relay.receiveFrom).not.toHaveBeenCalled();
+    });
+
+    it("marks a pair failed, never relayed, when relay mode's connection fails outright", async () => {
+        const relay = fakeRelay();
+        const { manager, created } = await setupWithPeer(relay, { transportMode: "relay" });
+        setState(created[0], "failed");
+        expect(manager.participants[0]?.transport).toBe("failed");
+        expect(relay.receiveFrom).not.toHaveBeenCalled();
+    });
+
+    it("skips WebRTC negotiation entirely in websocket mode when this tab would have been the offerer", async () => {
+        const relay = fakeRelay();
+        const { manager, channel, created, events } = setup({ peerId: "a~tab", relay, transportMode: "websocket" });
+        manager.start();
+        channel.sent.length = 0;
+        channel.emit(hello("z~tab", "Zed")); // "a~tab" < "z~tab" - this tab would normally offer.
+        await flush();
+
+        expect(manager.participants[0]?.transport).toBe("websocket");
+        expect(relay.receiveFrom).toHaveBeenCalledWith("z~tab", expect.any(Function));
+        expect(created[0].createOffer).not.toHaveBeenCalled();
+        expect(channel.sent).toContainEqual(expect.objectContaining({ kind: "relay-fallback", to: "z~tab" }));
+        expect(events).toContainEqual({ type: "participant-joined", participant: expect.objectContaining({ uid: "z~tab" }) });
+    });
+
+    it("skips WebRTC negotiation entirely in websocket mode when answering an incoming offer", async () => {
+        const relay = fakeRelay();
+        const { manager, channel, created, events } = setup({ peerId: "z~tab", relay, transportMode: "websocket" });
+        manager.start();
+        channel.sent.length = 0;
+        channel.emit(signal("offer", "a~tab", { to: "z~tab", sdp: { type: "offer", sdp: "o" } }));
+        await flush();
+
+        expect(manager.participants[0]?.transport).toBe("websocket");
+        expect(relay.receiveFrom).toHaveBeenCalledWith("a~tab", expect.any(Function));
+        expect(created[0].createAnswer).not.toHaveBeenCalled();
+        expect(channel.sent).toContainEqual(expect.objectContaining({ kind: "relay-fallback", to: "a~tab" }));
+        expect(events).toContainEqual({ type: "participant-joined", participant: expect.objectContaining({ uid: "a~tab" }) });
+    });
+
+    it("marks a pair failed in websocket mode when this browser has no relay support", async () => {
+        const { manager } = await setupWithPeer(fakeRelay(false), { transportMode: "websocket" });
+        expect(manager.participants[0]?.transport).toBe("failed");
+    });
+
+    it("rebuilds a peer's connection on setTransportMode, keeping its roster entry and emitting participant-updated rather than left/joined", async () => {
+        const { manager, created, events } = await setupWithPeer(undefined);
+        setState(created[0], "connected");
+        await flush();
+        events.length = 0;
+
+        manager.setTransportMode("p2p");
+        await flush();
+
+        expect(created).toHaveLength(2);
+        expect(created[0].close).toHaveBeenCalledTimes(1);
+        expect(created[0].onconnectionstatechange).toBeNull();
+        expect(created[0].onicecandidate).toBeNull();
+        expect(created[0].ontrack).toBeNull();
+        expect(manager.participants).toEqual([{ uid: "z", name: "Zed", audioOn: false, videoOn: false, handRaised: false, transport: "connecting" }]);
+        expect(events.filter((e) => e.type === "participant-left" || e.type === "participant-joined")).toEqual([]);
+        expect(events).toContainEqual({ type: "participant-updated", participant: expect.objectContaining({ uid: "z", transport: "connecting" }) });
+        expect(created[1].createOffer).toHaveBeenCalled();
+    });
+
+    it("preserves a peer's announced state (mic/camera/hand) across a restart", async () => {
+        const { manager, channel } = await setupWithPeer(undefined);
+        channel.emit(signal("state", "z", { state: { audioOn: true, videoOn: false, handRaised: true } }));
+        manager.setTransportMode("p2p");
+        await flush();
+        expect(manager.participants).toEqual([{ uid: "z", name: "Zed", audioOn: true, videoOn: false, handRaised: true, transport: "connecting" }]);
+    });
+
+    it("does not re-offer when restarting a peer this tab was never the offerer for", async () => {
+        // "zz" > "z" lexicographically, so "z" is the offerer for this pair, not this tab.
+        const { manager, created } = await setupWithPeer(undefined, { selfUid: "zz" });
+        expect(created[0].createOffer).not.toHaveBeenCalled();
+
+        manager.setTransportMode("p2p");
+        await flush();
+
+        expect(created).toHaveLength(2);
+        expect(created[1].createOffer).not.toHaveBeenCalled();
+    });
+
+    it("stops relay reception and resyncs sending when restarting a peer that had fallen back to it", async () => {
+        const relay = fakeRelay();
+        const { manager, created } = await setupWithPeer(relay);
+        setState(created[0], "failed");
+        expect(manager.participants[0]?.transport).toBe("websocket");
+        relay.setSending.mockClear();
+
+        manager.setTransportMode("p2p");
+        await flush();
+
+        expect(relay.stopReceivingFrom).toHaveBeenCalledWith("z");
+        expect(relay.setSending).toHaveBeenLastCalledWith(false);
+        expect(manager.participants[0]?.transport).toBe("connecting");
+    });
+
+    it("moves every current peer straight to the relay when switching into websocket mode", async () => {
+        const relay = fakeRelay();
+        const { manager, created } = await setupWithPeer(relay);
+        setState(created[0], "connected");
+        await flush();
+        expect(manager.participants[0]?.transport).toBe("p2p");
+
+        manager.setTransportMode("websocket");
+        await flush();
+
+        expect(manager.participants[0]?.transport).toBe("websocket");
+        expect(relay.receiveFrom).toHaveBeenCalledWith("z", expect.any(Function));
+    });
+
+    it("rebuilds only the sender's connection on receiving restart-connection, leaving other peers untouched", async () => {
+        const { channel, created } = await setupWithPeer(undefined);
+        channel.emit(hello("y", "Yan"));
+        await flush();
+        expect(created).toHaveLength(2);
+
+        channel.emit(signal("restart-connection", "z"));
+        await flush();
+
+        expect(created).toHaveLength(3);
+        expect(created[0].close).toHaveBeenCalledTimes(1);
+        expect(created[1].close).not.toHaveBeenCalled();
+    });
+
+    it("does nothing when restart-connection names a peer this manager does not know", async () => {
+        const { channel, created } = await setupWithPeer(undefined);
+        channel.emit(signal("restart-connection", "ghost"));
+        await flush();
+        expect(created).toHaveLength(1);
     });
 });

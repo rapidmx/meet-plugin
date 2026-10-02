@@ -21,6 +21,21 @@ export interface ParticipantState {
  * arbitrary string from another participant is never rendered. */
 export const REACTION_EMOJIS = ["👍", "👏", "❤️", "🎉", "😂", "😮", "😢", "👋"] as const;
 
+/** Which media path this participant's own tab currently insists on, for every peer - see
+ * `MeshConnectionManager.setTransportMode()`'s doc comment for what each one actually does:
+ *
+ * - `"auto"`: the default waterfall (direct, then TURN, then the server's own WebSocket relay) - unchanged behavior.
+ * - `"p2p"`: direct connections only - no TURN server offered to ICE, and a pair that can't connect directly stays
+ * `"failed"` rather than falling back to the WebSocket relay.
+ * - `"relay"`: TURN-relayed WebRTC only (`RTCPeerConnection`'s own `iceTransportPolicy: "relay"`) - still real
+ * WebRTC, just never direct; a pair with no reachable TURN server stays `"failed"`, same "no further fallback" rule
+ * as `"p2p"`.
+ * - `"websocket"`: skips WebRTC negotiation entirely for every pair and goes straight to the server's own relay.
+ *
+ * A purely personal, per-tab troubleshooting choice - never transmitted as a setting, and independent of whatever
+ * every other participant has chosen for their own tab. */
+export type TransportMode = "auto" | "p2p" | "relay" | "websocket";
+
 /**
  * One WebRTC signaling message, published as the JSON body of `POST /push/:meetingUid` (`BasePushRoute.send()`)
  * and received back over `/push`'s WebSocket, exactly as `BaseVideoMeetingRoute`'s doc comment describes ("SDP
@@ -40,6 +55,12 @@ export const REACTION_EMOJIS = ["👍", "👏", "❤️", "🎉", "😂", "😮"
  * revoking the recipient's server-side channel grant (`BaseVideoMeetingRoute.revokeChannelGrant()`), which is
  * enforced and does not depend on the recipient's client cooperating; `talking-stick` has no server-side
  * counterpart at all (see this module's doc comment on why it is purely an in-call runtime signal).
+ *
+ * `restart-connection` is broadcast whenever a participant changes their own `TransportMode`
+ * (`MeshConnectionManager.setTransportMode()`): every connection of theirs needs rebuilding under the new policy,
+ * and a recipient can't rebuild its own half of a pair unilaterally without the other side doing the same at
+ * (almost) the same moment, or the two sides end up negotiating against two different `RTCPeerConnection`s. No
+ * payload beyond the envelope - `from` already says whose connection to rebuild.
  */
 export interface SignalMessage {
     type: "video-meeting-signal";
@@ -56,7 +77,8 @@ export interface SignalMessage {
         | "relay-fallback"
         | "mute-request"
         | "kicked"
-        | "talking-stick";
+        | "talking-stick"
+        | "restart-connection";
     /** The sender's authenticated uid - the real caller's own uid when `join()` returned `authenticated: true`, else
      * the `guest:<random>` uid `BaseVideoMeetingRoute.join()` minted. The server refuses a published message whose
      * `from` isn't the authenticated caller's uid (it stops one participant speaking as another), so this must be
@@ -187,7 +209,10 @@ export interface RelayTransportLike {
     close(): void;
 }
 
-export type RTCPeerConnectionFactory = (config: { iceServers: RTCIceServer[] }) => RTCPeerConnectionLike;
+/** `iceTransportPolicy` mirrors the real `RTCConfiguration` field of the same name - `"relay"` forces ICE to use
+ * only a TURN relay candidate, never a direct one (`TransportMode.relay`); omitted (or `"all"`) is the ordinary,
+ * unconstrained default. */
+export type RTCPeerConnectionFactory = (config: { iceServers: RTCIceServer[]; iceTransportPolicy?: "all" | "relay" }) => RTCPeerConnectionLike;
 
 /** One other participant currently known to be in the call - `MeshConnectionManager.participants` never includes
  * the local participant themselves (the UI already knows its own name/uid without asking the manager). */
