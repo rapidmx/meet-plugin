@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-10-02
+
+### Changed
+- Mark the TURN credential and shared secret as secret settings, so the server never shows them
+
 ## [0.13.0] - 2026-10-02
 
 ### Changed
@@ -447,7 +452,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/rapidmx/meet-plugin/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/rapidmx/meet-plugin/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/rapidmx/meet-plugin/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/rapidmx/meet-plugin/compare/v0.11.0...v0.12.0
