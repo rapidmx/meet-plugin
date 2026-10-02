@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-02
+
+### Added
+- Added server relay diagnostics counters to the diagnostics panel
+
+### Changed
+- Replace Mute/Remove/Give-stick row buttons with icons
+- The participants drawer's per-row host actions were plain text
+- buttons, cramped next to the Host/floor/transport badges. Swapped
+- each for an icon-only button, reusing icons that already carry the
+- right meaning elsewhere: MicOffIcon for Mute, BatonIcon for Give
+- stick (the same icon as the navbar talking-stick toggle). Remove
+- gets a new RemoveIcon (a plain X). Accessible names are unchanged,
+- so no existing test needed updating.
+- Show the local tile in the grid, with a per-tile hide-self option
+- Previously the local tile always floated in a fixed corner. Now it sits
+- in the grid as an ordinary tile (so a 2-person call shows both
+- participants evenly), only floating in a corner when a focus/thumbnail
+- layout is active. A small "..." menu on the local tile offers "Hide
+- self"; the navbar's "..." menu gained a matching "Hide self"/"Show
+- self" item so it can be brought back even while hidden from the grid.
+- The panel showed "Not available" for a server-relayed participant, leaving
+- nothing to go on when relay audio breaks up. The relay now counts what it
+- does and the mesh polls it like getStats():
+- - Sending: mic audio captured vs wall-clock time, how much of it was
+- digital silence, audio the encoder skipped, and frames sent/dropped/bytes
+- per kind.
+- - Receiving, per peer: frames received and lost (sequence gaps), bytes,
+- playback gaps and the silence they inserted, packets dropped late, the
+- receive buffer's depth, and digital silence inside the decoded audio.
+- Silence inside the packets with clean capture points at the other end's
+- capture; silence in capture points at this browser's own capture path;
+- gaps and lost frames point at the network.
+- Time the server relay's round trip with a ping/pong of its own
+- The relay protocol had no way to measure latency, so the diagnostics panel
+- showed no round-trip time for a server-relayed participant. A ready client
+- now sends {"op":"ping","t":<its clock>} every 2 s and the hub echoes
+- t back as a pong; the client times it on its own clock and the panel shows
+- it as "Round-trip to server" - this browser's leg only, since the relay
+- has no direct path to the peer. The ping shares the media socket, so it
+- includes whatever media is queued ahead of it.
+- An older server ignores the unknown op, so the stat just stays blank; no
+- protocol version bump is needed.
+- Cover hiding/showing the local tile from CallView's own handlers
+- handleHideSelf() and handleToggleSelfHidden() were wired to the tile's
+- "…" menu and the navbar menu but never actually exercised by a test,
+- leaving _CallView.tsx short of full statement/function coverage.
+
 ## [0.14.1] - 2026-10-02
 
 ### Changed
@@ -557,7 +605,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/rapidmx/meet-plugin/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/rapidmx/meet-plugin/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/rapidmx/meet-plugin/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/rapidmx/meet-plugin/compare/v0.13.0...v0.13.1
