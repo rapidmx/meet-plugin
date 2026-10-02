@@ -1253,3 +1253,45 @@ at anymore.
 
 Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
 clean at 100%/98.57%/100%/100% (1570 tests).
+
+## 2026-10-02 (reported bug): the WebSocket relay tier's "ton of lag" was two oversized backpressure budgets
+
+JP reported the server relay (the third, last-resort media tier - see `MeshConnectionManager`'s doc comment) was
+laggy enough to be "nearly unusable." Rather than guess, had a subagent read the whole pipeline end to end before
+touching anything - the architecture itself is sound (raw binary frames, no JSON/base64 bloat, no server-side
+batching, Redis correctly off the same-instance hot path, the video encoder already at `latencyMode: "realtime"`,
+every encode/decode queue already bounded and drop-not-queue) - but two numbers were each sized almost 10x too
+loose, and together they explain exactly "lag that keeps growing," not just brief jank:
+
+- `RelayHub.RELAY_WS_MAX_BACKPRESSURE_BYTES` (the framework's own `maxBackpressure` for the relay route - how much a
+  slow receiver's socket may buffer before the framework starts silently dropping sends) was `1024 * 1024` (1 MiB).
+  Its own comment claimed "roughly two seconds of a 350 kbps video stream plus audio" - at the combined ~46.75 KB/s
+  of `VideoSender.VIDEO_BITRATE` + `AudioSender.AUDIO_BITRATE`, 1 MiB is actually **≈22 seconds**, not two - a
+  bits-vs-bytes mix-up in the original math. A receiver whose downlink briefly dipped below the stream's rate could
+  fall minutes behind "now" before anything was ever dropped to catch back up, rather than the "briefly slow" case
+  this budget is supposed to cover.
+- `RelayClient.MAX_BUFFERED_BYTES` (the client's own send-side threshold, same idea in the other direction) was
+  `256 * 1024` - **≈5.6 seconds** at the same combined rate, defeating its own doc comment's stated intent
+  ("queueing would only add latency to the frames that are still fresh") on exactly the constrained uplink that
+  routes a call to this fallback tier in the first place.
+
+Both corrected to numbers actually sized against the real combined bitrate: server `128 * 1024` (≈2.7s - the
+comment's original intent, done right, with margin above one key frame), client `64 * 1024` (≈1.4s, deliberately
+tighter than the server's budget so the sender starts dropping its own stale frames before the server's larger
+budget would have to). Neither constant can import the other's bitrate constants to stay in sync automatically
+(`apps/` and `src/` are separate TS programs - see `_CallView.tsx`'s doc comment on why), so both now carry the
+actual arithmetic in their doc comments as a cross-reference instead, so a future bitrate change has something
+concrete to recompute against rather than a comment that can silently drift wrong again.
+
+**Deliberately not changed, flagged rather than fixed**: `VideoSender.VIDEO_KEY_FRAME_INTERVAL` (a keyframe every
+2 seconds) means a receiver who just subscribed, or who lost a fragment, can wait up to ~2s for a fresh keyframe -
+there's no signal today for "a new receiver just started wanting you, send a keyframe now" (`canSend()` in
+`senderCommon.ts` is purely "is the socket connected," not "does anyone want this stream"). Tempting as a quick
+fix, shortening the interval directly trades bandwidth for recovery speed - more frequent (large) keyframes raises
+the *average* bitrate, which would make the exact backpressure problem just fixed worse on exactly the constrained
+networks this tier exists for. The correct fix is a small protocol addition (server notices a `want` naming a peer
+that wasn't already wanted and tells that peer's own socket to force one), not a blind interval change - left as
+follow-up work rather than risking a regression under this session's time budget.
+
+Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
+clean at 100%/98.57%/100%/100% (1570 tests, same count - only two constants and one test assertion changed).

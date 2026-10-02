@@ -34,8 +34,13 @@ export const MAX_NEGOTIATED_MESSAGE_BYTES = 1024 * 1024;
 /** The most senders the server lets one socket `want`. */
 export const MAX_WANTED_PEERS = 32;
 /** A media send is dropped, not queued, while more than this many bytes are still waiting to leave - the
- * connection is slower than the media, and queueing would only add latency to the frames that are still fresh. */
-export const MAX_BUFFERED_BYTES = 256 * 1024;
+ * connection is slower than the media, and queueing would only add latency to the frames that are still fresh.
+ * 64 KiB is a little under 1.4 seconds of `VideoSender.VIDEO_BITRATE` (350 kbps) plus `AudioSender.AUDIO_BITRATE`
+ * (24 kbps) combined (≈46.75 KB/s) - tighter than the server's own `RelayHub.RELAY_WS_MAX_BACKPRESSURE_BYTES`
+ * (128 KiB) on purpose, so a sender that is itself the slow end of the connection starts dropping its own stale
+ * frames before the server's larger budget would. This was previously 256 KiB (≈5.6 seconds), which defeated the
+ * "drop, don't queue" intent on exactly the constrained uplink that routes a call to this fallback tier at all. */
+export const MAX_BUFFERED_BYTES = 64 * 1024;
 /** Reconnect delay: about a second after the first failure, doubling to a ceiling, jittered so a server restart
  * doesn't bring every client back in the same instant. */
 export const RELAY_BACKOFF_BASE_MS = 1_000;

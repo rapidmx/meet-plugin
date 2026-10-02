@@ -729,9 +729,12 @@ describe("parseRelayEnabled", () => {
 describe("RelayHub with a larger message limit", () => {
     const hub = new RelayHub({ maxPayloadBytes: RELAY_LARGE_PAYLOAD_BYTES });
 
-    it("has a larger limit than the framework default, and a send buffer of at least a megabyte", () => {
+    it("has a larger limit than the framework default, and a send buffer bigger than the framework default but still close to real-time", () => {
         expect(RELAY_LARGE_PAYLOAD_BYTES).toBeGreaterThan(RELAY_MAX_PAYLOAD_BYTES);
-        expect(RELAY_WS_MAX_BACKPRESSURE_BYTES).toBeGreaterThanOrEqual(1024 * 1024);
+        // Bigger than the framework's own 64 KiB default (headroom for one key frame), but nowhere near the
+        // several-second backlog a careless, much larger budget would let build up for a briefly slow receiver.
+        expect(RELAY_WS_MAX_BACKPRESSURE_BYTES).toBeGreaterThan(64 * 1024);
+        expect(RELAY_WS_MAX_BACKPRESSURE_BYTES).toBeLessThan(256 * 1024);
     });
 
     it("tells the client the limit in ready", () => {

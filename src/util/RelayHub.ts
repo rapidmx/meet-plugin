@@ -19,9 +19,16 @@ export const RELAY_LARGE_PAYLOAD_BYTES: number = 64 * 1024;
 
 /** How many bytes the framework may hold unsent for one relay socket before it drops further messages to it, when the
  * installed `@rapidrest/service-core` lets a route set that (its default, 64 KiB, is smaller than one key frame's worth
- * of headroom and made a briefly slow receiver lose frames constantly). One MiB is roughly two seconds of a 350 kbps
- * video stream plus audio. */
-export const RELAY_WS_MAX_BACKPRESSURE_BYTES: number = 1024 * 1024;
+ * of headroom and made a briefly slow receiver lose frames constantly). 128 KiB is roughly 2.7 seconds of
+ * `VideoSender.VIDEO_BITRATE` (350 kbps) plus `AudioSender.AUDIO_BITRATE` (24 kbps) combined - (350_000 + 24_000) / 8
+ * bytes/s ≈ 46.75 KB/s - comfortably more than one key frame but not so much that a receiver whose downlink is
+ * briefly slower than the stream is left playing several seconds stale: this was previously 1 MiB (≈22 seconds at
+ * this bitrate, not the "roughly two seconds" the comment claimed - a bits-vs-bytes mix-up), which let a receiver's
+ * backlog grow essentially without bound before anything was ever dropped, rather than the "briefly slow" case this
+ * budget is meant to cover. `apps/shared/relay/`'s own senders can't import this constant (`tsconfig.apps.json`
+ * builds `apps/` as its own program - see its own doc comments), so this is a cross-reference, not a shared import:
+ * changing either bitrate should revisit this value too. */
+export const RELAY_WS_MAX_BACKPRESSURE_BYTES: number = 128 * 1024;
 
 /** The most sockets (registered or still awaiting their `hello`) one room holds at once. */
 export const RELAY_MAX_SOCKETS_PER_ROOM = 16;
