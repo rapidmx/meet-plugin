@@ -104,6 +104,7 @@ class WebSocketRelayTransport implements RelayTransport {
             peerId,
             createSocket: (target) => env.createSocket(target),
             random: () => env.random(),
+            now: () => env.now(),
             onMedia: (sender, payload) => this.receivers.get(sender)?.handleMedia(payload),
         });
         this.sender = new RelaySender({
@@ -155,7 +156,7 @@ class WebSocketRelayTransport implements RelayTransport {
     }
 
     diagnostics(peerId: string): RelayDiagnostics {
-        return { send: this.sender.diagnostics(), receive: this.receivers.get(peerId)?.diagnostics() };
+        return { roundTripMs: this.client.roundTripMs, send: this.sender.diagnostics(), receive: this.receivers.get(peerId)?.diagnostics() };
     }
 
     close(): void {

@@ -174,7 +174,12 @@ describe("DiagnosticsPanel - participants", () => {
                     fakeMeshParticipant({
                         name: "Zed",
                         transport: "websocket",
-                        diagnostics: { audio: { packetsLost: 4, bytesSent: 2048, bytesReceived: 4096 }, video: {}, relay: diagnostics },
+                        diagnostics: {
+                            roundTripTimeSeconds: 0.038,
+                            audio: { packetsLost: 4, bytesSent: 2048, bytesReceived: 4096 },
+                            video: {},
+                            relay: diagnostics,
+                        },
                     }),
                 ],
             });
@@ -182,9 +187,11 @@ describe("DiagnosticsPanel - participants", () => {
 
         const row = (label: string) => screen.getByText(label).closest("div")!;
 
-        it("shows the relay's counters instead of a round-trip time, which the relay has no way to measure", () => {
+        it("shows the round trip to the relay server, and the relay's counters", () => {
             relayed();
             expect(screen.queryByText("Round-trip time")).toBeNull();
+            expect(within(row("Round-trip to server")).getByText("38 ms")).toBeInTheDocument();
+            expect(screen.getByText("Round-trip to server")).toHaveAttribute("title", "From this browser to the relay server and back");
             expect(within(row("Audio")).getByText(/4 lost/)).toBeInTheDocument();
             expect(within(row("Your mic capture")).getByText("98% of real time · 40% silent")).toBeInTheDocument();
             expect(within(row("Playback")).getByText("35% silent · 1 gap (120 ms) · 80 ms buffered")).toBeInTheDocument();

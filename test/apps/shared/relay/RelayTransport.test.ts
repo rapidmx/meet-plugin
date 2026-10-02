@@ -4,6 +4,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { decodeFragment, fragmentFrame, KIND_AUDIO, KIND_VIDEO } from "../../../../apps/shared/relay/frames.js";
+import { RELAY_PING_INTERVAL_MS } from "../../../../apps/shared/relay/RelayClient.js";
 import { createRelayTransport, relayUrl } from "../../../../apps/shared/relay/RelayTransport.js";
 import { createFakeRelayEnv, FakeAudioData, fakeChunk, FakeVideoFrame, relayed, track, type FakeRelayEnv, last } from "./relayFakes.js";
 
@@ -566,6 +567,20 @@ describe("diagnostics", () => {
                 video: { framesSent: 0, framesDropped: 0, bytesSent: 0 },
             },
         });
+    });
+
+    it("reports its socket's round trip to the server, timed on the environment's clock", () => {
+        const { fake, transport } = setup();
+        transport.receiveFrom("a", () => undefined);
+        const socket = connect(fake);
+        expect(transport.diagnostics("a").roundTripMs).toBeUndefined();
+        vi.advanceTimersByTime(RELAY_PING_INTERVAL_MS);
+        const ping = socket.texts().find((m) => m.op === "ping");
+        expect(ping).toEqual({ op: "ping", t: fake.clock.now });
+        fake.clock.now += 25;
+        socket.message(JSON.stringify({ op: "pong", t: ping?.t }));
+        expect(transport.diagnostics("a").roundTripMs).toBe(25);
+        transport.close();
     });
 
     it("has no receive side for a peer it is not receiving from", () => {

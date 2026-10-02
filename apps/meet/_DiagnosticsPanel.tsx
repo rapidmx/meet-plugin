@@ -12,8 +12,8 @@
  *
  * `diagnostics` is `undefined` until the first poll completes (shortly after a connection comes up, or the pair moves
  * to the server relay), shown as "Not available yet" rather than a blank space, so it never looks like the panel
- * forgot to load. A `"websocket"`-relayed participant has no round-trip time (the relay protocol has no ping) but gets
- * the relay's own counters instead (`RelayRows`): how much of this browser's microphone audio the capture path
+ * forgot to load. For a `"websocket"`-relayed participant the round trip is this browser's own leg to the relay
+ * server (the relay has no direct path to the peer), and the relay's own counters follow (`RelayRows`): how much of this browser's microphone audio the capture path
  * delivered and how much of it was digital silence, and how this peer's audio is playing back here.
  */
 import React from "react";
@@ -152,12 +152,12 @@ export default function DiagnosticsPanel({ selfName, micOn, cameraOn, participan
                             <p className={`${LABEL} py-0.5`}>Not available yet.</p>
                         ) : (
                             <>
-                                {!p.diagnostics.relay && (
-                                    <div className={ROW}>
-                                        <span className={LABEL}>Round-trip time</span>
-                                        <span>{formatMs(p.diagnostics.roundTripTimeSeconds)}</span>
-                                    </div>
-                                )}
+                                <div className={ROW}>
+                                    <span className={LABEL} title={p.diagnostics.relay ? "From this browser to the relay server and back" : undefined}>
+                                        {p.diagnostics.relay ? "Round-trip to server" : "Round-trip time"}
+                                    </span>
+                                    <span>{formatMs(p.diagnostics.roundTripTimeSeconds)}</span>
+                                </div>
                                 <StreamRow kind="Audio" {...p.diagnostics.audio} />
                                 <StreamRow kind="Video" {...p.diagnostics.video} />
                                 {p.diagnostics.relay && <RelayRows relay={p.diagnostics.relay} />}

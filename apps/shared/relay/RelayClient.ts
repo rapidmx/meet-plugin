@@ -13,6 +13,10 @@
  * older one, which accepts `MAX_MESSAGE_BYTES`). Nothing else may be sent before `ready`.
  * - `{"op":"want","peers":[...]}` REPLACES the set of senders this socket receives from (the server accepts at most
  * `MAX_WANTED_PEERS`). It has to be re-sent after every reconnect, because the server's set dies with the socket.
+ * - `{"op":"ping","t":<this client's clock>}`, every `RELAY_PING_INTERVAL_MS` once ready, is answered with
+ * `{"op":"pong","t":<the same>}`, which times the round trip to the server (`roundTripMs`) - over the same socket as
+ * the media, so it includes whatever the media has queued ahead of it. An older server ignores the ping and the
+ * round trip stays unknown.
  * - A binary message from the client is an opaque payload of at most `maxMessageBytes`. The server forwards it to
  * every socket that wants this sender as `[1 byte N][N bytes UTF-8 sender peer id][payload]`, stamping the sender
  * itself so a peer cannot speak as another.
@@ -48,6 +52,9 @@ export const RELAY_BACKOFF_MAX_MS = 15_000;
 /** How long a socket may take to become `ready` before it is abandoned and retried (a server that accepts the
  * upgrade but never answers the hello would otherwise hang the tier forever). */
 export const RELAY_HANDSHAKE_TIMEOUT_MS = 10_000;
+/** How often a ready socket pings the server to time the round trip - often enough that the diagnostics panel (which
+ * polls every few seconds) always has a recent sample, rarely enough to cost nothing next to the media. */
+export const RELAY_PING_INTERVAL_MS = 2_000;
 
 const SOCKET_OPEN = 1;
 
@@ -56,6 +63,8 @@ export interface RelayClientOptions {
     peerId: string;
     createSocket: (url: string) => RelaySocket;
     random: () => number;
+    /** A monotonic millisecond clock for timing pings. Defaults to `Date.now`. */
+    now?: () => number;
     /** Called with the sender's peer id (as stamped by the server) and the original payload. */
     onMedia: (peerId: string, payload: Uint8Array) => void;
 }
@@ -82,6 +91,8 @@ export class RelayClient {
     private wanted: string[] = [];
     private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     private handshakeTimer: ReturnType<typeof setTimeout> | undefined;
+    private pingTimer: ReturnType<typeof setInterval> | undefined;
+    private lastRoundTripMs: number | undefined;
     private readonly decoder = new TextDecoder();
 
     constructor(private readonly options: RelayClientOptions) {}
@@ -89,6 +100,12 @@ export class RelayClient {
     /** True once the server has answered the hello on the current socket, i.e. media may be sent. */
     get ready(): boolean {
         return this.isReady;
+    }
+
+    /** The most recent ping's round trip to the server, in milliseconds - `undefined` until the first pong on the
+     * current socket (and for good on a server too old to answer pings). */
+    get roundTripMs(): number | undefined {
+        return this.lastRoundTripMs;
     }
 
     /** The largest message `sendMedia()` will send: what the server announced in `ready` (validated and clamped), or
@@ -148,6 +165,7 @@ export class RelayClient {
         clearTimeout(this.reconnectTimer);
         clearTimeout(this.handshakeTimer);
         this.reconnectTimer = this.handshakeTimer = undefined;
+        this.stopPinging();
         this.detach();
     }
 
@@ -200,7 +218,15 @@ export class RelayClient {
         } catch {
             return;
         }
-        if (!message || typeof message !== "object" || (message as { op?: unknown }).op !== "ready" || this.isReady) {
+        if (!message || typeof message !== "object") {
+            return;
+        }
+        const op = (message as { op?: unknown }).op;
+        if (op === "pong") {
+            this.handlePong((message as { t?: unknown }).t);
+            return;
+        }
+        if (op !== "ready" || this.isReady) {
             return;
         }
         this.isReady = true;
@@ -213,6 +239,30 @@ export class RelayClient {
         this.handshakeTimer = undefined;
         // The server's wanted set is per socket, so it starts empty on every (re)connect.
         this.sendText({ op: "want", peers: this.wanted });
+        this.pingTimer = setInterval(() => this.sendText({ op: "ping", t: this.now() }), RELAY_PING_INTERVAL_MS);
+    }
+
+    /** Times the round trip of the ping that `t` came back from. Ignored before ready, for a `t` that isn't a number,
+     * or one from the future (nothing this client sent). */
+    private handlePong(t: unknown): void {
+        if (!this.isReady || typeof t !== "number") {
+            return;
+        }
+        const roundTrip = this.now() - t;
+        if (roundTrip >= 0) {
+            this.lastRoundTripMs = roundTrip;
+        }
+    }
+
+    private now(): number {
+        return (this.options.now ?? Date.now)();
+    }
+
+    /** Stops pinging and forgets the last round trip - it described a socket that is gone. */
+    private stopPinging(): void {
+        clearInterval(this.pingTimer);
+        this.pingTimer = undefined;
+        this.lastRoundTripMs = undefined;
     }
 
     private handleClose(socket: RelaySocket): void {
@@ -220,6 +270,7 @@ export class RelayClient {
             return;
         }
         this.isReady = false;
+        this.stopPinging();
         // The next server might be a different one (a rolling upgrade), so the limit is learned afresh.
         this.messageLimit = MAX_MESSAGE_BYTES;
         clearTimeout(this.handshakeTimer);

@@ -12,6 +12,7 @@ import {
     RELAY_BACKOFF_BASE_MS,
     RELAY_BACKOFF_MAX_MS,
     RELAY_HANDSHAKE_TIMEOUT_MS,
+    RELAY_PING_INTERVAL_MS,
     RelayClient,
 } from "../../../../apps/shared/relay/RelayClient.js";
 import { FakeSocket, relayed, last } from "./relayFakes.js";
@@ -473,5 +474,93 @@ describe("RelayClient.close", () => {
         const { client, socket } = readyClient();
         socket.closeThrows = true;
         expect(() => client.close()).not.toThrow();
+    });
+});
+
+describe("RelayClient ping", () => {
+    const pings = (socket: FakeSocket) => socket.texts().filter((m) => m.op === "ping");
+    const pong = (socket: FakeSocket, t: unknown) => socket.message(JSON.stringify({ op: "pong", t }));
+
+    it("pings every RELAY_PING_INTERVAL_MS once ready, stamped with the clock, and times the pong", () => {
+        const { client, socket } = readyClient();
+        expect(pings(socket)).toEqual([]);
+        expect(client.roundTripMs).toBeUndefined();
+        vi.advanceTimersByTime(RELAY_PING_INTERVAL_MS);
+        const [ping] = pings(socket);
+        expect(ping).toEqual({ op: "ping", t: Date.now() });
+        vi.advanceTimersByTime(42);
+        pong(socket, ping.t);
+        expect(client.roundTripMs).toBe(42);
+        vi.advanceTimersByTime(RELAY_PING_INTERVAL_MS);
+        expect(pings(socket)).toHaveLength(2);
+    });
+
+    it("sends no ping before ready", () => {
+        const { client, sockets } = setup();
+        client.start();
+        sockets[0].open();
+        vi.advanceTimersByTime(RELAY_PING_INTERVAL_MS * 3);
+        expect(pings(sockets[0])).toEqual([]);
+    });
+
+    it("uses the clock it was given", () => {
+        let now = 500;
+        const sockets: FakeSocket[] = [];
+        const client = new RelayClient({
+            url: "wss://example.com/relay",
+            peerId: "me",
+            createSocket: (url) => {
+                const socket = new FakeSocket(url);
+                sockets.push(socket);
+                return socket;
+            },
+            random: () => 0.5,
+            now: () => now,
+            onMedia: () => undefined,
+        });
+        client.start();
+        sockets[0].open();
+        sockets[0].ready();
+        vi.advanceTimersByTime(RELAY_PING_INTERVAL_MS);
+        expect(pings(sockets[0])).toEqual([{ op: "ping", t: 500 }]);
+        now = 517;
+        pong(sockets[0], 500);
+        expect(client.roundTripMs).toBe(17);
+        client.close();
+    });
+
+    it("ignores a pong before ready, without a number t, or from the future", () => {
+        const { client, sockets } = setup();
+        client.start();
+        sockets[0].open();
+        pong(sockets[0], Date.now() - 10);
+        expect(client.roundTripMs).toBeUndefined();
+        sockets[0].ready();
+        pong(sockets[0], "10");
+        pong(sockets[0], Date.now() + 1000);
+        expect(client.roundTripMs).toBeUndefined();
+    });
+
+    it("forgets the round trip and stops pinging when the socket closes, and starts afresh on the next one", () => {
+        const { client, sockets, socket } = readyClient();
+        pong(socket, Date.now());
+        expect(client.roundTripMs).toBe(0);
+        socket.triggerClose();
+        expect(client.roundTripMs).toBeUndefined();
+        vi.advanceTimersByTime(RELAY_BACKOFF_BASE_MS);
+        // The old socket pings no more, even while the new one is still handshaking.
+        expect(pings(socket)).toEqual([]);
+        sockets[1].open();
+        sockets[1].ready();
+        vi.advanceTimersByTime(RELAY_PING_INTERVAL_MS);
+        expect(pings(sockets[1])).toHaveLength(1);
+    });
+
+    it("stops pinging on close()", () => {
+        const { client, socket } = readyClient();
+        pong(socket, Date.now());
+        client.close();
+        expect(client.roundTripMs).toBeUndefined();
+        expect(vi.getTimerCount()).toBe(0);
     });
 });

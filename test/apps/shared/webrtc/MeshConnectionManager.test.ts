@@ -1312,12 +1312,13 @@ describe("MeshConnectionManager - relay diagnostics polling", () => {
 
     it("polls the relay's counters once a pair falls back to it, mapping lost frames and bytes onto the per-kind rows", async () => {
         vi.useFakeTimers();
-        const sample = relaySample();
+        const sample = { ...relaySample(), roundTripMs: 45 };
         const relay = { ...fakeRelay(), diagnostics: vi.fn(() => sample) };
         const { pc, manager } = await setupWithPeer(relay, { diagnosticsPollMs: 3000 });
         setState(pc, "failed");
         expect(relay.diagnostics).toHaveBeenCalledWith("z");
         expect(manager.participants[0]?.diagnostics).toEqual({
+            roundTripTimeSeconds: 0.045,
             audio: { packetsLost: 2, bytesSent: 100, bytesReceived: 200 },
             video: { packetsLost: 3, bytesSent: 300, bytesReceived: 400 },
             relay: sample,
@@ -1328,7 +1329,7 @@ describe("MeshConnectionManager - relay diagnostics polling", () => {
         expect(pc.collectDiagnostics).not.toHaveBeenCalled();
     });
 
-    it("leaves the received side empty while nothing has arrived from the relayed peer yet", async () => {
+    it("leaves the round trip and the received side empty until the relay has measured or received anything", async () => {
         vi.useFakeTimers();
         const sample = relaySample(false);
         const relay = { ...fakeRelay(), diagnostics: vi.fn(() => sample) };

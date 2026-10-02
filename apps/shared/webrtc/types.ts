@@ -197,6 +197,10 @@ export interface RelayReceiveDiagnostics {
 
 /** One sample of the relay's counters for one peer. */
 export interface RelayDiagnostics {
+    /** The latest round trip from this browser to the relay server, in milliseconds - not to the peer: the relay has
+     * no direct path between the two, and each end only knows its own leg. `undefined` before the first pong, or for
+     * a server too old to answer pings. */
+    roundTripMs?: number;
     send: RelaySendDiagnostics;
     /** `undefined` when nothing is being received from this peer. */
     receive?: RelayReceiveDiagnostics;

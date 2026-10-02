@@ -934,11 +934,13 @@ function toParticipant(peer: PeerState): MeshParticipant {
     };
 }
 
-/** A relayed pair's diagnostics: the relay's own counters, with the part that maps onto RTP stats (frames lost, bytes
- * each way) also filled into `audio`/`video`, so the panel's ordinary per-kind rows show it too. */
+/** A relayed pair's diagnostics: the relay's own counters, with the part that maps onto RTP stats (round trip, frames
+ * lost, bytes each way) also filled into the ordinary fields, so the panel's ordinary rows show it too. The round trip
+ * is to the relay server, not to the peer - see `RelayDiagnostics.roundTripMs`. */
 function fromRelayDiagnostics(relay: RelayDiagnostics): ConnectionDiagnostics {
     const { send, receive } = relay;
     return {
+        roundTripTimeSeconds: relay.roundTripMs === undefined ? undefined : relay.roundTripMs / 1000,
         audio: { packetsLost: receive?.audio.framesLost, bytesSent: send.audio.bytesSent, bytesReceived: receive?.audio.bytesReceived },
         video: { packetsLost: receive?.video.framesLost, bytesSent: send.video.bytesSent, bytesReceived: receive?.video.bytesReceived },
         relay,

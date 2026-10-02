@@ -217,6 +217,35 @@ describe("RelayHub", () => {
         });
     });
 
+    describe("ping", () => {
+        it("Echoes a ping's t straight back as a pong, whatever number it is.", () => {
+            const a = connect(hub, "room", "alice");
+            text(a.conn, { op: "ping", t: 1234.5 });
+            text(a.conn, { op: "ping", t: -7 });
+            expect(a.sock.texts.slice(1)).toEqual([
+                { op: "pong", t: 1234.5 },
+                { op: "pong", t: -7 },
+            ]);
+        });
+
+        it("Ignores a ping without a finite number t, and any ping before hello.", () => {
+            const a = connect(hub, "room", "alice");
+            text(a.conn, { op: "ping" });
+            text(a.conn, { op: "ping", t: "12" });
+            text(a.conn, '{"op":"ping","t":1e999}');
+            expect(a.sock.texts).toEqual([{ op: "ready", v: 1, maxMessageBytes: RELAY_MAX_PAYLOAD_BYTES }]);
+            const pending = connect(hub, "room", "bob", null);
+            text(pending.conn, { op: "ping", t: 1 });
+            expect(pending.sock.sent).toEqual([]);
+        });
+
+        it("Does not throw when the pong cannot be sent.", () => {
+            const a = connect(hub, "room", "alice");
+            a.sock.sendResult = "throw";
+            expect(() => text(a.conn, { op: "ping", t: 1 })).not.toThrow();
+        });
+    });
+
     describe("want and forwarding", () => {
         it("Forwards a binary message to every other socket that wants its sender, as [len][sender][payload].", () => {
             const a = connect(hub, "room", "alice", "alice~tab");

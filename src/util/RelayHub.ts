@@ -319,6 +319,16 @@ class Connection implements RelayConnection {
             }
         } else if (message.op === "want") {
             this.want(message);
+        } else if (message.op === "ping") {
+            this.ping(message);
+        }
+    }
+
+    /** Echoes a `ping`'s `t` straight back as a `pong`, so the client can time the round trip on its own clock. A
+     * ping without a finite number `t` is ignored. */
+    private ping(message: any): void {
+        if (typeof message.t === "number" && Number.isFinite(message.t)) {
+            this.sendText(JSON.stringify({ op: "pong", t: message.t }));
         }
     }
 
@@ -400,11 +410,14 @@ class Connection implements RelayConnection {
  * same room replaces the older one, which is closed with 1008 "Replaced.".
  *
  * After that, `{"op":"want","peers":["<peerId>", ...]}` REPLACES the socket's interest set with the valid entries, at
- * most `RELAY_MAX_WANT_PEERS` of them; every other or malformed text message is ignored. Binary messages of 1 to
+ * most `RELAY_MAX_WANT_PEERS` of them, and `{"op":"ping","t":<number>}` is answered at once with
+ * `{"op":"pong","t":<the same number>}` (the client's own clock, never interpreted here - it lets the client time its
+ * round trip to the server, on the same socket and so behind the same queues as its media); every other or malformed
+ * text message, including a ping without a finite numeric `t`, is ignored. Binary messages of 1 to
  * `RelayHubOptions.maxPayloadBytes` bytes (`RELAY_MAX_PAYLOAD_BYTES` unless the route asked for more; opaque to the hub) are forwarded to every other socket of the room whose interest
  * set contains the sender's peer id; binary before `hello`, empty and oversized messages are dropped.
  *
- * Server to client: `{"op":"ready","v":1,"maxMessageBytes":N}` once, then binary messages `[1 byte: UTF-8 length N of the sender's peer
+ * Server to client: `{"op":"ready","v":1,"maxMessageBytes":N}` once, a `pong` for each ping, then binary messages `[1 byte: UTF-8 length N of the sender's peer
  * id][N bytes: the sender's peer id][the original payload]`. The sender is stamped by the hub from the `hello`,
  * never trusted from the payload.
  *
