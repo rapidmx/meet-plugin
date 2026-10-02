@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { decodeFragment, KIND_AUDIO, KIND_VIDEO } from "../../../../apps/shared/relay/frames.js";
+import { decodeFragment, fragmentFrame, KIND_AUDIO, KIND_VIDEO } from "../../../../apps/shared/relay/frames.js";
 import { createRelayTransport, relayUrl } from "../../../../apps/shared/relay/RelayTransport.js";
 import { createFakeRelayEnv, FakeAudioData, fakeChunk, FakeVideoFrame, relayed, track, type FakeRelayEnv, last } from "./relayFakes.js";
 
@@ -543,5 +543,87 @@ describe("two participants through a relay", () => {
 
         a.close();
         b.close();
+    });
+});
+
+describe("diagnostics", () => {
+    /** One complete frame from `peer`, fragmented exactly as a sender would. */
+    function deliver(socket: ReturnType<typeof connect>, peer: string, kind: typeof KIND_AUDIO | typeof KIND_VIDEO, seq: number, bytes = 3) {
+        for (const fragment of fragmentFrame(kind, true, seq, seq * 20, new Uint8Array(bytes).fill(1))) {
+            socket.message(relayed(peer, fragment));
+        }
+    }
+
+    it("has all-zero send counters and no receive side on a browser that cannot relay", () => {
+        const transport = createRelayTransport({ meetingUid: "m1", peerId: "me", url: RELAY_URL });
+        expect(transport.diagnostics("p")).toEqual({
+            send: {
+                audioCapturedMs: 0,
+                audioCaptureWallMs: 0,
+                audioSilentMs: 0,
+                audioEncoderSkippedMs: 0,
+                audio: { framesSent: 0, framesDropped: 0, bytesSent: 0 },
+                video: { framesSent: 0, framesDropped: 0, bytesSent: 0 },
+            },
+        });
+    });
+
+    it("has no receive side for a peer it is not receiving from", () => {
+        const { transport } = setup();
+        expect(transport.diagnostics("nobody").receive).toBeUndefined();
+        transport.close();
+    });
+
+    it("counts each kind's frames, bytes and the frames the sequence numbers say never arrived", () => {
+        const { fake, transport } = setup();
+        transport.receiveFrom("a", () => undefined);
+        const socket = connect(fake);
+        deliver(socket, "a", KIND_AUDIO, 0);
+        deliver(socket, "a", KIND_AUDIO, 1);
+        deliver(socket, "a", KIND_AUDIO, 4); // 2 and 3 lost
+        deliver(socket, "a", KIND_VIDEO, 0);
+        // Only the first fragment of video frame 1 arrives: incomplete, so lost too once frame 2 shows up.
+        socket.message(relayed("a", fragmentFrame(KIND_VIDEO, true, 1, 0, new Uint8Array(20_000))[0]));
+        deliver(socket, "a", KIND_VIDEO, 2);
+        // Garbage is not counted at all.
+        socket.message(relayed("a", Uint8Array.of(9)));
+        const { receive } = transport.diagnostics("a");
+        expect(receive?.audio).toMatchObject({ framesReceived: 3, framesLost: 2, bytesReceived: 3 * 13 });
+        expect(receive?.video).toEqual({ framesReceived: 2, framesLost: 1, bytesReceived: 13 + 12_010 + 13 });
+        transport.close();
+    });
+
+    it("takes a huge jump in sequence numbers for the sender restarting, not for that many lost frames", () => {
+        const { fake, transport } = setup();
+        transport.receiveFrom("a", () => undefined);
+        const socket = connect(fake);
+        deliver(socket, "a", KIND_AUDIO, 0);
+        deliver(socket, "a", KIND_AUDIO, 1000);
+        expect(transport.diagnostics("a").receive?.audio.framesLost).toBe(0);
+        transport.close();
+    });
+
+    it("includes the playback counters of the peer's audio", () => {
+        const { fake, transport } = setup();
+        transport.receiveFrom("a", () => undefined);
+        const socket = connect(fake);
+        deliver(socket, "a", KIND_AUDIO, 0);
+        last(fake.audioDecoders)?.emit(new FakeAudioData(960));
+        expect(transport.diagnostics("a").receive?.audio.playedMs).toBeCloseTo(20, 6);
+        transport.close();
+    });
+
+    it("reports what this browser has sent, shared by every peer", () => {
+        const { fake, transport } = setup();
+        transport.receiveFrom("a", () => undefined);
+        connect(fake);
+        transport.setLocalTrack("audio", track("audio"));
+        transport.setSending(true);
+        const capture = fake.audioContexts.find((ctx) => ctx.processors.length > 0)!;
+        capture.processors[0].run(new Float32Array(960).fill(0.1));
+        last(fake.audioEncoders)?.emit(fakeChunk([1, 2, 3], "key", 0));
+        expect(transport.diagnostics("a").send.audio).toEqual({ framesSent: 1, framesDropped: 0, bytesSent: 13 });
+        expect(transport.diagnostics("someone-else").send.audio.framesSent).toBe(1);
+        transport.close();
     });
 });

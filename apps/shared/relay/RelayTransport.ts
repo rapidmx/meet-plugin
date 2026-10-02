@@ -17,6 +17,7 @@
  * negotiation, because both ends are this same code.
  */
 import { apiOrigin } from "@rapidmx/web-client/lib/util/api.js";
+import type { RelayDiagnostics } from "../webrtc/types.js";
 import { PLAYBACK_SAMPLE_RATE } from "./AudioPlayer.js";
 import { resumeAudioContext } from "./audioResume.js";
 import { RelayClient } from "./RelayClient.js";
@@ -39,6 +40,9 @@ export interface RelayTransport {
     /** Same semantics as `MeshConnectionManager.setLocalTrack`: null = send nothing for that kind. Safe to call
      * before or after `setSending`. */
     setLocalTrack(kind: "audio" | "video", track: MediaStreamTrack | null): void;
+    /** The sending counters (shared by every peer) plus what has been received from `peerId`, for the diagnostics
+     * panel - cumulative, so a caller wanting a rate keeps the previous sample. */
+    diagnostics(peerId: string): RelayDiagnostics;
     /** Closes the socket, all coders, streams and timers. Idempotent. */
     close(): void;
 }
@@ -68,6 +72,16 @@ const UNSUPPORTED_TRANSPORT: RelayTransport = {
     stopReceivingFrom: () => undefined,
     setSending: () => undefined,
     setLocalTrack: () => undefined,
+    diagnostics: () => ({
+        send: {
+            audioCapturedMs: 0,
+            audioCaptureWallMs: 0,
+            audioSilentMs: 0,
+            audioEncoderSkippedMs: 0,
+            audio: { framesSent: 0, framesDropped: 0, bytesSent: 0 },
+            video: { framesSent: 0, framesDropped: 0, bytesSent: 0 },
+        },
+    }),
     close: () => undefined,
 };
 
@@ -138,6 +152,10 @@ class WebSocketRelayTransport implements RelayTransport {
         if (!this.closed) {
             this.sender.setTrack(kind, track);
         }
+    }
+
+    diagnostics(peerId: string): RelayDiagnostics {
+        return { send: this.sender.diagnostics(), receive: this.receivers.get(peerId)?.diagnostics() };
     }
 
     close(): void {

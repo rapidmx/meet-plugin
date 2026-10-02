@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
+import type { RelaySendDiagnostics, RelaySendStats } from "../webrtc/types.js";
 import { AudioSender } from "./AudioSender.js";
 import { DEFAULT_MESSAGE_BYTES, fragmentFrame, type FrameKind, KIND_AUDIO, KIND_VIDEO } from "./frames.js";
 import type { RelayEnv } from "./relayEnv.js";
@@ -15,6 +16,11 @@ const SEQ_MODULUS = 0x10000;
  * otherwise treat the restarted stream as older than what it has already seen. */
 export class FramePublisher {
     private readonly seqs: Record<FrameKind, number> = { [KIND_AUDIO]: 0, [KIND_VIDEO]: 0 };
+    /** What happened to each kind's frames - for the diagnostics panel. */
+    readonly stats: Record<FrameKind, RelaySendStats> = {
+        [KIND_AUDIO]: { framesSent: 0, framesDropped: 0, bytesSent: 0 },
+        [KIND_VIDEO]: { framesSent: 0, framesDropped: 0, bytesSent: 0 },
+    };
 
     /** `send` returns whether one message was accepted by the socket. */
     /** `maxMessageBytes` is the largest message the socket may send right now (it changes when the server's `ready`
@@ -29,15 +35,20 @@ export class FramePublisher {
     publish: PublishFrame = (kind, keyFrame, data, timestampMs) => {
         const seq = this.seqs[kind];
         this.seqs[kind] = (seq + 1) % SEQ_MODULUS;
+        const stats = this.stats[kind];
         const fragments = fragmentFrame(kind, keyFrame, seq, timestampMs, data, this.maxMessageBytes());
         if (fragments.length === 0) {
+            stats.framesDropped += 1;
             return false;
         }
         for (const fragment of fragments) {
             if (!this.send(fragment)) {
+                stats.framesDropped += 1;
                 return false;
             }
+            stats.bytesSent += fragment.length;
         }
+        stats.framesSent += 1;
         return true;
     };
 }
@@ -52,13 +63,24 @@ export interface RelaySenderOptions {
 
 /** The publishing half of the relay: the two capture paths plus the frame numbering they share. */
 export class RelaySender {
+    private readonly publisher: FramePublisher;
     private readonly audio: AudioSender;
     private readonly video: VideoSender;
 
     constructor(options: RelaySenderOptions) {
-        const deps = { env: options.env, publish: new FramePublisher(options.send, options.maxMessageBytes).publish, canSend: options.canSend };
+        this.publisher = new FramePublisher(options.send, options.maxMessageBytes);
+        const deps = { env: options.env, publish: this.publisher.publish, canSend: options.canSend };
         this.audio = new AudioSender(deps);
         this.video = new VideoSender(deps);
+    }
+
+    /** A snapshot of the sending counters - see `RelaySendDiagnostics`. */
+    diagnostics(): RelaySendDiagnostics {
+        return {
+            ...this.audio.captureStats(),
+            audio: { ...this.publisher.stats[KIND_AUDIO] },
+            video: { ...this.publisher.stats[KIND_VIDEO] },
+        };
     }
 
     /** Starts or stops encoding whatever tracks are set. Stopping releases the encoders and audio nodes. */

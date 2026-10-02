@@ -134,6 +134,7 @@
  * not something a meeting agrees on together.
  */
 import {
+    type ConnectionDiagnostics,
     type MediaTransport,
     type MeshEvent,
     type MeshParticipant,
@@ -141,6 +142,7 @@ import {
     type RTCPeerConnectionFactory,
     type RTCPeerConnectionLike,
     type RTCRtpSenderLike,
+    type RelayDiagnostics,
     type RelayTransportLike,
     type SignalMessage,
     type SignalingChannel,
@@ -184,8 +186,8 @@ interface PeerState extends MeshParticipant {
     connectTimer: ReturnType<typeof setTimeout> | undefined;
     /** Gives up on WebRTC when the connection has stayed `disconnected` for `disconnectedGraceMs`. */
     disconnectTimer: ReturnType<typeof setTimeout> | undefined;
-    /** Refreshes `diagnostics` (`MeshParticipant`) while this pair is on a real `RTCPeerConnection` - started once
-     * it first connects, stopped the moment it leaves WebRTC for the relay or the pair ends. */
+    /** Refreshes `diagnostics` (`MeshParticipant`) - from the `RTCPeerConnection` once it first connects, then (after
+     * a restart in `fallBack()`) from the relay's counters once the pair moves there; stopped when the pair ends. */
     diagnosticsTimer: ReturnType<typeof setInterval> | undefined;
 }
 
@@ -663,7 +665,11 @@ export class MeshConnectionManager {
     private async pollDiagnostics(peer: PeerState): Promise<void> {
         let diagnostics: MeshParticipant["diagnostics"];
         try {
-            diagnostics = await peer.pc.collectDiagnostics();
+            const relay = this.options.relay;
+            diagnostics =
+                peer.transport === "websocket" && relay?.diagnostics
+                    ? fromRelayDiagnostics(relay.diagnostics(peer.uid))
+                    : await peer.pc.collectDiagnostics();
         } catch {
             // Leaves whatever was last polled in place rather than blanking a momentary failure.
             return;
@@ -744,6 +750,9 @@ export class MeshConnectionManager {
         });
         this.syncRelaySending();
         this.emit({ type: "participant-updated", participant: toParticipant(peer) });
+        if (relay.diagnostics) {
+            this.startDiagnosticsPolling(peer);
+        }
         if (notify) {
             this.send({ kind: "relay-fallback", to: peer.uid });
         }
@@ -922,6 +931,17 @@ function toParticipant(peer: PeerState): MeshParticipant {
         handRaised: peer.handRaised,
         transport: peer.transport,
         diagnostics: peer.diagnostics,
+    };
+}
+
+/** A relayed pair's diagnostics: the relay's own counters, with the part that maps onto RTP stats (frames lost, bytes
+ * each way) also filled into `audio`/`video`, so the panel's ordinary per-kind rows show it too. */
+function fromRelayDiagnostics(relay: RelayDiagnostics): ConnectionDiagnostics {
+    const { send, receive } = relay;
+    return {
+        audio: { packetsLost: receive?.audio.framesLost, bytesSent: send.audio.bytesSent, bytesReceived: receive?.audio.bytesReceived },
+        video: { packetsLost: receive?.video.framesLost, bytesSent: send.video.bytesSent, bytesReceived: receive?.video.bytesReceived },
+        relay,
     };
 }
 

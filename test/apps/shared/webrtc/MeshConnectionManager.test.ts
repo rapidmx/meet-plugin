@@ -11,7 +11,14 @@ import {
     type MeshConnectionManagerOptions,
     isOfferer,
 } from "../../../../apps/shared/webrtc/MeshConnectionManager.js";
-import { type MeshEvent, REACTION_EMOJIS, type RelayTransportLike, type SignalMessage, type SignalingChannel } from "../../../../apps/shared/webrtc/types.js";
+import {
+    type MeshEvent,
+    REACTION_EMOJIS,
+    type RelayDiagnostics,
+    type RelayTransportLike,
+    type SignalMessage,
+    type SignalingChannel,
+} from "../../../../apps/shared/webrtc/types.js";
 import { type FakeRTCPeerConnection, fakeMediaStream, fakeRTCPeerConnection, fakeTrack } from "../../testUtils.js";
 
 /** A directly-controllable fake channel for single-manager tests: `emit()` injects an incoming message, `sent`
@@ -1276,6 +1283,72 @@ describe("MeshConnectionManager - diagnostics polling", () => {
         setState(pc, "failed");
         await vi.advanceTimersByTimeAsync(200);
         expect(manager.participants[0]?.diagnostics).toBeUndefined();
+    });
+});
+
+describe("MeshConnectionManager - relay diagnostics polling", () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    function relaySample(receive = true): RelayDiagnostics {
+        return {
+            send: {
+                audioCapturedMs: 1000,
+                audioCaptureWallMs: 1000,
+                audioSilentMs: 400,
+                audioEncoderSkippedMs: 0,
+                audio: { framesSent: 50, framesDropped: 0, bytesSent: 100 },
+                video: { framesSent: 15, framesDropped: 1, bytesSent: 300 },
+            },
+            receive: receive
+                ? {
+                      audio: { framesReceived: 48, framesLost: 2, bytesReceived: 200, playedMs: 960, silentMs: 0, gaps: 1, gapMs: 40, droppedLate: 0, bufferedMs: 80 },
+                      video: { framesReceived: 14, framesLost: 3, bytesReceived: 400 },
+                  }
+                : undefined,
+        };
+    }
+
+    it("polls the relay's counters once a pair falls back to it, mapping lost frames and bytes onto the per-kind rows", async () => {
+        vi.useFakeTimers();
+        const sample = relaySample();
+        const relay = { ...fakeRelay(), diagnostics: vi.fn(() => sample) };
+        const { pc, manager } = await setupWithPeer(relay, { diagnosticsPollMs: 3000 });
+        setState(pc, "failed");
+        expect(relay.diagnostics).toHaveBeenCalledWith("z");
+        expect(manager.participants[0]?.diagnostics).toEqual({
+            audio: { packetsLost: 2, bytesSent: 100, bytesReceived: 200 },
+            video: { packetsLost: 3, bytesSent: 300, bytesReceived: 400 },
+            relay: sample,
+        });
+
+        await vi.advanceTimersByTimeAsync(3000);
+        expect(relay.diagnostics).toHaveBeenCalledTimes(2);
+        expect(pc.collectDiagnostics).not.toHaveBeenCalled();
+    });
+
+    it("leaves the received side empty while nothing has arrived from the relayed peer yet", async () => {
+        vi.useFakeTimers();
+        const sample = relaySample(false);
+        const relay = { ...fakeRelay(), diagnostics: vi.fn(() => sample) };
+        const { pc, manager } = await setupWithPeer(relay);
+        setState(pc, "failed");
+        expect(manager.participants[0]?.diagnostics).toEqual({
+            audio: { packetsLost: undefined, bytesSent: 100, bytesReceived: undefined },
+            video: { packetsLost: undefined, bytesSent: 300, bytesReceived: undefined },
+            relay: sample,
+        });
+    });
+
+    it("stops polling the relay once the relayed pair leaves", async () => {
+        vi.useFakeTimers();
+        const relay = { ...fakeRelay(), diagnostics: vi.fn(() => relaySample()) };
+        const { pc, channel } = await setupWithPeer(relay);
+        setState(pc, "failed");
+        expect(vi.getTimerCount()).toBe(1);
+        channel.emit(signal("bye", "z"));
+        expect(vi.getTimerCount()).toBe(0);
     });
 });
 

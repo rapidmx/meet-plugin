@@ -192,6 +192,8 @@ export class FakeAudioData implements AudioDataLike {
     closed = false;
     copyCalls: { planeIndex: number; format?: string }[] = [];
     copyThrows = false;
+    /** The value every sample decodes to - 0 makes a digitally silent block. */
+    fill = 0.25;
 
     constructor(
         readonly numberOfFrames = 960,
@@ -204,7 +206,7 @@ export class FakeAudioData implements AudioDataLike {
             throw new Error("copy failed");
         }
         this.copyCalls.push(options);
-        destination.fill(0.25);
+        destination.fill(this.fill);
     }
 
     close(): void {

@@ -92,6 +92,26 @@ describe("FramePublisher", () => {
         publisher.publish(KIND_VIDEO, true, Uint8Array.of(1), 0);
         expect(decodeFragment(sent[0])?.seq).toBe(1);
     });
+
+    it("counts each kind's sent and dropped frames, and the bytes of every fragment that went out", () => {
+        let accept = true;
+        const publisher = new FramePublisher(() => accept);
+        publisher.publish(KIND_AUDIO, true, new Uint8Array(100), 0);
+        publisher.publish(KIND_VIDEO, true, new Uint8Array(20_000), 0);
+        publisher.publish(KIND_VIDEO, true, new Uint8Array(MAX_FRAME_BYTES + 1), 0);
+        accept = false;
+        publisher.publish(KIND_AUDIO, true, new Uint8Array(100), 0);
+        expect(publisher.stats[KIND_AUDIO]).toEqual({ framesSent: 1, framesDropped: 1, bytesSent: 110 });
+        // Two fragments (12000 + 8000 bytes), each with its own 10-byte header.
+        expect(publisher.stats[KIND_VIDEO]).toEqual({ framesSent: 1, framesDropped: 1, bytesSent: 20_020 });
+    });
+
+    it("counts the fragments that did go out of a frame dropped partway", () => {
+        let accepted = 1;
+        const publisher = new FramePublisher(() => accepted-- > 0);
+        publisher.publish(KIND_VIDEO, false, new Uint8Array(30_000), 0);
+        expect(publisher.stats[KIND_VIDEO]).toEqual({ framesSent: 0, framesDropped: 1, bytesSent: 12_010 });
+    });
 });
 
 describe("RelaySender", () => {
@@ -155,5 +175,28 @@ describe("RelaySender", () => {
         state.canSend = false;
         fake.tick();
         expect(fake.videoFrames).toHaveLength(1);
+    });
+
+    it("reports the capture counters and each kind's send counters together", () => {
+        const { fake, sender } = setup();
+        expect(sender.diagnostics()).toEqual({
+            audioCapturedMs: 0,
+            audioCaptureWallMs: 0,
+            audioSilentMs: 0,
+            audioEncoderSkippedMs: 0,
+            audio: { framesSent: 0, framesDropped: 0, bytesSent: 0 },
+            video: { framesSent: 0, framesDropped: 0, bytesSent: 0 },
+        });
+        sender.setTrack("audio", track("audio"));
+        sender.setActive(true);
+        fake.audioContexts[0].processors[0].run(new Float32Array(4800));
+        fake.audioEncoders[0].emit(fakeChunk([1, 2, 3], "key", 0));
+        const diagnostics = sender.diagnostics();
+        expect(diagnostics.audioCapturedMs).toBeCloseTo(100, 6);
+        expect(diagnostics.audioSilentMs).toBeCloseTo(100, 6);
+        expect(diagnostics.audio).toEqual({ framesSent: 1, framesDropped: 0, bytesSent: 13 });
+        // A snapshot: later sends don't change what was already returned.
+        fake.audioEncoders[0].emit(fakeChunk([1], "key", 20_000));
+        expect(diagnostics.audio.framesSent).toBe(1);
     });
 });

@@ -10,12 +10,14 @@
  * (`MeshParticipant.diagnostics`, refreshed every few seconds by `MeshConnectionManager`'s own poller - see its doc
  * comment). Purely informational and entirely local: nothing here is sent anywhere.
  *
- * `diagnostics` is `undefined` until the first poll completes (shortly after a connection comes up) and always
- * absent for a `"websocket"`-relayed participant (there is no `RTCPeerConnection` to poll there) - both cases show
- * "Not available" rather than a blank space, so it never looks like the panel forgot to load.
+ * `diagnostics` is `undefined` until the first poll completes (shortly after a connection comes up, or the pair moves
+ * to the server relay), shown as "Not available yet" rather than a blank space, so it never looks like the panel
+ * forgot to load. A `"websocket"`-relayed participant has no round-trip time (the relay protocol has no ping) but gets
+ * the relay's own counters instead (`RelayRows`): how much of this browser's microphone audio the capture path
+ * delivered and how much of it was digital silence, and how this peer's audio is playing back here.
  */
 import React from "react";
-import type { MeshParticipant } from "../shared/webrtc/types.js";
+import type { MeshParticipant, RelayDiagnostics } from "../shared/webrtc/types.js";
 import { TRANSPORT_BADGES } from "./_ParticipantTile.js";
 
 export interface DiagnosticsPanelProps {
@@ -64,6 +66,59 @@ function StreamRow({ kind, packetsLost, jitter, bytesSent, bytesReceived }: { ki
     );
 }
 
+/** `part` as a whole-number percentage of `whole`, or "—" when there is no whole yet. */
+function percent(part: number, whole: number): string {
+    return whole > 0 ? `${Math.round((part / whole) * 100)}%` : "—";
+}
+
+function plural(count: number, noun: string): string {
+    return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+/** The server relay's own counters (see `RelayDiagnostics`). The capture row is this browser's own microphone, the
+ * playback row this peer's audio as heard here - so a mostly silent capture points at the sender, silence arriving in
+ * playback with no capture problem points at the other end's capture, and gaps point at the network. */
+function RelayRows({ relay }: { relay: RelayDiagnostics }) {
+    const { send, receive } = relay;
+    const notSent = send.audio.framesDropped + send.video.framesDropped;
+    return (
+        <>
+            {send.audioCaptureWallMs > 0 && (
+                <div className={ROW}>
+                    <span className={LABEL}>Your mic capture</span>
+                    <span>
+                        {percent(send.audioCapturedMs, send.audioCaptureWallMs)} of real time · {percent(send.audioSilentMs, send.audioCapturedMs)} silent
+                        {send.audioEncoderSkippedMs > 0 && ` · ${formatMs(send.audioEncoderSkippedMs / 1000)} skipped`}
+                    </span>
+                </div>
+            )}
+            {notSent > 0 && (
+                <div className={ROW}>
+                    <span className={LABEL}>Not sent</span>
+                    <span>
+                        {send.audio.framesDropped} audio · {send.video.framesDropped} video frames
+                    </span>
+                </div>
+            )}
+            {receive && (
+                <div className={ROW}>
+                    <span className={LABEL}>Playback</span>
+                    <span>
+                        {`${percent(receive.audio.silentMs, receive.audio.playedMs)} silent · ${plural(receive.audio.gaps, "gap")} ` +
+                            `(${formatMs(receive.audio.gapMs / 1000)}) · ${formatMs(receive.audio.bufferedMs / 1000)} buffered`}
+                    </span>
+                </div>
+            )}
+            {receive && receive.audio.droppedLate > 0 && (
+                <div className={ROW}>
+                    <span className={LABEL}>Dropped late</span>
+                    <span>{plural(receive.audio.droppedLate, "packet")}</span>
+                </div>
+            )}
+        </>
+    );
+}
+
 export default function DiagnosticsPanel({ selfName, micOn, cameraOn, participants }: DiagnosticsPanelProps) {
     return (
         <div className="text-sm">
@@ -93,16 +148,19 @@ export default function DiagnosticsPanel({ selfName, micOn, cameraOn, participan
                             <span className={LABEL}>Connection</span>
                             <span title={badge?.title}>{badge?.label ?? (p.transport === "connecting" ? "Connecting…" : "Direct")}</span>
                         </div>
-                        {p.transport === "websocket" || !p.diagnostics ? (
-                            <p className={`${LABEL} py-0.5`}>Not available{p.transport !== "websocket" && " yet"}.</p>
+                        {!p.diagnostics ? (
+                            <p className={`${LABEL} py-0.5`}>Not available yet.</p>
                         ) : (
                             <>
-                                <div className={ROW}>
-                                    <span className={LABEL}>Round-trip time</span>
-                                    <span>{formatMs(p.diagnostics.roundTripTimeSeconds)}</span>
-                                </div>
+                                {!p.diagnostics.relay && (
+                                    <div className={ROW}>
+                                        <span className={LABEL}>Round-trip time</span>
+                                        <span>{formatMs(p.diagnostics.roundTripTimeSeconds)}</span>
+                                    </div>
+                                )}
                                 <StreamRow kind="Audio" {...p.diagnostics.audio} />
                                 <StreamRow kind="Video" {...p.diagnostics.video} />
+                                {p.diagnostics.relay && <RelayRows relay={p.diagnostics.relay} />}
                             </>
                         )}
                     </div>

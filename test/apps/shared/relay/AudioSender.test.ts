@@ -266,3 +266,51 @@ describe("AudioSender encoding", () => {
         expect(published).toHaveLength(1);
     });
 });
+
+describe("AudioSender capture diagnostics", () => {
+    it("measures captured audio against the wall-clock time it was attached for, across capture sessions", () => {
+        const { fake, sender } = setup();
+        expect(sender.captureStats()).toEqual({ audioCapturedMs: 0, audioCaptureWallMs: 0, audioSilentMs: 0, audioEncoderSkippedMs: 0 });
+        sender.setTrack(track("audio"));
+        sender.setActive(true);
+        fake.clock.now += 100;
+        fake.audioContexts[0].processors[0].run(new Float32Array(AUDIO_SAMPLE_RATE / 20).fill(0.1));
+        // Still attached: the wall clock runs up to now.
+        expect(sender.captureStats().audioCaptureWallMs).toBe(100);
+        sender.setActive(false);
+        fake.clock.now += 1000;
+        // Detached time is not counted.
+        expect(sender.captureStats().audioCaptureWallMs).toBe(100);
+        sender.setActive(true);
+        fake.clock.now += 50;
+        const stats = sender.captureStats();
+        expect(stats.audioCaptureWallMs).toBe(150);
+        expect(stats.audioCapturedMs).toBeCloseTo(50, 6);
+    });
+
+    it("counts digital silence in what the capture path delivered, whether or not it could be sent", () => {
+        const { fake, sender, state } = setup(false);
+        sender.setTrack(track("audio"));
+        sender.setActive(true);
+        const processor = fake.audioContexts[0].processors[0];
+        processor.run(new Float32Array(AUDIO_PROCESS_FRAMES).fill(0.1));
+        processor.run(new Float32Array(AUDIO_PROCESS_FRAMES));
+        state.canSend = true;
+        processor.run(new Float32Array(AUDIO_PROCESS_FRAMES).fill(0.1));
+        const stats = sender.captureStats();
+        expect(stats.audioCapturedMs).toBeCloseTo((3 * AUDIO_PROCESS_FRAMES * 1000) / AUDIO_SAMPLE_RATE, 6);
+        expect(stats.audioSilentMs).toBeCloseTo((AUDIO_PROCESS_FRAMES * 1000) / AUDIO_SAMPLE_RATE, 6);
+        expect(stats.audioEncoderSkippedMs).toBe(0);
+    });
+
+    it("counts the audio skipped while the encoder is backed up or cannot be made", () => {
+        const { fake, sender, processor, encoder } = running();
+        encoder.queueSize = AUDIO_MAX_ENCODE_QUEUE + 1;
+        processor.run(new Float32Array(AUDIO_PROCESS_FRAMES).fill(0.1));
+        encoder.queueSize = 0;
+        encoder.fail();
+        fake.behavior.audioEncoder.createThrows = true;
+        processor.run(new Float32Array(AUDIO_PROCESS_FRAMES).fill(0.1));
+        expect(sender.captureStats().audioEncoderSkippedMs).toBeCloseTo((2 * AUDIO_PROCESS_FRAMES * 1000) / AUDIO_SAMPLE_RATE, 6);
+    });
+});

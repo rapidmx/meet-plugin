@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
+import type { RelaySendDiagnostics } from "../webrtc/types.js";
 import { resumeAudioContext } from "./audioResume.js";
 import { KIND_AUDIO } from "./frames.js";
 import type {
@@ -14,6 +15,7 @@ import type {
     ScriptProcessorLike,
 } from "./relayEnv.js";
 import { safeClose, type SenderDeps } from "./senderCommon.js";
+import { SilenceMeter } from "./SilenceMeter.js";
 
 export const AUDIO_SAMPLE_RATE = 48_000;
 /** Frames per `ScriptProcessorNode` callback: about 43 ms, a compromise between latency and how often the main
@@ -53,7 +55,23 @@ export class AudioSender {
     private baseMs = 0;
     private samples = 0;
 
+    /** Diagnostics, cumulative across capture sessions: what the capture path delivered (and how much of it was
+     * silent), the wall-clock time it was attached for, and what the encoder had to skip. */
+    private readonly captured = new SilenceMeter();
+    private wallMs = 0;
+    private encoderSkippedSamples = 0;
+
     constructor(private readonly deps: SenderDeps) {}
+
+    /** The capture half of `RelaySendDiagnostics`. */
+    captureStats(): Pick<RelaySendDiagnostics, "audioCapturedMs" | "audioCaptureWallMs" | "audioSilentMs" | "audioEncoderSkippedMs"> {
+        return {
+            audioCapturedMs: this.captured.totalMs,
+            audioCaptureWallMs: this.wallMs + (this.attachedTrack ? this.deps.env.now() - this.baseMs : 0),
+            audioSilentMs: this.captured.silentMs,
+            audioEncoderSkippedMs: (this.encoderSkippedSamples * 1000) / AUDIO_SAMPLE_RATE,
+        };
+    }
 
     setActive(active: boolean): void {
         this.active = active;
@@ -105,6 +123,9 @@ export class AudioSender {
     }
 
     private detach(): void {
+        if (this.attachedTrack) {
+            this.wallMs += this.deps.env.now() - this.baseMs;
+        }
         this.attachedTrack = null;
         this.stopResume?.();
         this.stopResume = undefined;
@@ -132,11 +153,13 @@ export class AudioSender {
         const samples = input.length;
         const timestampUs = Math.round((this.samples * 1_000_000) / AUDIO_SAMPLE_RATE);
         this.samples += samples;
+        this.captured.feed(input, AUDIO_SAMPLE_RATE);
         if (!this.deps.canSend()) {
             return;
         }
         const encoder = this.encoder ?? this.createEncoder();
         if (!encoder || encoder.encodeQueueSize > AUDIO_MAX_ENCODE_QUEUE) {
+            this.encoderSkippedSamples += samples;
             return;
         }
         let audio: AudioDataLike | undefined;

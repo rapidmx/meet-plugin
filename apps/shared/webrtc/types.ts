@@ -139,6 +139,67 @@ export interface ConnectionDiagnostics {
     roundTripTimeSeconds?: number;
     audio: RtpStreamDiagnostics;
     video: RtpStreamDiagnostics;
+    /** The WebSocket relay's own counters, present only for a `"websocket"` pair - `audio`/`video` then carry the
+     * subset of them that maps onto RTP stats (frames lost, bytes each way). */
+    relay?: RelayDiagnostics;
+}
+
+/** What the relay's sending half did with one kind of frame, cumulative since the relay transport was created. */
+export interface RelaySendStats {
+    framesSent: number;
+    /** Frames encoded but not sent: the socket was not ready, backed up, or refused a fragment. */
+    framesDropped: number;
+    bytesSent: number;
+}
+
+/** What the relay's sending half has done, cumulative since the relay transport was created. It is per browser, not
+ * per peer: every relayed peer receives the same stream. */
+export interface RelaySendDiagnostics {
+    /** Milliseconds of microphone audio the capture path delivered, against `audioCaptureWallMs` - the wall-clock time
+     * it was capturing for. Well short of it means capture is losing whole blocks. */
+    audioCapturedMs: number;
+    audioCaptureWallMs: number;
+    /** How much of `audioCapturedMs` was digital silence (see `SilenceMeter`) - a live microphone always has some
+     * noise, so a large share means the capture path is handing the encoder zero-filled blocks. */
+    audioSilentMs: number;
+    /** Milliseconds of captured audio not encoded because the encoder was too far behind. */
+    audioEncoderSkippedMs: number;
+    audio: RelaySendStats;
+    video: RelaySendStats;
+}
+
+/** What the relay's receiving half got of one kind of frame from one peer, cumulative. */
+export interface RelayReceiveStats {
+    framesReceived: number;
+    /** Frames the sequence numbers say never arrived complete - dropped by the sender, the server or in transit. */
+    framesLost: number;
+    bytesReceived: number;
+}
+
+/** What the relay's receiving half has done with one peer's media, cumulative since it started receiving from them. */
+export interface RelayReceiveDiagnostics {
+    audio: RelayReceiveStats & {
+        /** Milliseconds of decoded audio scheduled for playback. */
+        playedMs: number;
+        /** How much of `playedMs` was digital silence - silence that arrived inside the packets, i.e. the sender sent
+         * it, as opposed to `gapMs`. */
+        silentMs: number;
+        /** Times playback ran dry and restarted, and the total silence that inserted. */
+        gaps: number;
+        gapMs: number;
+        /** Packets dropped on arrival because the decoder was backed up or playback was already too far ahead. */
+        droppedLate: number;
+        /** How far ahead of the clock audio is scheduled right now - the receive buffer's current depth. */
+        bufferedMs: number;
+    };
+    video: RelayReceiveStats;
+}
+
+/** One sample of the relay's counters for one peer. */
+export interface RelayDiagnostics {
+    send: RelaySendDiagnostics;
+    /** `undefined` when nothing is being received from this peer. */
+    receive?: RelayReceiveDiagnostics;
 }
 
 /** The subset of `RTCRtpSender` `MeshConnectionManager.setLocalTrack()` uses. Every connection carries one audio and
@@ -206,6 +267,9 @@ export interface RelayTransportLike {
     setSending(active: boolean): void;
     /** Same as `MeshConnectionManager.setLocalTrack()` - `null` sends nothing for that kind. */
     setLocalTrack(kind: "audio" | "video", track: MediaStreamTrack | null): void;
+    /** The relay's counters as they stand for `peerId`, for the diagnostics panel. Optional so a test's fake relay
+     * needn't provide it; the mesh then shows nothing for a relayed pair. */
+    diagnostics?(peerId: string): RelayDiagnostics;
     close(): void;
 }
 
@@ -222,8 +286,9 @@ export interface MeshParticipant extends ParticipantState {
     /** How this participant's media currently reaches the local one - see `MediaTransport`. */
     transport: MediaTransport;
     /** This connection's most recently polled quality stats, for the diagnostics panel - `undefined` until the
-     * first poll completes (shortly after `transport` first leaves `"connecting"`), and never present at all for
-     * a `"websocket"`-relayed participant (there is no `RTCPeerConnection` to poll). */
+     * first poll completes (shortly after `transport` first leaves `"connecting"`, or the pair moves to the relay).
+     * For a `"websocket"`-relayed participant they come from the relay's own counters (`relay`) rather than an
+     * `RTCPeerConnection`. */
     diagnostics?: ConnectionDiagnostics;
 }
 

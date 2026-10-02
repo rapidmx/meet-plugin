@@ -2,10 +2,37 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
+import type { RelayReceiveDiagnostics, RelayReceiveStats } from "../webrtc/types.js";
 import { AudioPlayer } from "./AudioPlayer.js";
-import { decodeFragment, FrameReassembler, KIND_AUDIO } from "./frames.js";
+import { decodeFragment, type Frame, FrameReassembler, KIND_AUDIO, seqIsNewer } from "./frames.js";
 import type { AudioContextLike, RelayEnv } from "./relayEnv.js";
 import { VideoPlayer } from "./VideoPlayer.js";
+
+const SEQ_MODULUS = 0x10000;
+/** A jump in sequence numbers bigger than this is taken for the sender restarting its counter, not for that many
+ * lost frames. Ten seconds of 20 ms audio packets - far more than any real outage the stream would survive. */
+const MAX_COUNTED_SEQ_GAP = 500;
+
+/** Counts one kind's frames as they complete, and the ones the sequence numbers say never did. */
+class ReceiveCounter {
+    readonly stats: RelayReceiveStats = { framesReceived: 0, framesLost: 0, bytesReceived: 0 };
+    private lastSeq: number | undefined;
+
+    fragment(bytes: number): void {
+        this.stats.bytesReceived += bytes;
+    }
+
+    frame(frame: Frame): void {
+        this.stats.framesReceived += 1;
+        if (this.lastSeq !== undefined && seqIsNewer(frame.seq, this.lastSeq)) {
+            const missing = ((frame.seq - this.lastSeq + SEQ_MODULUS) % SEQ_MODULUS) - 1;
+            if (missing <= MAX_COUNTED_SEQ_GAP) {
+                this.stats.framesLost += missing;
+            }
+        }
+        this.lastSeq = frame.seq;
+    }
+}
 
 /** The canvas is sized to the first decoded picture; until then it is this size. */
 const INITIAL_CANVAS_WIDTH = 320;
@@ -25,6 +52,8 @@ export class RelayReceiver {
     readonly stream: MediaStream;
     private readonly audioFrames = new FrameReassembler();
     private readonly videoFrames = new FrameReassembler();
+    private readonly audioCounter = new ReceiveCounter();
+    private readonly videoCounter = new ReceiveCounter();
     private readonly audio: AudioPlayer;
     private readonly video: VideoPlayer | undefined;
 
@@ -50,15 +79,27 @@ export class RelayReceiver {
         if (!fragment) {
             return;
         }
-        const frame = (fragment.kind === KIND_AUDIO ? this.audioFrames : this.videoFrames).push(fragment);
+        const isAudio = fragment.kind === KIND_AUDIO;
+        const counter = isAudio ? this.audioCounter : this.videoCounter;
+        counter.fragment(payload.length);
+        const frame = (isAudio ? this.audioFrames : this.videoFrames).push(fragment);
         if (!frame) {
             return;
         }
+        counter.frame(frame);
         if (frame.kind === KIND_AUDIO) {
             this.audio.push(frame);
         } else {
             this.video?.push(frame);
         }
+    }
+
+    /** A snapshot of what has been received from this peer - see `RelayReceiveDiagnostics`. */
+    diagnostics(): RelayReceiveDiagnostics {
+        return {
+            audio: { ...this.audioCounter.stats, ...this.audio.stats() },
+            video: { ...this.videoCounter.stats },
+        };
     }
 
     /** Releases the decoders and ends the stream's tracks. */

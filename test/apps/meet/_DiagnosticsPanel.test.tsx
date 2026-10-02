@@ -7,6 +7,7 @@ import React from "react";
 import { render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import DiagnosticsPanel, { type DiagnosticsPanelProps } from "../../../apps/meet/_DiagnosticsPanel.js";
+import type { RelayDiagnostics, RelaySendDiagnostics } from "../../../apps/shared/webrtc/types.js";
 import { fakeMeshParticipant } from "../testUtils.js";
 
 afterEach(() => {
@@ -95,10 +96,10 @@ describe("DiagnosticsPanel - participants", () => {
         expect(screen.getByText("Relayed (TCP)")).toBeInTheDocument();
     });
 
-    it("says diagnostics are not available at all for a server-relayed participant", () => {
+    it("says diagnostics are not available yet for a server-relayed participant before the first poll", () => {
         renderPanel({ participants: [fakeMeshParticipant({ name: "Zed", transport: "websocket" })] });
         expect(screen.getByText("Server relay")).toBeInTheDocument();
-        expect(screen.getByText("Not available.")).toBeInTheDocument();
+        expect(screen.getByText("Not available yet.")).toBeInTheDocument();
     });
 
     it("says a participant could not be reached", () => {
@@ -148,6 +149,82 @@ describe("DiagnosticsPanel - participants", () => {
             ],
         });
         expect(screen.getByText(/↑5\.0 MB/)).toBeInTheDocument();
+    });
+
+    describe("a server-relayed participant", () => {
+        function relayed(relay: Partial<RelayDiagnostics> = {}, send: Partial<RelaySendDiagnostics> = {}) {
+            const diagnostics: RelayDiagnostics = {
+                send: {
+                    audioCapturedMs: 9_800,
+                    audioCaptureWallMs: 10_000,
+                    audioSilentMs: 3_920,
+                    audioEncoderSkippedMs: 0,
+                    audio: { framesSent: 490, framesDropped: 0, bytesSent: 2048 },
+                    video: { framesSent: 150, framesDropped: 0, bytesSent: 0 },
+                    ...send,
+                },
+                receive: {
+                    audio: { framesReceived: 500, framesLost: 4, bytesReceived: 4096, playedMs: 10_000, silentMs: 3_500, gaps: 1, gapMs: 120, droppedLate: 0, bufferedMs: 80 },
+                    video: { framesReceived: 0, framesLost: 0, bytesReceived: 0 },
+                },
+                ...relay,
+            };
+            renderPanel({
+                participants: [
+                    fakeMeshParticipant({
+                        name: "Zed",
+                        transport: "websocket",
+                        diagnostics: { audio: { packetsLost: 4, bytesSent: 2048, bytesReceived: 4096 }, video: {}, relay: diagnostics },
+                    }),
+                ],
+            });
+        }
+
+        const row = (label: string) => screen.getByText(label).closest("div")!;
+
+        it("shows the relay's counters instead of a round-trip time, which the relay has no way to measure", () => {
+            relayed();
+            expect(screen.queryByText("Round-trip time")).toBeNull();
+            expect(within(row("Audio")).getByText(/4 lost/)).toBeInTheDocument();
+            expect(within(row("Your mic capture")).getByText("98% of real time · 40% silent")).toBeInTheDocument();
+            expect(within(row("Playback")).getByText("35% silent · 1 gap (120 ms) · 80 ms buffered")).toBeInTheDocument();
+            // Nothing was dropped on either side, so those rows stay out of the way.
+            expect(screen.queryByText("Not sent")).toBeNull();
+            expect(screen.queryByText("Dropped late")).toBeNull();
+        });
+
+        it("shows frames that could not be sent, audio the encoder skipped and packets dropped on arrival", () => {
+            relayed(
+                {
+                    receive: {
+                        audio: { framesReceived: 0, framesLost: 0, bytesReceived: 0, playedMs: 0, silentMs: 0, gaps: 3, gapMs: 300, droppedLate: 7, bufferedMs: 0 },
+                        video: { framesReceived: 0, framesLost: 0, bytesReceived: 0 },
+                    },
+                },
+                { audioEncoderSkippedMs: 85.3, audio: { framesSent: 1, framesDropped: 2, bytesSent: 0 }, video: { framesSent: 1, framesDropped: 5, bytesSent: 0 } },
+            );
+            expect(within(row("Your mic capture")).getByText(/· 85 ms skipped/)).toBeInTheDocument();
+            expect(within(row("Not sent")).getByText("2 audio · 5 video frames")).toBeInTheDocument();
+            // No audio played yet, so its share of silence has nothing to be a share of.
+            expect(within(row("Playback")).getByText("— silent · 3 gaps (300 ms) · 0 ms buffered")).toBeInTheDocument();
+            expect(within(row("Dropped late")).getByText("7 packets")).toBeInTheDocument();
+        });
+
+        it("says one packet, not one packets", () => {
+            relayed({
+                receive: {
+                    audio: { framesReceived: 1, framesLost: 0, bytesReceived: 0, playedMs: 20, silentMs: 0, gaps: 0, gapMs: 0, droppedLate: 1, bufferedMs: 0 },
+                    video: { framesReceived: 0, framesLost: 0, bytesReceived: 0 },
+                },
+            });
+            expect(within(row("Dropped late")).getByText("1 packet")).toBeInTheDocument();
+        });
+
+        it("leaves out capture before any has happened, and playback before anything was received", () => {
+            relayed({ receive: undefined }, { audioCapturedMs: 0, audioCaptureWallMs: 0, audioSilentMs: 0 });
+            expect(screen.queryByText("Your mic capture")).toBeNull();
+            expect(screen.queryByText("Playback")).toBeNull();
+        });
     });
 
     it("lists more than one participant", () => {

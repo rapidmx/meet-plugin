@@ -216,3 +216,60 @@ describe("AudioPlayer scheduling", () => {
         expect(s.ctx.sources).toHaveLength(1);
     });
 });
+
+describe("AudioPlayer diagnostics", () => {
+    function silent() {
+        const block = new FakeAudioData(960);
+        block.fill = 0;
+        return block;
+    }
+
+    it("starts with nothing played, no gaps and an empty buffer", () => {
+        expect(setup().player.stats()).toEqual({ playedMs: 0, silentMs: 0, gaps: 0, gapMs: 0, droppedLate: 0, bufferedMs: 0 });
+    });
+
+    it("counts what was scheduled, how much of it was silent, and how far ahead it runs", () => {
+        const s = setup();
+        s.ctx.currentTime = 10;
+        play(s);
+        play(s, silent());
+        const stats = s.player.stats();
+        expect(stats.playedMs).toBeCloseTo(40, 6);
+        expect(stats.silentMs).toBeCloseTo(20, 6);
+        // The first block is not a gap - nothing was playing before it.
+        expect(stats.gaps).toBe(0);
+        expect(stats.bufferedMs).toBeCloseTo(JITTER_BUFFER_SECONDS * 1000 + 40, 6);
+        s.ctx.currentTime = 11;
+        expect(s.player.stats().bufferedMs).toBe(0);
+    });
+
+    it("counts each time playback ran dry, and the silence that put in", () => {
+        const s = setup();
+        s.ctx.currentTime = 10;
+        play(s); // ends at 10.1
+        s.ctx.currentTime = 10.5;
+        play(s); // restarts at 10.58
+        const stats = s.player.stats();
+        expect(stats.gaps).toBe(1);
+        expect(stats.gapMs).toBeCloseTo(480, 6);
+    });
+
+    it("counts packets dropped because the decoder was backed up or playback was too far ahead", () => {
+        const s = setup();
+        s.player.push(frame(0));
+        s.fake.audioDecoders[0].queueSize = AUDIO_MAX_DECODE_QUEUE + 1;
+        s.player.push(frame(20));
+        s.fake.audioDecoders[0].queueSize = 0;
+        for (let i = 0; i < 30; i++) play(s);
+        const stats = s.player.stats();
+        expect(stats.droppedLate).toBe(1 + 30 - s.ctx.sources.length);
+        expect(stats.droppedLate).toBeGreaterThan(1);
+    });
+
+    it("does not count a block the browser refused as played", () => {
+        const s = setup();
+        s.ctx.createBufferThrows = true;
+        play(s);
+        expect(s.player.stats().playedMs).toBe(0);
+    });
+});

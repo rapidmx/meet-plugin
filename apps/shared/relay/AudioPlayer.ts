@@ -2,9 +2,14 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
+import type { RelayReceiveDiagnostics } from "../webrtc/types.js";
 import { TimestampUnwrapper, type Frame } from "./frames.js";
 import type { AudioContextLike, AudioDataLike, DecoderLike, RelayEnv } from "./relayEnv.js";
 import { safeClose } from "./senderCommon.js";
+import { SilenceMeter } from "./SilenceMeter.js";
+
+/** The playback half of `RelayReceiveDiagnostics.audio`. */
+export type AudioPlaybackStats = Pick<RelayReceiveDiagnostics["audio"], "playedMs" | "silentMs" | "gaps" | "gapMs" | "droppedLate" | "bufferedMs">;
 
 export const PLAYBACK_SAMPLE_RATE = 48_000;
 /** How far ahead of the clock the first packet after a start or an underrun is scheduled. It is the jitter buffer:
@@ -42,6 +47,10 @@ export class AudioPlayer {
     private decoder: DecoderLike | undefined;
     private nextTime = 0;
     private readonly timestamps = new TimestampUnwrapper();
+    private readonly played = new SilenceMeter();
+    private gaps = 0;
+    private gapSeconds = 0;
+    private droppedLate = 0;
 
     /** `destination` is the node whose stream the peer's `MediaStream` carries. */
     constructor(
@@ -50,10 +59,23 @@ export class AudioPlayer {
         private readonly destination: unknown,
     ) {}
 
+    /** What playback has done so far - see `RelayReceiveDiagnostics`. */
+    stats(): AudioPlaybackStats {
+        return {
+            playedMs: this.played.totalMs,
+            silentMs: this.played.silentMs,
+            gaps: this.gaps,
+            gapMs: this.gapSeconds * 1000,
+            droppedLate: this.droppedLate,
+            bufferedMs: Math.max(0, this.nextTime - this.ctx.currentTime) * 1000,
+        };
+    }
+
     /** Feeds one reassembled audio frame (one Opus packet). */
     push(frame: Frame): void {
         const decoder = this.decoder ?? this.createDecoder();
         if (!decoder || decoder.decodeQueueSize > AUDIO_MAX_DECODE_QUEUE) {
+            this.droppedLate += 1;
             return;
         }
         try {
@@ -101,6 +123,7 @@ export class AudioPlayer {
         try {
             const now = this.ctx.currentTime;
             if (this.nextTime - now > MAX_AHEAD_SECONDS) {
+                this.droppedLate += 1;
                 return;
             }
             const buffer = this.ctx.createBuffer(1, data.numberOfFrames, data.sampleRate);
@@ -127,6 +150,12 @@ export class AudioPlayer {
                 source.onended = () => source.disconnect();
             }
             source.start(start);
+            this.played.feed(pcm, data.sampleRate);
+            if (start > this.nextTime && this.nextTime > 0) {
+                // Playback ran dry: everything between the end of the last block and this one is silence.
+                this.gaps += 1;
+                this.gapSeconds += start - this.nextTime;
+            }
             this.nextTime = start + buffer.duration;
         } catch {
             // A block the browser will not take (an odd sample rate, a closed context) is dropped like a lost packet.
