@@ -16,6 +16,10 @@ export const REDIS_RELAY_ORIGIN_BYTES = 16;
  * `debug`, so a Redis outage cannot flood the log at the rate media frames arrive. */
 export const REDIS_RELAY_WARN_INTERVAL_MS = 30_000;
 
+/** How often the bus re-checks, via one batched `PUBSUB NUMSUB`, whether any other replica still has a listener for
+ * each of its active rooms - see the class doc comment's "Skipping Redis for a single-replica room" section. */
+export const REDIS_RELAY_NUMSUB_POLL_MS = 2_000;
+
 /** The channel a room's frames are published to. */
 export function redisRelayChannel(roomId: string): string {
     return REDIS_RELAY_CHANNEL_PREFIX + roomId;
@@ -33,15 +37,21 @@ export interface RedisRelayBusOptions {
     /** The `datastores:events` Redis URL. */
     url: string;
     logger: RedisRelayBusLogger;
+    /** Overrides `REDIS_RELAY_NUMSUB_POLL_MS` - a test's only reason to set this. */
+    numSubPollMs?: number;
 }
 
 /** What the bus counts, for tests and diagnostics. */
 export interface RedisRelayBusStats {
     /** Frames published to Redis. */
     published: number;
-    /** Frames not published because the publisher was not connected (or the sender id cannot be encoded). */
+    /** Frames not published because the publisher was not connected (or the sender id cannot be encoded) - an
+     * actual problem, unlike `publishSkippedLocalOnly`. */
     publishSkipped: number;
-    /** Redis commands (publish, subscribe, unsubscribe, connect) that failed. */
+    /** Frames not published to Redis because `pollLocalOnly()` last confirmed no other replica currently has a
+     * listener for the room - the optimization working as intended, not a problem. */
+    publishSkippedLocalOnly: number;
+    /** Redis commands (publish, subscribe, unsubscribe, connect, `PUBSUB NUMSUB`) that failed. */
     failures: number;
     /** Messages received from Redis and handed to local listeners. */
     received: number;
@@ -56,6 +66,10 @@ interface RelayRedisClient {
     publish(channel: string, message: Buffer): Promise<unknown>;
     subscribe(channel: string, listener: (message: Buffer, channel: Buffer) => void, bufferMode: true): Promise<unknown>;
     unsubscribe(channel: string, listener: (message: Buffer, channel: Buffer) => void, bufferMode: true): Promise<unknown>;
+    /** `PUBSUB NUMSUB` - the subscriber count of each named channel, across every client on this Redis (this bus's
+     * own subscription included). Used only by `pollLocalOnly()`, on the publisher client (never the subscriber,
+     * which this interface's other methods assume is only ever used in buffer-mode subscribe/unsubscribe). */
+    pubSubNumSub(channels: string[]): Promise<Record<string, number>>;
     destroy(): void;
 }
 
@@ -64,6 +78,10 @@ interface BusRoom {
     listeners: Set<RelayBusListener>;
     /** The function registered with the Redis subscriber for the room, once it has been asked to subscribe. */
     onMessage?: (message: Buffer) => void;
+    /** Whether `pollLocalOnly()` last confirmed no other replica has a listener for this room's channel - `undefined`
+     * until the first poll completes. `publishToRedis()` treats only `true` as license to skip Redis entirely;
+     * `undefined` and `false` both publish, which is the safe default for a room nothing has measured yet. */
+    localOnly?: boolean;
 }
 
 /**
@@ -117,17 +135,38 @@ interface BusRoom {
  * server's client-output-buffer limit for pub/sub, after which Redis drops that connection (the client then
  * reconnects and resubscribes).
  *
+ * ## Skipping Redis for a single-replica room
+ *
+ * Every room still SUBSCRIBEs the moment it has its first local listener (so a remote replica's room gets this
+ * replica's frames the instant it starts caring, with no detection delay), but whether `publish()` also bothers
+ * PUBLISHing a frame to Redis in the first place is a separate decision, re-checked on a timer
+ * (`pollLocalOnly()`, every `numSubPollMs`/`REDIS_RELAY_NUMSUB_POLL_MS`): one batched `PUBSUB NUMSUB` across every
+ * active room's channel tells this bus, authoritatively, how many subscribers across the *whole* Redis deployment
+ * each channel has right now. A channel with at most one (this bus's own subscription, and only this bus's own)
+ * has no listener on any other replica - there is nobody `publishToRedis()` could possibly be publishing *for* -
+ * so a room's `localOnly` flag is set and every frame for it skips the Redis publish entirely until the next poll
+ * says otherwise, which is by far the common case for a small/single-instance deployment and for most rooms even in
+ * a larger one (most calls never span replicas). A room `localOnly` has not yet been determined for (just created,
+ * or the last poll failed) keeps publishing - the safe default, since under-publishing (an unnoticed remote
+ * listener goes briefly silent) is a real glitch and over-publishing (a few redundant PUBLISHes with no
+ * subscriber) costs only a little Redis traffic. The gap between a remote replica's listener actually arriving and
+ * this bus's next poll noticing is therefore bounded by `numSubPollMs` - frames to that listener may be briefly
+ * missing right at that boundary, which is the same order of magnitude as, and no worse than, media this transport
+ * already tolerates losing under ordinary backpressure (see `RelayHub.RELAY_WS_MAX_BACKPRESSURE_BYTES`'s own doc
+ * comment).
+ *
  * @author Jean-Philippe Steinmetz
  */
 export class RedisRelayBus implements RelayBus {
     /** What the bus has done so far. */
-    public readonly stats: RedisRelayBusStats = { published: 0, publishSkipped: 0, failures: 0, received: 0, receivedDropped: 0 };
+    public readonly stats: RedisRelayBusStats = { published: 0, publishSkipped: 0, publishSkippedLocalOnly: 0, failures: 0, received: 0, receivedDropped: 0 };
 
     private readonly id: Buffer = crypto.randomBytes(REDIS_RELAY_ORIGIN_BYTES);
     private readonly rooms: Map<string, BusRoom> = new Map();
     private publisher?: RelayRedisClient;
     private subscriber?: RelayRedisClient;
     private lastWarn: number = Number.NEGATIVE_INFINITY;
+    private pollTimer?: ReturnType<typeof setInterval>;
 
     constructor(private readonly options: RedisRelayBusOptions) {}
 
@@ -166,18 +205,21 @@ export class RedisRelayBus implements RelayBus {
         this.subscriber = subscriber;
         this.run("connect the publisher", () => publisher.connect());
         this.run("connect the subscriber", () => subscriber.connect());
+        this.pollTimer = setInterval(() => void this.pollLocalOnly(), this.options.numSubPollMs ?? REDIS_RELAY_NUMSUB_POLL_MS);
     }
 
     /**
-     * Shuts the bus down: destroys both clients (which ends their connections, and with them every subscription) and
-     * stops publishing. Local delivery keeps working, as after a failed `connect()`. Safe to call repeatedly.
-     * Nothing is unsubscribed one by one: the connection going away does that server-side, and an UNSUBSCRIBE could
-     * only stall behind a Redis that is down.
+     * Shuts the bus down: destroys both clients (which ends their connections, and with them every subscription),
+     * stops the `pollLocalOnly()` timer and stops publishing. Local delivery keeps working, as after a failed
+     * `connect()`. Safe to call repeatedly. Nothing is unsubscribed one by one: the connection going away does that
+     * server-side, and an UNSUBSCRIBE could only stall behind a Redis that is down.
      */
     public close(): void {
         const clients: (RelayRedisClient | undefined)[] = [this.publisher, this.subscriber];
         this.publisher = undefined;
         this.subscriber = undefined;
+        clearInterval(this.pollTimer);
+        this.pollTimer = undefined;
         for (const client of clients) {
             try {
                 client?.destroy();
@@ -213,6 +255,10 @@ export class RedisRelayBus implements RelayBus {
     }
 
     private publishToRedis(roomId: string, sender: string, frame: Buffer): void {
+        if (this.rooms.get(roomId)?.localOnly) {
+            this.stats.publishSkippedLocalOnly++;
+            return;
+        }
         const publisher: RelayRedisClient | undefined = this.publisher;
         const senderBytes: Buffer = Buffer.from(sender, "utf8");
         if (!publisher?.isReady || senderBytes.length === 0 || senderBytes.length > 255) {
@@ -226,6 +272,32 @@ export class RedisRelayBus implements RelayBus {
         frame.copy(message, REDIS_RELAY_ORIGIN_BYTES + 1 + senderBytes.length);
         this.stats.published++;
         this.run("publish a frame", () => publisher.publish(redisRelayChannel(roomId), message));
+    }
+
+    /** Refreshes every active room's `localOnly` flag with one batched `PUBSUB NUMSUB`, on the publisher client (the
+     * subscriber is reserved for buffer-mode subscribe/unsubscribe) - see the class doc comment. Does nothing while
+     * there are no rooms or the publisher isn't ready; a failed command is counted and logged, and leaves every
+     * room's existing flag untouched, so a transient failure never flips a room's safe-default `undefined`/`false`
+     * to a stale `true` it didn't earn. Applies results by walking `this.rooms` fresh *after* the command resolves,
+     * not the snapshot queried - a room that left while this was in flight is simply no longer in the map to visit,
+     * and one that arrived gets no count back (`undefined`, falling back to the safe default below) and waits for
+     * the next poll, with no race to special-case either way. */
+    private async pollLocalOnly(): Promise<void> {
+        const publisher: RelayRedisClient | undefined = this.publisher;
+        const roomIds: string[] = [...this.rooms.keys()];
+        if (!publisher?.isReady || roomIds.length === 0) {
+            return;
+        }
+        let counts: Record<string, number>;
+        try {
+            counts = await publisher.pubSubNumSub(roomIds.map(redisRelayChannel));
+        } catch (err) {
+            this.report("check room subscriber counts", err);
+            return;
+        }
+        for (const [roomId, room] of this.rooms) {
+            room.localOnly = (counts[redisRelayChannel(roomId)] ?? Number.POSITIVE_INFINITY) <= 1;
+        }
     }
 
     private redisSubscribe(roomId: string, room: BusRoom): void {

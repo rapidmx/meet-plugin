@@ -9,6 +9,7 @@ import {
     RedisRelayBus,
     redisRelayChannel,
     type RedisRelayBusLogger,
+    type RedisRelayBusOptions,
 } from "../../src/util/RedisRelayBus.js";
 import { RelayHub, type RelayBusListener, type RelayConnection, type RelaySocket } from "../../src/util/RelayHub.js";
 import { FakeRedisServer } from "./fakeRedis.js";
@@ -61,8 +62,8 @@ describe("RedisRelayBus", () => {
     const buses: RedisRelayBus[] = [];
 
     /** One server replica: a bus on the shared fake Redis and a hub on it. */
-    async function replica(): Promise<{ bus: RedisRelayBus; hub: RelayHub }> {
-        const bus = new RedisRelayBus({ url: "redis://fake:6379", logger });
+    async function replica(overrides: Partial<RedisRelayBusOptions> = {}): Promise<{ bus: RedisRelayBus; hub: RelayHub }> {
+        const bus = new RedisRelayBus({ url: "redis://fake:6379", logger, ...overrides });
         await bus.connect();
         buses.push(bus);
         return { bus, hub: new RelayHub({ bus }) };
@@ -267,6 +268,143 @@ describe("RedisRelayBus", () => {
             await server.settle();
             expect(bob.sock.frames).toEqual([frameOf("alice", Buffer.from("back"))]);
             expect(alice.sock.frames).toEqual([frameOf("bob", Buffer.from("back too"))]);
+        });
+    });
+
+    describe("localOnly - skipping Redis for a single-replica room", () => {
+        afterEach(() => {
+            vi.useRealTimers();
+        });
+
+        it("keeps publishing to Redis until the first poll completes.", async () => {
+            // Only the interval timer is faked - `setImmediate` stays real, so `server.settle()` (used by some of
+            // these tests) keeps working rather than hanging on a now-fake `setImmediate` it never advances.
+            vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+            const { bus, hub } = await replica({ numSubPollMs: 10 });
+            const alice = join(hub, "room", "alice");
+            join(hub, "room", "bob", ["alice"]);
+
+            alice.conn.message(Buffer.from("x"), true);
+            expect(server.commands("PUBLISH")).toHaveLength(1);
+            expect(bus.stats.publishSkippedLocalOnly).toBe(0);
+        });
+
+        it("skips publishing once a poll confirms no other replica is subscribed to the room.", async () => {
+            // Only the interval timer is faked - `setImmediate` stays real, so `server.settle()` (used by some of
+            // these tests) keeps working rather than hanging on a now-fake `setImmediate` it never advances.
+            vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+            const { bus, hub } = await replica({ numSubPollMs: 10 });
+            const alice = join(hub, "room", "alice");
+            join(hub, "room", "bob", ["alice"]);
+            await vi.advanceTimersByTimeAsync(10);
+
+            alice.conn.message(Buffer.from("x"), true);
+            expect(server.commands("PUBLISH")).toHaveLength(0);
+            expect(bus.stats.published).toBe(0);
+            expect(bus.stats.publishSkippedLocalOnly).toBe(1);
+        });
+
+        it("keeps publishing while another replica also has a listener for the room.", async () => {
+            // Only the interval timer is faked - `setImmediate` stays real, so `server.settle()` (used by some of
+            // these tests) keeps working rather than hanging on a now-fake `setImmediate` it never advances.
+            vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+            const r1 = await replica({ numSubPollMs: 10 });
+            const r2 = await replica({ numSubPollMs: 10 });
+            const alice = join(r1.hub, "room", "alice");
+            const bob = join(r2.hub, "room", "bob", ["alice"]);
+            await vi.advanceTimersByTimeAsync(10);
+
+            alice.conn.message(Buffer.from("x"), true);
+            await server.settle();
+            expect(bob.sock.frames).toEqual([frameOf("alice", Buffer.from("x"))]);
+            expect(r1.bus.stats.published).toBe(1);
+            expect(r1.bus.stats.publishSkippedLocalOnly).toBe(0);
+        });
+
+        it("stops publishing once the other replica's listener leaves, from the next poll onward.", async () => {
+            // Only the interval timer is faked - `setImmediate` stays real, so `server.settle()` (used by some of
+            // these tests) keeps working rather than hanging on a now-fake `setImmediate` it never advances.
+            vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+            const r1 = await replica({ numSubPollMs: 10 });
+            const r2 = await replica({ numSubPollMs: 10 });
+            const alice = join(r1.hub, "room", "alice");
+            const bob = join(r2.hub, "room", "bob", ["alice"]);
+            await vi.advanceTimersByTimeAsync(10);
+            bob.conn.close();
+            await vi.advanceTimersByTimeAsync(10);
+
+            alice.conn.message(Buffer.from("x"), true);
+            expect(server.commands("PUBLISH")).toHaveLength(0);
+            expect(r1.bus.stats.publishSkippedLocalOnly).toBe(1);
+        });
+
+        it("counts a failed subscriber-count check as a failure, warns once, and leaves rooms publishing.", async () => {
+            // Only the interval timer is faked - `setImmediate` stays real, so `server.settle()` (used by some of
+            // these tests) keeps working rather than hanging on a now-fake `setImmediate` it never advances.
+            vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+            const { bus, hub } = await replica({ numSubPollMs: 10 });
+            const alice = join(hub, "room", "alice");
+            join(hub, "room", "bob", ["alice"]);
+            server.fail.pubSubNumSub = true;
+            await vi.advanceTimersByTimeAsync(10);
+
+            expect(bus.stats.failures).toBe(1);
+            expect(logger.warn.mock.calls[0][0]).toContain("check room subscriber counts");
+
+            server.fail.pubSubNumSub = false;
+            alice.conn.message(Buffer.from("x"), true);
+            expect(server.commands("PUBLISH")).toHaveLength(1);
+        });
+
+        it("does nothing while there are no active rooms.", async () => {
+            // Only the interval timer is faked - `setImmediate` stays real, so `server.settle()` (used by some of
+            // these tests) keeps working rather than hanging on a now-fake `setImmediate` it never advances.
+            vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+            await replica({ numSubPollMs: 10 });
+            await vi.advanceTimersByTimeAsync(10);
+            expect(server.commands("PUBSUB_NUMSUB")).toHaveLength(0);
+        });
+
+        it("does nothing while the publisher is not connected.", async () => {
+            // Only the interval timer is faked - `setImmediate` stays real, so `server.settle()` (used by some of
+            // these tests) keeps working rather than hanging on a now-fake `setImmediate` it never advances.
+            vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+            const { hub } = await replica({ numSubPollMs: 10 });
+            join(hub, "room", "alice");
+            server.outage();
+            await vi.advanceTimersByTimeAsync(10);
+            expect(server.commands("PUBSUB_NUMSUB")).toHaveLength(0);
+        });
+
+        it("treats a room that appears mid-poll as not yet measured, so it keeps publishing.", async () => {
+            vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+            const { hub } = await replica({ numSubPollMs: 10 });
+            join(hub, "room-a", "alice");
+            const publisher = server.clients[0];
+            const original = publisher.pubSubNumSub.bind(publisher);
+            let carol: Peer;
+            vi.spyOn(publisher, "pubSubNumSub").mockImplementationOnce(async (channels: string[]) => {
+                // A second room's first local listener arrives after the batch was already queried, but before
+                // this poll's result comes back - it was never asked about, so `counts` has nothing for it.
+                carol = join(hub, "room-b", "carol");
+                return original(channels);
+            });
+
+            await vi.advanceTimersByTimeAsync(10);
+            carol!.conn.message(Buffer.from("x"), true);
+            expect(server.commands("PUBLISH", redisRelayChannel("room-b"))).toHaveLength(1);
+        });
+
+        it("checks every active room's channel in one poll.", async () => {
+            // Only the interval timer is faked - `setImmediate` stays real, so `server.settle()` (used by some of
+            // these tests) keeps working rather than hanging on a now-fake `setImmediate` it never advances.
+            vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+            const { hub } = await replica({ numSubPollMs: 10 });
+            join(hub, "room-a", "alice");
+            join(hub, "room-b", "bob");
+            await vi.advanceTimersByTimeAsync(10);
+            const checked = server.commands("PUBSUB_NUMSUB").map((op) => op.channel);
+            expect(checked).toEqual(expect.arrayContaining([redisRelayChannel("room-a"), redisRelayChannel("room-b")]));
         });
     });
 

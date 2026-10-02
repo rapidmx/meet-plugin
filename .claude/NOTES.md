@@ -1295,3 +1295,41 @@ follow-up work rather than risking a regression under this session's time budget
 
 Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
 clean at 100%/98.57%/100%/100% (1570 tests, same count - only two constants and one test assertion changed).
+
+## 2026-10-02 (follow-up request, same day): skip Redis entirely for a single-replica room
+
+JP asked that the relay's cross-replica fan-out (`RedisRelayBus`) only use Redis for a participant actually on a
+different server replica - anyone on the same node should already be handled directly. That was already true of
+*delivery*: `publish()` always applies to this process's local listeners synchronously, Redis or no Redis (see the
+class's own "Redis being down... never affects local delivery" doc comment, already true before today). What
+wasn't true: `publish()` unconditionally PUBLISHed every frame to Redis too, whether or not any other replica could
+possibly care - a single-instance deployment (or just a single-instance room within a larger one, the common case
+even there) paid a Redis round trip per frame for nothing.
+
+**The real question was how a `RedisRelayBus` instance - which only knows its own local listener count - can find
+out whether some *other* replica has one too.** Redis answers this directly: `PUBSUB NUMSUB <channel>` reports a
+channel's subscriber count across the whole Redis deployment, not just this client's own connection. New
+`pollLocalOnly()` runs on a timer (`REDIS_RELAY_NUMSUB_POLL_MS`, 2s default, `numSubPollMs` override for tests),
+batches every active room's channel into one `PUBSUB NUMSUB` call on the publisher client, and sets each room's
+`localOnly` flag: a channel reporting at most 1 subscriber is only this bus's own - nobody else is listening, so
+`publishToRedis()` skips the Redis publish for that room entirely (counted separately,
+`stats.publishSkippedLocalOnly`, so it reads as "working as intended" rather than `publishSkipped`'s "something's
+wrong"). A room `localOnly` hasn't been measured for yet - just created, or the last poll failed - keeps publishing,
+the safe default: under-publishing would actually drop a remote listener's frames, while over-publishing just costs
+a little redundant Redis traffic. The gap between a remote replica's listener actually arriving and this bus's next
+poll noticing is bounded by `numSubPollMs` - a brief, bounded window of possibly-missing frames right at that
+instant, the same order of magnitude as (and no worse than) media this transport already tolerates losing under
+ordinary backpressure.
+
+Applying a poll's results walks `this.rooms` fresh *after* the `PUBSUB NUMSUB` call resolves, rather than the
+snapshot of room ids the call was built from - a room that left while the command was in flight is simply no
+longer in the map to visit (no explicit guard needed), and one that arrived mid-poll gets no count back for its
+channel (`undefined`, falling back to "not measured yet, keep publishing") and just waits for the next poll. Simpler
+than guarding a stale snapshot against both races by hand, and naturally correct for both at once.
+
+`test/util/fakeRedis.ts` (shared by this suite and `RelayHub.test.ts`, modeling several replicas sharing one real
+Redis) gained a matching `pubSubNumSub()` backed by the same `subscribers(channel)` count the rest of the fake
+already exposes - the fake had everything needed to model this honestly once asked.
+
+Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
+clean at 100%/98.58%/100%/100% (1579 tests).

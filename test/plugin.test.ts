@@ -99,6 +99,7 @@ describe("plugin entry points", () => {
                 "RELAY_RATE_BYTES_PER_SECOND",
                 "RelayHub",
                 "REDIS_RELAY_CHANNEL_PREFIX",
+                "REDIS_RELAY_NUMSUB_POLL_MS",
                 "REDIS_RELAY_ORIGIN_BYTES",
                 "REDIS_RELAY_WARN_INTERVAL_MS",
                 "RedisRelayBus",

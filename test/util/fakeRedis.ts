@@ -19,7 +19,7 @@ import { EventEmitter } from "events";
 /** One logged Redis command. */
 export interface FakeRedisOp {
     client: number;
-    command: "SUBSCRIBE" | "UNSUBSCRIBE" | "PUBLISH";
+    command: "SUBSCRIBE" | "UNSUBSCRIBE" | "PUBLISH" | "PUBSUB_NUMSUB";
     channel: string;
     /** The published payload, for PUBLISH. */
     message?: Buffer;
@@ -73,6 +73,18 @@ export class FakeRedisClient extends EventEmitter {
         set.add({ listener, bufferMode: bufferMode === true });
     }
 
+    /** `PUBSUB NUMSUB` - the subscriber count of each named channel across every client of this fake server, modeling
+     * several replicas sharing one real Redis. */
+    public async pubSubNumSub(channels: string[]): Promise<Record<string, number>> {
+        this.server.guard(this, "pubSubNumSub", false);
+        const counts: Record<string, number> = {};
+        for (const channel of channels) {
+            this.server.ops.push({ client: this.index, command: "PUBSUB_NUMSUB", channel });
+            counts[channel] = this.server.subscribers(channel);
+        }
+        return counts;
+    }
+
     public async unsubscribe(channel: string, listener: (message: Buffer, channel: Buffer) => void, _bufferMode?: boolean): Promise<void> {
         this.server.guard(this, "unsubscribe", false);
         const set: Set<Subscription> | undefined = this.subscriptions.get(channel);
@@ -104,7 +116,7 @@ export class FakeRedisServer {
     /** Whether a client is ready as soon as it connects. */
     public autoReady = true;
     /** When set, every command of that kind rejects. */
-    public fail: { publish?: boolean; subscribe?: boolean; unsubscribe?: boolean } = {};
+    public fail: { publish?: boolean; subscribe?: boolean; unsubscribe?: boolean; pubSubNumSub?: boolean } = {};
     public failConnect = false;
     public failDestroy = false;
     /** Makes `createClient()` throw on its n-th call from now (1-based), like node-redis does for an unusable URL. */
@@ -121,7 +133,7 @@ export class FakeRedisServer {
     }
 
     /** Applies the connection and failure rules to a command before it does anything. */
-    public guard(client: FakeRedisClient, kind: "publish" | "subscribe" | "unsubscribe", offlineQueueMatters: boolean): void {
+    public guard(client: FakeRedisClient, kind: "publish" | "subscribe" | "unsubscribe" | "pubSubNumSub", offlineQueueMatters: boolean): void {
         if (!client.isOpen) {
             throw new Error("The client is closed");
         }
