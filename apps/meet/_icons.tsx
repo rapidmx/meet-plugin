@@ -78,3 +78,13 @@ export const BatonIcon = () => (
 );
 
 export const OverflowIcon = () => <Icon path="M6 10c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm12 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm-6 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z" />;
+
+/** A plain "X" - removing a participant from the call (the participants drawer's "Remove" row button). Drawn with
+ * strokes rather than a filled Material path, same "simple primitives, not a recalled path" reasoning as
+ * `BatonIcon`. */
+export const RemoveIcon = () => (
+    <svg viewBox="0 0 24 24" className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true" focusable="false">
+        <line x1="6" y1="6" x2="18" y2="18" />
+        <line x1="18" y1="6" x2="6" y2="18" />
+    </svg>
+);

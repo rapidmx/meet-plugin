@@ -35,7 +35,7 @@ import React, { useEffect } from "react";
 import type { MeshParticipant } from "../shared/webrtc/types.js";
 import type { WaitingParticipant } from "./_meetApi.js";
 import { TRANSPORT_BADGES } from "./_ParticipantTile.js";
-import { MicOffIcon } from "./_icons.js";
+import { BatonIcon, MicOffIcon, RemoveIcon } from "./_icons.js";
 
 export interface ParticipantsDrawerProps {
     selfName: string;
@@ -184,35 +184,38 @@ function Row({
             {canGiveStick && !hasStick && (
                 <button
                     type="button"
-                    className="px-2 py-0.5 rounded text-xs whitespace-nowrap bg-white/10 hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                    className="w-7 h-7 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80 [&>svg]:w-4 [&>svg]:h-4"
                     aria-label={`Give the talking stick to ${name}`}
+                    title={`Give the talking stick to ${name}`}
                     onClick={onGiveStick}
                 >
-                    Give stick
+                    <BatonIcon />
                 </button>
             )}
             {canModerate && !micMuted && (
                 <button
                     type="button"
-                    className="px-2 py-0.5 rounded text-xs whitespace-nowrap bg-white/10 hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                    className="w-7 h-7 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80 [&>svg]:w-4 [&>svg]:h-4"
                     aria-label={`Mute ${name}`}
+                    title={`Mute ${name}`}
                     onClick={onMute}
                 >
-                    Mute
+                    <MicOffIcon />
                 </button>
             )}
             {canModerate && (
                 <button
                     type="button"
-                    className="px-2 py-0.5 rounded text-xs whitespace-nowrap bg-[#601410] text-[#f9dedc] hover:bg-[#7a1b16] focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                    className="w-7 h-7 flex items-center justify-center rounded-full bg-[#601410] text-[#f9dedc] hover:bg-[#7a1b16] focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80 [&>svg]:w-4 [&>svg]:h-4"
                     aria-label={`Remove ${name}`}
+                    title={`Remove ${name}`}
                     onClick={() => {
                         if (window.confirm(`Remove ${name} from the call?`)) {
                             onKick?.();
                         }
                     }}
                 >
-                    Remove
+                    <RemoveIcon />
                 </button>
             )}
         </li>

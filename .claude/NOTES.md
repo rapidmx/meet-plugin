@@ -1493,3 +1493,18 @@ mid-task - that's a real decision for JP, not mine to make unasked.
 
 Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
 clean at 100%/98.56%/100%/100%.
+
+## 2026-10-02 (small follow-up, same day): icon-only Mute/Remove/Give-stick row buttons
+
+The participants drawer's per-row host buttons read as plain text ("Mute", "Remove", "Give stick"), cramped
+alongside the Host badge, the floor-badge and the transport badge. Swapped each for an icon-only button (same
+`w-7 h-7 rounded-full` shape, `aria-label` and a matching `title` unchanged) - and reused existing icons with the
+same meaning elsewhere rather than inventing new ones: `MicOffIcon` for Mute (already means "muted" on every tile),
+`BatonIcon` for Give stick (already *is* the talking-stick icon on the navbar toggle). Only "Remove" needed
+something new - `RemoveIcon`, a plain X drawn with two `<line>` strokes rather than a recalled Material icon path,
+same reasoning `BatonIcon` already documented: simple primitives I can get right by construction beat a path string
+I'm not fully certain of. Aria-labels are unchanged, so no existing test needed updating - they query by role and
+accessible name, not visible text.
+
+Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
+clean at 100%/98.56%/100%/100%.
