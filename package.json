@@ -34,7 +34,7 @@
         "react-dom": "19.x"
     },
     "devDependencies": {
-        "@rapidmx/restapi": "^0.26.0",
+        "@rapidmx/restapi": "^0.28.1",
         "@rapidmx/web-client": "^0.31.0",
         "@rapidrest/core": "^6.0.0",
         "@rapidrest/react": "^2.1.0",
