@@ -35,7 +35,7 @@
     },
     "devDependencies": {
         "@rapidmx/restapi": "^0.26.0",
-        "@rapidmx/web-client": "^0.26.0",
+        "@rapidmx/web-client": "^0.31.0",
         "@rapidrest/core": "^6.0.0",
         "@rapidrest/react": "^2.1.0",
         "@rapidrest/service-core": "^2.4.0",
