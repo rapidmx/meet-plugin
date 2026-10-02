@@ -9,12 +9,6 @@
  * screen, reactions, raise hand, grid/focus and leave. The effects button opens the video filter picker
  * (`_EffectsPanel.tsx`) and lights up while any filter is on.
  *
- * The diagnostics button is the one exception to "opens near its own button": its panel is `fixed` to the
- * viewport's top-left corner rather than anchored above the button, since it reads better as a HUD-style overlay
- * sitting over the call than as a dropdown tucked into the bottom control bar. The outside-click/Escape handling
- * (`barRef`) still closes it the same way, since it's still a DOM descendant of the bar - only its visual position
- * moved, not its open/close wiring.
- *
  * The microphone button shows a live level while it is unmuted - bars that move with the sound the microphone is
  * picking up, so a participant can see their audio is being sent - and the camera button shows a green dot while a
  * camera is sending. Both are driven by `LocalMedia` (`apps/shared/media/useLocalMedia.ts`). The microphone button
@@ -26,11 +20,9 @@ import { filtersActive } from "../shared/media/filters/filterTypes.js";
 import type { ScreenTransformState } from "../shared/media/filters/ScreenTransform.js";
 import type { LocalMedia, MediaKind } from "../shared/media/useLocalMedia.js";
 import { REACTION_EMOJIS, type MeshParticipant } from "../shared/webrtc/types.js";
-import DiagnosticsPanel from "./_DiagnosticsPanel.js";
 import EffectsPanel from "./_EffectsPanel.js";
 import {
     ChevronUpIcon,
-    DiagnosticsIcon,
     EffectsIcon,
     EmojiIcon,
     FlipIcon,
@@ -50,7 +42,6 @@ export type CallViewMode = "grid" | "focus";
 
 export interface CallControlsProps {
     media: LocalMedia;
-    selfName: string;
     participants: MeshParticipant[];
     isPresenting: boolean;
     /** Someone else is presenting - the share button is disabled and explains why. */
@@ -74,7 +65,7 @@ export interface CallControlsProps {
     onLeave: () => void;
 }
 
-type OpenMenu = MediaKind | "emoji" | "effects" | "diagnostics" | null;
+type OpenMenu = MediaKind | "emoji" | "effects" | null;
 
 const BUTTON = "flex items-center justify-center h-12 rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80";
 const NEUTRAL = "bg-[#3c4043] text-white hover:bg-[#4b4f53]";
@@ -98,7 +89,6 @@ export function LevelBars({ level }: { level: number }) {
 
 export default function CallControls({
     media,
-    selfName,
     participants,
     isPresenting,
     presentingElsewhereName,
@@ -316,28 +306,6 @@ export default function CallControls({
             >
                 {viewMode === "grid" ? <FocusIcon /> : <GridIcon />}
             </button>
-
-            <div className="sm:relative">
-                <button
-                    type="button"
-                    className={`${BUTTON} w-12 ${openMenu === "diagnostics" ? ACTIVE : NEUTRAL}`}
-                    aria-label="Call diagnostics"
-                    aria-haspopup="dialog"
-                    aria-expanded={openMenu === "diagnostics"}
-                    onClick={() => toggleMenu("diagnostics")}
-                >
-                    <DiagnosticsIcon />
-                </button>
-                {openMenu === "diagnostics" && (
-                    <div
-                        role="dialog"
-                        aria-label="Call diagnostics"
-                        className="fixed z-30 top-3 left-3 w-80 max-w-[calc(100vw-1rem)] max-h-[70vh] overflow-y-auto p-3 rounded-2xl bg-[#2b2d30]/95 text-white shadow-xl"
-                    >
-                        <DiagnosticsPanel selfName={selfName} micOn={media.micOn} cameraOn={media.cameraOn} participants={participants} />
-                    </div>
-                )}
-            </div>
 
             <button type="button" className={`${BUTTON} w-16 bg-[#d93025] text-white hover:bg-[#b3261e]`} aria-label="Leave call" onClick={() => onLeave()}>
                 <LeaveIcon />

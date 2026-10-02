@@ -19,21 +19,19 @@
  * offer) and a "Remove" button (a native `confirm()` first, since removal can't be undone by the participant the
  * way a mute request can) - never on the local participant's own row, and never shown to anyone but the host.
  *
- * The header also gets a host-only "Mute on join" checkbox (`forceMuteOnJoin`/`onToggleForceMuteOnJoin`) - a
- * setting for whoever joins *next*, not an action on anyone already here (muting someone already in the call is
- * what each row's own "Mute" button is for) - a host-only password section (`hasPassword`/`onSetPassword`), the
- * same "next joiner" scope: setting or changing it never affects anyone already in the call - and a host-only
- * waiting-room toggle plus list (`waitingRoomEnabled`/`onToggleWaitingRoomEnabled`,
- * `waitingParticipants`/`onAdmit`/`onDeny`): `_CallView.tsx` polls the list while this drawer is open and the
- * caller is the host (there is no push signal for a newly filed admission request), so it stays current without
- * the host needing to close and reopen the drawer.
+ * The header also gets a host-only "who's waiting" list (`waitingParticipants`/`onAdmit`/`onDeny`), shown whenever
+ * `waitingRoomEnabled` is on - `_CallView.tsx` polls the list while this drawer is open and the caller is the host
+ * (there is no push signal for a newly filed admission request), so it stays current without the host needing to
+ * close and reopen the drawer. The waiting-room toggle itself, along with "mute new participants on join" and the
+ * join password, lives in `_SettingsModal.tsx` instead (opened from the navbar's "…" menu) - this drawer only
+ * reads `waitingRoomEnabled` to decide whether the list has anywhere to come from, it doesn't set it.
  *
  * While talking-stick mode is on (`talkingStickActive`), every row - including the host's own - shows a "Give
  * stick" button, host-only, hidden on whichever row currently holds it (`talkingStickHolder`); everyone (not just
  * the host) sees a badge on that row instead, same visibility as the "Host" tag. See `_CallView.tsx`'s doc comment
  * on talking-stick mode for what granting it actually does to the recipient's microphone.
  */
-import React, { useEffect, useState } from "react";
+import React, { useEffect } from "react";
 import type { MeshParticipant } from "../shared/webrtc/types.js";
 import type { WaitingParticipant } from "./_meetApi.js";
 import { TRANSPORT_BADGES } from "./_ParticipantTile.js";
@@ -52,19 +50,10 @@ export interface ParticipantsDrawerProps {
     /** Removes the given participant's `uid` - see `_CallView.tsx`'s `handleKickParticipant()` for what this
      * actually does (the cooperative signal plus the enforced server-side revoke). */
     onKick: (uid: string) => void;
-    /** Whether a newly joining participant currently starts muted - the header checkbox's own state, host-only. */
-    forceMuteOnJoin: boolean;
-    onToggleForceMuteOnJoin: () => void;
-    /** Whether this meeting currently requires a password - never the password itself, which the server never
-     * sends back (see `PublicVideoMeeting.hasPassword`'s own doc comment). */
-    hasPassword: boolean;
-    /** Sets (a non-empty string), replaces, or removes (`null`) the join password. Rejecting lets
-     * `PasswordSection` show its own inline error without this drawer needing to know anything about it. */
-    onSetPassword: (password: string | null) => Promise<void>;
-    /** Whether the meeting currently requires the host to admit each participant - the header checkbox's own
-     * state, host-only. */
+    /** Whether the meeting currently requires the host to admit each participant - read-only here, set from
+     * `_SettingsModal.tsx` instead; this drawer only uses it to decide whether the waiting list has anywhere to
+     * come from. */
     waitingRoomEnabled: boolean;
-    onToggleWaitingRoomEnabled: () => void;
     /** Everyone currently waiting to be admitted - `_CallView.tsx`'s own polled, always-current list; empty
      * whenever this drawer isn't open and host, by construction. */
     waitingParticipants: WaitingParticipant[];
@@ -82,71 +71,6 @@ export interface ParticipantsDrawerProps {
     /** Hands the stick to `uid` - host-only, see `_CallView.tsx`'s `handleGiveTalkingStick()`. */
     onGiveTalkingStick: (uid: string) => void;
     onClose: () => void;
-}
-
-/** The host-only password form: one text input plus a Set/Change button, and a Remove button once one is set.
- * Owns its own input/error/busy state locally - `_CallView.tsx` only needs to know whether a password exists, not
- * what a half-typed one currently says. */
-function PasswordSection({ hasPassword, onSetPassword }: { hasPassword: boolean; onSetPassword: (password: string | null) => Promise<void> }) {
-    const [input, setInput] = useState("");
-    const [error, setError] = useState<string | null>(null);
-    const [busy, setBusy] = useState(false);
-
-    async function submit(password: string | null) {
-        setBusy(true);
-        setError(null);
-        try {
-            await onSetPassword(password);
-            setInput("");
-        } catch {
-            setError("Could not save - try again.");
-        } finally {
-            setBusy(false);
-        }
-    }
-
-    return (
-        <div className="px-3 py-2 border-b border-white/10 text-sm">
-            <p className="text-white/70 mb-1.5">{hasPassword ? "Password protection is on." : "No password required to join."}</p>
-            <form
-                className="flex gap-2"
-                onSubmit={(event) => {
-                    event.preventDefault();
-                    if (input) {
-                        void submit(input);
-                    }
-                }}
-            >
-                <input
-                    type="password"
-                    aria-label={hasPassword ? "New password" : "Set a password"}
-                    placeholder={hasPassword ? "New password" : "Set a password"}
-                    className="flex-1 min-w-0 px-2 py-1 rounded bg-white/10 text-white placeholder:text-white/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
-                    value={input}
-                    onChange={(event) => setInput(event.target.value)}
-                    disabled={busy}
-                />
-                <button
-                    type="submit"
-                    className="px-2 py-1 rounded text-xs whitespace-nowrap bg-white/10 hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80 disabled:opacity-50"
-                    disabled={busy || !input}
-                >
-                    {hasPassword ? "Change" : "Set"}
-                </button>
-            </form>
-            {hasPassword && (
-                <button
-                    type="button"
-                    className="mt-1.5 text-xs text-[#f2b8b5] underline focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80 disabled:opacity-50"
-                    disabled={busy}
-                    onClick={() => void submit(null)}
-                >
-                    Remove password
-                </button>
-            )}
-            {error && <p className="text-[#f2b8b5] text-xs mt-1.5">{error}</p>}
-        </div>
-    );
 }
 
 /** The host-only "who's waiting" list - shown only while `waitingRoomEnabled` is on, since there is otherwise never
@@ -304,12 +228,7 @@ export default function ParticipantsDrawer({
     isParticipantHost,
     onMute,
     onKick,
-    forceMuteOnJoin,
-    onToggleForceMuteOnJoin,
-    hasPassword,
-    onSetPassword,
     waitingRoomEnabled,
-    onToggleWaitingRoomEnabled,
     waitingParticipants,
     onAdmit,
     onDeny,
@@ -346,19 +265,6 @@ export default function ParticipantsDrawer({
                     ✕
                 </button>
             </div>
-            {isSelfHost && (
-                <label className="flex items-center gap-2 px-3 py-2 border-b border-white/10 text-sm">
-                    <input type="checkbox" checked={forceMuteOnJoin} onChange={onToggleForceMuteOnJoin} className="w-4 h-4" />
-                    Mute new participants on join
-                </label>
-            )}
-            {isSelfHost && <PasswordSection hasPassword={hasPassword} onSetPassword={onSetPassword} />}
-            {isSelfHost && (
-                <label className="flex items-center gap-2 px-3 py-2 border-b border-white/10 text-sm">
-                    <input type="checkbox" checked={waitingRoomEnabled} onChange={onToggleWaitingRoomEnabled} className="w-4 h-4" />
-                    Require the host to admit participants
-                </label>
-            )}
             {isSelfHost && waitingRoomEnabled && (
                 <WaitingSection waitingParticipants={waitingParticipants} onAdmit={onAdmit} onDeny={onDeny} />
             )}

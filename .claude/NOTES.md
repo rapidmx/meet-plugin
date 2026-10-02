@@ -1403,3 +1403,50 @@ genuinely-disabled button is no longer a meaningful test of the toggle.
 
 Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
 clean at 100%/98.6%/100%/100%.
+
+## 2026-10-02 (navbar reorg): a "…" menu for diagnostics, connection method, and settings
+
+JP asked for three UI changes together: move the diagnostics button under a new "…" menu on the navbar, add a
+"Connection method" option there (wiring `TransportMode`'s choices into the UI for the first time), and pull the
+host settings that used to live in the participants drawer's own header (mute-on-join, the join password, the
+waiting-room toggle) into a separate "Settings" modal, also opened from that menu. The diagnostics panel also
+becomes a persistent, draggable window instead of a dropdown that closes on its own.
+
+**The "…" menu itself** (`_CallView.tsx`) is a plain popover - `role="menu"`, closes on Escape/outside click/
+picking an item, same shape as `_CallControls.tsx`'s own menus - listing "Diagnostics", a "Connection method"
+radio group (`role="menuitemradio"`, `TRANSPORT_MODE_OPTIONS`), and (host-only) "Settings". Picking "Diagnostics"
+or "Settings" opens its own window and closes the menu; the window itself does not close when the menu does -
+diagnostics in particular is meant to stay up while a participant pokes at the rest of the call, not vanish the
+moment they click elsewhere.
+
+**New `_DiagnosticsWindow.tsx`** wraps the unchanged `_DiagnosticsPanel.tsx` content in a draggable, closable
+chrome. Dragging is tracked on `document`, not the title bar element itself, specifically because
+`setPointerCapture()` (the "normal" way to keep receiving pointer events once a fast drag outruns the source
+element) isn't implemented in the jsdom this is tested under - the document-listener approach is also just the
+more robust standard pattern regardless, so this isn't really a test-driven compromise. Position is local state,
+reset to a default near the top-left corner each time it's reopened - there's nothing durable to anchor "remember
+where I left it" to across the call ending and restarting.
+
+**New `_SettingsModal.tsx`** is an ordinary centered modal (backdrop, Escape, its own close button) holding exactly
+what moved out of the drawer - `PasswordSection` moved here verbatim. `_ParticipantsDrawer.tsx` keeps the waiting
+*list* (admit/deny, polled while open) since that's closer to "who's here" than a setting, but now only reads
+`waitingRoomEnabled` (to decide whether the list has anywhere to come from) rather than also setting it.
+
+**The "Connection method" menu wires `MeshConnectionManager.setTransportMode()`** (added as backend-only mechanics
+earlier today) into the UI for the first time: four `menuitemradio` entries, the manager's own choice reflected
+back via `aria-checked`. No new client-side logic beyond threading the click through - all the actual behavior
+(forcing p2p/relay, skipping WebRTC for `"websocket"`, rebuilding peers mid-call) already existed.
+
+**One dead export caught by the coverage floor, not by eye**: moving the diagnostics button out of
+`_CallControls.tsx` left `_icons.tsx`'s `DiagnosticsIcon` with no remaining caller anywhere - the new menu uses
+plain text, not an icon. Deleted rather than left around once `grep` confirmed nothing else referenced it; the
+100%-statements floor is what actually surfaced this, not a manual sweep.
+
+**Not verified in a real browser**: this plugin has no standalone entrypoint of its own - it's a backend plugin
+for the larger RapidMX service, and actually serving a meeting page needs real auth/database/TURN infrastructure
+this environment doesn't have. The drag mechanics, menu interactions and modal behavior are covered by component
+and integration tests (including a dedicated `_DiagnosticsWindow.test.tsx` driving pointerdown/move/up directly),
+but JP's own in-browser check is still the first real-world confirmation this gets.
+
+Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
+clean at 100%/98.48%/100%/100%.

@@ -15,7 +15,6 @@ import { fakeDeviceInfo, fakeLocalMedia, fakeMeshParticipant } from "../testUtil
 function renderControls(overrides: Partial<CallControlsProps> = {}) {
     const props: CallControlsProps = {
         media: fakeLocalMedia(),
-        selfName: "Me",
         participants: [],
         isPresenting: false,
         onToggleShare: vi.fn(),
@@ -357,27 +356,3 @@ describe("CallControls - the rest", () => {
     });
 });
 
-describe("CallControls - diagnostics", () => {
-    it("opens the diagnostics panel from its button, and closes it from the same button", () => {
-        renderControls({ participants: [fakeMeshParticipant({ name: "Zed" })] });
-        const button = screen.getByRole("button", { name: "Call diagnostics" });
-        expect(button).toHaveAttribute("aria-expanded", "false");
-        expect(screen.queryByRole("dialog")).toBeNull();
-
-        fireEvent.click(button);
-        expect(button).toHaveAttribute("aria-expanded", "true");
-        const dialog = screen.getByRole("dialog", { name: "Call diagnostics" });
-        expect(within(dialog).getByText("Zed")).toBeInTheDocument();
-
-        fireEvent.click(button);
-        expect(screen.queryByRole("dialog")).toBeNull();
-    });
-
-    it("opens one menu at a time, alongside the other dialogs", () => {
-        renderControls();
-        fireEvent.click(screen.getByRole("button", { name: "Video effects" }));
-        fireEvent.click(screen.getByRole("button", { name: "Call diagnostics" }));
-        expect(screen.getAllByRole("dialog")).toHaveLength(1);
-        expect(screen.getByRole("dialog", { name: "Call diagnostics" })).toBeInTheDocument();
-    });
-});

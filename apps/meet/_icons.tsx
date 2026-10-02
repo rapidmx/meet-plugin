@@ -65,10 +65,6 @@ export const FlipIcon = () => (
     <Icon path="M15 21h2v-2h-2v2zm4-12h2V7h-2v2zM3 5v14c0 1.1.9 2 2 2h4v-2H5V5h4V3H5c-1.1 0-2 .9-2 2zm16-2v2h2c0-1.1-.9-2-2-2zm-8 20h2V1h-2v22zm8-6h2v-2h-2v2zM15 5h2V3h-2v2zm4 8h2v-2h-2v2zm0 8c1.1 0 2-.9 2-2h-2v2z" />
 );
 
-export const DiagnosticsIcon = () => (
-    <Icon path="M22 12h-4l-3 9L9 3l-3 9H2v2h5.6l1.4-4.2L13.4 21 17 12h5v-2z" />
-);
-
 /** A talking stick: a rounded shaft with a grip knob at one end, drawn (not a Material path - there isn't one for
  * this) as a diagonal bar with a circle, rather than reusing `HandIcon`'s emoji-glyph fallback, since this one
  * needs to light up (`currentColor`) the same way every other control icon here does. */
@@ -80,3 +76,5 @@ export const BatonIcon = () => (
         </g>
     </svg>
 );
+
+export const OverflowIcon = () => <Icon path="M6 10c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm12 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm-6 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z" />;

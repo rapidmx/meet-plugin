@@ -1126,22 +1126,107 @@ describe("CallView - talking stick mode", () => {
     });
 });
 
+/** Opens the host-only settings modal from the navbar's "…" menu. */
+function openSettings() {
+    fireEvent.click(screen.getByRole("button", { name: "More options" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
+}
+
+describe("CallView - the \"…\" menu", () => {
+    it("opens and closes on its own button, on Escape, and on a press outside it", async () => {
+        await connected();
+        const button = screen.getByRole("button", { name: "More options" });
+        expect(button).toHaveAttribute("aria-expanded", "false");
+
+        fireEvent.click(button);
+        expect(button).toHaveAttribute("aria-expanded", "true");
+        expect(screen.getByRole("menu", { name: "More options" })).toBeInTheDocument();
+
+        fireEvent.keyDown(document, { key: "Escape" });
+        expect(screen.queryByRole("menu")).toBeNull();
+
+        fireEvent.click(button);
+        fireEvent.pointerDown(document.body);
+        expect(screen.queryByRole("menu")).toBeNull();
+    });
+
+    it("opens the diagnostics window from the menu, listing a participant's name, and closes it from its own button - independent of the menu", async () => {
+        await withParticipant();
+        fireEvent.click(screen.getByRole("button", { name: "More options" }));
+        fireEvent.click(screen.getByRole("menuitem", { name: "Diagnostics" }));
+
+        const dialog = screen.getByRole("dialog", { name: "Call diagnostics" });
+        expect(within(dialog).getByText("Zed")).toBeInTheDocument();
+        // The menu itself closed when the item was picked.
+        expect(screen.queryByRole("menu")).toBeNull();
+
+        fireEvent.click(screen.getByRole("button", { name: "Close call diagnostics" }));
+        expect(screen.queryByRole("dialog", { name: "Call diagnostics" })).toBeNull();
+    });
+
+    it("lists the four connection-method options, defaulting to Auto, and forces the chosen one on the manager", async () => {
+        const { client } = await connected();
+        fireEvent.click(screen.getByRole("button", { name: "More options" }));
+        const auto = screen.getByRole("menuitemradio", { name: "Auto" });
+        expect(auto).toHaveAttribute("aria-checked", "true");
+        expect(screen.getByRole("menuitemradio", { name: "P2P" })).toHaveAttribute("aria-checked", "false");
+        expect(screen.getByRole("menuitemradio", { name: "Relay" })).toHaveAttribute("aria-checked", "false");
+        expect(screen.getByRole("menuitemradio", { name: "WebSocket Relay" })).toHaveAttribute("aria-checked", "false");
+
+        fireEvent.click(screen.getByRole("menuitemradio", { name: "Relay" }));
+        // setTransportMode() broadcasts restart-connection once started, even with no peers yet - proof the
+        // manager actually received the new mode, not just this component's own state.
+        expect(client.sent).toContainEqual(expect.objectContaining({ kind: "restart-connection" }));
+        // Picking an option closes the menu too.
+        expect(screen.queryByRole("menu")).toBeNull();
+
+        fireEvent.click(screen.getByRole("button", { name: "More options" }));
+        expect(screen.getByRole("menuitemradio", { name: "Relay" })).toHaveAttribute("aria-checked", "true");
+        expect(screen.getByRole("menuitemradio", { name: "Auto" })).toHaveAttribute("aria-checked", "false");
+    });
+
+    it("picking the mode that is already active does nothing - no broadcast, menu still closes", async () => {
+        const { client } = await connected();
+        fireEvent.click(screen.getByRole("button", { name: "More options" }));
+        fireEvent.click(screen.getByRole("menuitemradio", { name: "Auto" }));
+        expect(client.sent).not.toContainEqual(expect.objectContaining({ kind: "restart-connection" }));
+        expect(screen.queryByRole("menu")).toBeNull();
+    });
+});
+
+describe("CallView - settings modal", () => {
+    it("is offered only to the host, from the \"…\" menu", async () => {
+        await connected({ selfUid: "local-me", hostUid: "local-me" });
+        fireEvent.click(screen.getByRole("button", { name: "More options" }));
+        expect(screen.getByRole("menuitem", { name: "Settings" })).toBeInTheDocument();
+    });
+
+    it("is not offered to a non-host", async () => {
+        await connected();
+        fireEvent.click(screen.getByRole("button", { name: "More options" }));
+        expect(screen.queryByRole("menuitem", { name: "Settings" })).toBeNull();
+    });
+
+    it("closes on its own close button, and the \"…\" menu closing does not also close it", async () => {
+        await connected({ selfUid: "local-me", hostUid: "local-me" });
+        openSettings();
+        expect(screen.getByRole("dialog", { name: "Meeting settings" })).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole("button", { name: "Close meeting settings" }));
+        expect(screen.queryByRole("dialog", { name: "Meeting settings" })).toBeNull();
+    });
+});
+
 describe("CallView - force-mute-on-join toggle", () => {
     it("shows the checkbox only to the host, reflecting the initial setting", async () => {
         await connected({ selfUid: "local-me", hostUid: "local-me", initialForceMuteOnJoin: true });
-        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        openSettings();
         expect(screen.getByRole("checkbox", { name: "Mute new participants on join" })).toBeChecked();
-    });
-
-    it("hides the checkbox from a non-host", async () => {
-        await connected();
-        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
-        expect(screen.queryByRole("checkbox", { name: "Mute new participants on join" })).toBeNull();
     });
 
     it("toggles optimistically and persists the new value", async () => {
         await connected({ selfUid: "local-me", hostUid: "local-me" });
-        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        openSettings();
         const checkbox = screen.getByRole("checkbox", { name: "Mute new participants on join" });
         expect(checkbox).not.toBeChecked();
 
@@ -1157,7 +1242,7 @@ describe("CallView - force-mute-on-join toggle", () => {
     it("reverts the checkbox when persisting the change fails", async () => {
         setForceMuteOnJoinMock.mockRejectedValueOnce(new Error("network error"));
         await connected({ selfUid: "local-me", hostUid: "local-me" });
-        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        openSettings();
         const checkbox = screen.getByRole("checkbox", { name: "Mute new participants on join" });
 
         fireEvent.click(checkbox);
@@ -1167,29 +1252,23 @@ describe("CallView - force-mute-on-join toggle", () => {
 });
 
 describe("CallView - host password section", () => {
-    it("shows the password section only to the host, reflecting whether one is already set", async () => {
+    it("reflects whether a password is already set", async () => {
         await connected({ selfUid: "local-me", hostUid: "local-me", initialHasPassword: true });
-        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        openSettings();
         expect(screen.getByText("Password protection is on.")).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "Remove password" })).toBeInTheDocument();
     });
 
-    it("hides the password section from a non-host", async () => {
-        await connected();
-        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
-        expect(screen.queryByText(/password/i)).toBeNull();
-    });
-
     it("says no password is required when none is set, with no remove button", async () => {
         await connected({ selfUid: "local-me", hostUid: "local-me" });
-        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        openSettings();
         expect(screen.getByText("No password required to join.")).toBeInTheDocument();
         expect(screen.queryByRole("button", { name: "Remove password" })).toBeNull();
     });
 
     it("sets a password, clears the input, and updates the status once saved", async () => {
         await connected({ selfUid: "local-me", hostUid: "local-me" });
-        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        openSettings();
         const input = screen.getByLabelText("Set a password");
         fireEvent.change(input, { target: { value: "s3cret" } });
         fireEvent.click(screen.getByRole("button", { name: "Set" }));
@@ -1201,7 +1280,7 @@ describe("CallView - host password section", () => {
 
     it("removes the password and reverts the status once saved", async () => {
         await connected({ selfUid: "local-me", hostUid: "local-me", initialHasPassword: true });
-        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        openSettings();
 
         fireEvent.click(screen.getByRole("button", { name: "Remove password" }));
 
@@ -1211,7 +1290,7 @@ describe("CallView - host password section", () => {
 
     it("does nothing if the form is submitted with an empty password", async () => {
         await connected({ selfUid: "local-me", hostUid: "local-me" });
-        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        openSettings();
         fireEvent.submit(screen.getByLabelText("Set a password").closest("form")!);
         expect(setMeetingPasswordMock).not.toHaveBeenCalled();
     });
@@ -1219,7 +1298,7 @@ describe("CallView - host password section", () => {
     it("shows an inline error and keeps the previous status when saving fails", async () => {
         setMeetingPasswordMock.mockRejectedValueOnce(new Error("network error"));
         await connected({ selfUid: "local-me", hostUid: "local-me" });
-        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        openSettings();
         fireEvent.change(screen.getByLabelText("Set a password"), { target: { value: "s3cret" } });
         fireEvent.click(screen.getByRole("button", { name: "Set" }));
 
@@ -1231,19 +1310,13 @@ describe("CallView - host password section", () => {
 describe("CallView - host waiting room", () => {
     it("shows the checkbox only to the host, reflecting the initial setting", async () => {
         await connected({ selfUid: "local-me", hostUid: "local-me", initialWaitingRoomEnabled: true });
-        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        openSettings();
         expect(screen.getByRole("checkbox", { name: "Require the host to admit participants" })).toBeChecked();
-    });
-
-    it("hides the checkbox from a non-host", async () => {
-        await connected();
-        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
-        expect(screen.queryByRole("checkbox", { name: "Require the host to admit participants" })).toBeNull();
     });
 
     it("toggles optimistically and persists the new value", async () => {
         await connected({ selfUid: "local-me", hostUid: "local-me" });
-        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        openSettings();
         const checkbox = screen.getByRole("checkbox", { name: "Require the host to admit participants" });
         expect(checkbox).not.toBeChecked();
 
@@ -1255,7 +1328,7 @@ describe("CallView - host waiting room", () => {
     it("reverts the checkbox when persisting the change fails", async () => {
         setWaitingRoomEnabledMock.mockRejectedValueOnce(new Error("network error"));
         await connected({ selfUid: "local-me", hostUid: "local-me" });
-        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        openSettings();
         const checkbox = screen.getByRole("checkbox", { name: "Require the host to admit participants" });
 
         fireEvent.click(checkbox);
