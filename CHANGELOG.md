@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-02
+
+### Added
+- Added a timer-driven poll (pollLocalOnly(), every 2s by default) that
+- Added a per-tab transport mode: auto, p2p, relay, or websocket
+- Added a navbar "..." menu for diagnostics, connection method, settings
+
+### Changed
+- The server and client backpressure thresholds that gate when a slow
+- relay socket starts dropping frames were each sized against a
+- bits-vs-bytes math error: 1 MiB server-side / 256 KiB client-side
+- amounted to roughly 22s / 5.6s of buffering at the relay's actual
+- combined video+audio bitrate, not the "couple of seconds" intended.
+- A receiver on a briefly slow downlink could fall minutes behind
+- "now" before anything was ever dropped to catch back up - this is
+- almost certainly what made the relay tier feel "nearly unusable."
+- Both corrected to budgets actually sized against the real bitrate
+- (~2.7s server-side, ~1.4s client-side, client deliberately tighter
+- than server), with the arithmetic spelled out in each doc comment
+- since the two constants live in separate TS programs and can't
+- import each other to stay in sync automatically.
+- Skip Redis fan-out for a relay room with no remote listeners
+- RedisRelayBus published every relayed frame to Redis unconditionally,
+- even when every participant of a room was on this same server replica
+- and nobody else could possibly be listening. Local delivery already
+- happened directly and synchronously either way - the Redis publish
+- was pure overhead in that case.
+- batches a PUBSUB NUMSUB across every active room's channel - the one
+- way a bus can learn whether some other replica also has a listener,
+- since it only tracks its own local count. A room whose channel reports
+- at most its own subscription skips the Redis publish entirely until
+- the next poll says otherwise; an unmeasured or multi-replica room
+- keeps publishing, the safe default.
+- MeshConnectionManager.setTransportMode() lets a participant force
+- which media path their own tab uses for every peer, for troubleshooting
+- a laggy or failing connection: "p2p" (direct only, never degrades to
+- the relay), "relay" (TURN-relayed WebRTC only, iceTransportPolicy:
+- "relay"), "websocket" (skip WebRTC entirely, straight to the server
+- relay), or "auto" (today's existing waterfall, unchanged).
+- Switched mode mid-call rebuilds every current peer connection under
+- the new policy. Since a participant can't rebuild their own half of a
+- pair without the other side rebuilding its matching half at the same
+- moment, this broadcasts a new restart-connection signal that tells
+- every peer to rebuild just their connection to the sender - each side
+- always applying whatever mode it has configured, never the sender's,
+- since this is a personal, per-tab choice. The rebuild keeps each
+- peer's roster entry intact and reports as an ordinary reconnect
+- (participant-updated), not a departure and rejoin.
+- This is the MeshConnectionManager-level mechanics only; the navbar
+- control for choosing a mode is a separate follow-up.
+- Disable the grid/focus toggle when there's nothing to toggle
+- Grid and focused view render the exact same single tile with zero or
+- one other participant, so the button looked broken in that case even
+- though it was working correctly. Disables it (with an explanatory
+- title) whenever there are fewer than two other participants.
+- This resolves the 2-participant case of a reported "toggle doesn't
+- work" bug. The 3-participant case is still open - that scenario should
+- show a real difference and didn't, which this fix doesn't explain;
+- revisiting with a DevTools console check once available.
+- Moves the diagnostics button out of the bottom control bar and into a
+- new overflow menu on the navbar, alongside two new entries: a
+- "Connection method" radio group wiring MeshConnectionManager's
+- TransportMode (auto/p2p/relay/websocket relay, added earlier) into
+- the UI for the first time, and a host-only "Settings" item.
+- The diagnostics panel is now a persistent, draggable window
+- (_DiagnosticsWindow.tsx) instead of a dropdown that closes itself -
+- meant to stay open while troubleshooting the rest of the call.
+- Dragging is tracked on document rather than relying on
+- setPointerCapture(), which isn't implemented in jsdom and is also
+- just the more robust approach regardless.
+- The host settings that used to live in the participants drawer's own
+- header (mute-on-join, the join password, the waiting-room toggle)
+- move into a new _SettingsModal.tsx, an ordinary centered modal. The
+- drawer keeps the waiting list itself (admit/deny), since that's closer
+- to "who's here" than a setting - it now only reads waitingRoomEnabled
+- rather than also setting it.
+- Also deleted _icons.tsx's now-unused DiagnosticsIcon, caught by the
+- coverage floor once nothing referenced it anymore.
+- Upgraded restapi dep
+
+### Fixed
+- Fixed the WebSocket relay's oversized backpressure budgets
+
 ## [0.13.1] - 2026-10-02
 
 ### Changed
@@ -452,7 +535,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/rapidmx/meet-plugin/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/rapidmx/meet-plugin/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/rapidmx/meet-plugin/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/rapidmx/meet-plugin/compare/v0.12.0...v0.12.1
