@@ -353,13 +353,19 @@ describe("CallView - layout", () => {
     });
 
     it("toggles between grid and focus view", async () => {
-        await withParticipant();
+        const { client } = await withParticipant({}, "aaa", "Amy");
+        client.emit(hello("zzz", "Zed"));
+        await screen.findAllByText("Zed");
         fireEvent.click(screen.getByRole("button", { name: "Switch to focused view" }));
-        expect(screen.getByTestId("main-tile")).toHaveTextContent("Zed");
-        // Nobody else to put in the strip.
-        expect(screen.queryByTestId("thumbnails")).toBeNull();
+        expect(screen.getByTestId("main-tile")).toHaveTextContent("Amy");
+        expect(screen.getByTestId("thumbnails")).toHaveTextContent("Zed");
         fireEvent.click(screen.getByRole("button", { name: "Switch to grid view" }));
         expect(screen.queryByTestId("main-tile")).toBeNull();
+    });
+
+    it("disables the grid/focus toggle with only one other participant - there is nothing to visibly toggle", async () => {
+        await withParticipant();
+        expect(screen.getByRole("button", { name: "Switch to focused view" })).toBeDisabled();
     });
 
     it("lets a participant pin another as the focused tile, and unpin them", async () => {

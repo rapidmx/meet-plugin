@@ -326,11 +326,28 @@ describe("CallControls - the rest", () => {
     });
 
     it("switches between grid and focused views", () => {
-        const { props, rerender } = renderControls();
+        const { props, rerender } = renderControls({ participants: [fakeMeshParticipant({ uid: "z" }), fakeMeshParticipant({ uid: "y" })] });
         fireEvent.click(screen.getByRole("button", { name: "Switch to focused view" }));
         expect(props.onToggleViewMode).toHaveBeenCalledTimes(1);
         rerender(<CallControls {...props} viewMode="focus" />);
         expect(screen.getByRole("button", { name: "Switch to grid view" })).toBeInTheDocument();
+    });
+
+    it("disables the grid/focus toggle with an explanatory title when there's nothing meaningful to toggle - fewer than two other participants", () => {
+        const { props, rerender } = renderControls({ participants: [] });
+        const button = screen.getByRole("button", { name: "Switch to focused view" });
+        expect(button).toBeDisabled();
+        expect(button).toHaveAttribute("title", "Grid and focused view look the same with only one other participant.");
+        fireEvent.click(button);
+        expect(props.onToggleViewMode).not.toHaveBeenCalled();
+
+        rerender(<CallControls {...props} participants={[fakeMeshParticipant({ uid: "z" })]} />);
+        expect(screen.getByRole("button", { name: "Switch to focused view" })).toBeDisabled();
+
+        rerender(<CallControls {...props} participants={[fakeMeshParticipant({ uid: "z" }), fakeMeshParticipant({ uid: "y" })]} />);
+        const enabled = screen.getByRole("button", { name: "Switch to focused view" });
+        expect(enabled).toBeEnabled();
+        expect(enabled).not.toHaveAttribute("title");
     });
 
     it("leaves", () => {

@@ -1381,3 +1381,25 @@ against a future caller introducing the exact bug it exists to catch.
 
 Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
 clean at 100%/98.6%/100%/100%.
+
+## 2026-10-02 (reported bug, partially resolved): "the grid/focus toggle doesn't work"
+
+JP reported the grid/focus button as dead with 2 participants, then also with 3 - looked like a real bug. Traced
+the logic directly (`computeMainUid()`, the `stage` branches in `_CallView.tsx`) and found it correct and already
+exercised by two passing tests covering exactly this - one with a single other participant, one with two. With
+only one other participant, grid and focused view render the identical single tile (nothing for the toggle to
+visibly change - confirmed this explains the 2-participant report), but the 3-participant report should have shown
+a real difference (one big tile + a thumbnail strip vs. an even grid) and still didn't, which the "it's just UX
+confusion" theory doesn't cover. Asked for a DevTools console check to tell a real crash apart from a stale
+deployment; JP asked to come back to that later, so the 3-participant case is still open - not fixed, not
+explained, left here so it isn't lost.
+
+Fixed what *is* confirmed, regardless: disabled the toggle (with an explanatory title) whenever
+`participants.length < 2`, since grid and focused view are indistinguishable with zero or one other participant -
+true by construction (`alone` already renders the self-tile full-screen regardless of `viewMode`; one other
+participant makes grid and focus render the same tile) rather than a judgment call. Updated the two existing tests
+that exercised this exact "only one other participant" case to add a second one instead, since clicking a now
+genuinely-disabled button is no longer a meaningful test of the toggle.
+
+Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
+clean at 100%/98.6%/100%/100%.

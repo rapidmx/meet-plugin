@@ -64,6 +64,8 @@ export interface CallControlsProps {
     onToggleHand: () => void;
     onReaction: (emoji: string) => void;
     viewMode: CallViewMode;
+    /** Disabled whenever `participants.length < 2` - grid and focused view render the exact same single tile with
+     * only one other participant (or none), so there is nothing for this to visibly toggle yet. */
     onToggleViewMode: () => void;
     /** True while talking-stick mode is on and this participant doesn't currently hold it - see `_CallView.tsx`'s
      * doc comment on talking-stick mode. Disables the microphone toggle (not the device-picker chevron, which
@@ -306,8 +308,10 @@ export default function CallControls({
 
             <button
                 type="button"
-                className={`${BUTTON} w-12 ${NEUTRAL}`}
+                className={`${BUTTON} w-12 ${NEUTRAL} disabled:opacity-40 disabled:cursor-not-allowed`}
                 aria-label={viewMode === "grid" ? "Switch to focused view" : "Switch to grid view"}
+                disabled={participants.length < 2}
+                title={participants.length < 2 ? "Grid and focused view look the same with only one other participant." : undefined}
                 onClick={onToggleViewMode}
             >
                 {viewMode === "grid" ? <FocusIcon /> : <GridIcon />}
