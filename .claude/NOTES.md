@@ -1450,3 +1450,46 @@ but JP's own in-browser check is still the first real-world confirmation this ge
 
 Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
 clean at 100%/98.48%/100%/100%.
+
+## 2026-10-02 (bug report + relocation): the navbar "…" menu never actually opens
+
+JP reported the new "…" button did nothing when clicked, with a screen recording. Frame-by-frame inspection (via
+`ffmpeg`/`ffprobe` - extracted frames, tiled contact sheets, cropped tight on the button itself) showed the
+button's own background DOES toggle to its "active" shade on click (so the click lands, and `overflowMenuOpen`
+state genuinely flips) - but the dropdown itself never appears anywhere on screen, across every frame of two
+separate recordings, before and after a hard refresh (ruling out a stale cached bundle). Since jsdom - what this
+plugin's whole test suite runs against - does not perform real layout at all, a positioning bug in the actual
+rendered page is exactly the class of bug this plugin's otherwise-rigorous test suite structurally cannot catch;
+every one of my own tests for this menu passed throughout, because they only ever checked for the element's
+presence in the DOM, never its real screen position.
+
+Root cause not fully pinned down (would need live DevTools access to confirm definitively - asked for a computed-
+style inspection of the `role="menu"` element, still open), but rather than keep debugging blind, JP asked to move
+the button to the bottom control bar anyway - between the grid/focus toggle and Leave - which is both the UX he
+wanted and a useful diagnostic: the destination reuses `_CallControls.tsx`'s own established `openMenu` pattern
+(the exact same shape the already-working effects/emoji/device menus use), so if it now renders correctly there,
+that narrows the original bug to something specific about the header's own containing structure (the `flex` row
+restructuring from the participants-drawer work, the header's lack of its own `position`, or similar) rather than
+anything about the menu markup itself.
+
+**The move itself**: `_CallView.tsx` no longer owns the menu's open/closed state, its outside-click/Escape effect,
+or the `TRANSPORT_MODE_OPTIONS` constant - all moved into `_CallControls.tsx`, becoming just another entry in its
+existing `openMenu` union (`"overflow"`), opened/closed exactly like the emoji and effects menus already are.
+`_CallView.tsx` keeps owning `diagnosticsOpen`/`settingsOpen`/`transportMode` (call-wide state, not menu
+chrome) and passes five new callback props down: `isHost`, `transportMode`, `onSetTransportMode`,
+`onOpenDiagnostics`, `onOpenSettings`. Each menu item now also closes the menu itself after acting, matching how
+the reaction-emoji buttons already close their own menu on pick.
+
+**A real gap this surfaced, not introduced by it**: `tsconfig.apps.json`'s `include` is `["apps"]` only -
+`test/apps/**` has never been covered by either of this repo's two standing `tsc --noEmit` commands. Updating
+`_CallControls.tsx`'s props to make five of them required left `test/apps/meet/_CallControls.test.tsx`'s
+`renderControls()` helper missing all five - a real type error - but neither `tsc` command, nor the test run
+itself, caught it: the missing props were simply `undefined` at runtime, never called because no existing test
+exercised the brand-new menu items yet. Fixed the test file directly (now passes the new props, and gained a
+dedicated describe block testing the menu end to end, including asserting its DOM position relative to the
+grid/focus and leave buttons - the specific thing this move was about). Flagging the broader gap (test files
+aren't type-checked at all by this repo's own tooling) rather than silently expanding `tsconfig.apps.json`'s scope
+mid-task - that's a real decision for JP, not mine to make unasked.
+
+Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
+clean at 100%/98.56%/100%/100%.

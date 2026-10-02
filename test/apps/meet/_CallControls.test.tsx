@@ -26,6 +26,11 @@ function renderControls(overrides: Partial<CallControlsProps> = {}) {
         onReaction: vi.fn(),
         viewMode: "grid",
         onToggleViewMode: vi.fn(),
+        isHost: false,
+        transportMode: "auto",
+        onSetTransportMode: vi.fn(),
+        onOpenDiagnostics: vi.fn(),
+        onOpenSettings: vi.fn(),
         onLeave: vi.fn(),
         ...overrides,
     };
@@ -353,6 +358,79 @@ describe("CallControls - the rest", () => {
         const { props } = renderControls();
         fireEvent.click(screen.getByRole("button", { name: "Leave call" }));
         expect(props.onLeave).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe("CallControls - the \"…\" menu", () => {
+    it("sits between the grid/focus toggle and Leave", () => {
+        renderControls();
+        const toolbar = screen.getByRole("toolbar", { name: "Call controls" });
+        const names = Array.from(toolbar.querySelectorAll("button")).map((button) => button.getAttribute("aria-label"));
+        const viewIndex = names.indexOf("Switch to focused view");
+        const moreIndex = names.indexOf("More options");
+        const leaveIndex = names.indexOf("Leave call");
+        expect(viewIndex).toBeGreaterThanOrEqual(0);
+        expect(moreIndex).toBe(viewIndex + 1);
+        expect(leaveIndex).toBe(moreIndex + 1);
+    });
+
+    it("opens and closes from its own button, on Escape, and on a press outside the bar", () => {
+        renderControls();
+        const button = screen.getByRole("button", { name: "More options" });
+        expect(button).toHaveAttribute("aria-expanded", "false");
+
+        fireEvent.click(button);
+        expect(button).toHaveAttribute("aria-expanded", "true");
+        expect(screen.getByRole("menu", { name: "More options" })).toBeInTheDocument();
+
+        fireEvent.keyDown(document, { key: "Escape" });
+        expect(screen.queryByRole("menu")).toBeNull();
+
+        fireEvent.click(button);
+        fireEvent.pointerDown(document.body);
+        expect(screen.queryByRole("menu")).toBeNull();
+    });
+
+    it("opens one menu at a time, alongside the other dialogs", () => {
+        renderControls();
+        fireEvent.click(screen.getByRole("button", { name: "Video effects" }));
+        fireEvent.click(screen.getByRole("button", { name: "More options" }));
+        expect(screen.queryAllByRole("dialog")).toHaveLength(0);
+        expect(screen.getByRole("menu", { name: "More options" })).toBeInTheDocument();
+    });
+
+    it("opens diagnostics and closes the menu", () => {
+        const { props } = renderControls();
+        fireEvent.click(screen.getByRole("button", { name: "More options" }));
+        fireEvent.click(screen.getByRole("menuitem", { name: "Diagnostics" }));
+        expect(props.onOpenDiagnostics).toHaveBeenCalledTimes(1);
+        expect(screen.queryByRole("menu")).toBeNull();
+    });
+
+    it("lists the four connection-method options, reflecting the current one, and closes the menu on pick", () => {
+        const { props } = renderControls({ transportMode: "relay" });
+        fireEvent.click(screen.getByRole("button", { name: "More options" }));
+        expect(screen.getByRole("menuitemradio", { name: "Auto" })).toHaveAttribute("aria-checked", "false");
+        expect(screen.getByRole("menuitemradio", { name: "P2P" })).toHaveAttribute("aria-checked", "false");
+        expect(screen.getByRole("menuitemradio", { name: "Relay" })).toHaveAttribute("aria-checked", "true");
+        expect(screen.getByRole("menuitemradio", { name: "WebSocket Relay" })).toHaveAttribute("aria-checked", "false");
+
+        fireEvent.click(screen.getByRole("menuitemradio", { name: "WebSocket Relay" }));
+        expect(props.onSetTransportMode).toHaveBeenCalledWith("websocket");
+        expect(screen.queryByRole("menu")).toBeNull();
+    });
+
+    it("offers Settings only to the host, and closes the menu on pick", () => {
+        const { props, rerender } = renderControls({ isHost: false });
+        fireEvent.click(screen.getByRole("button", { name: "More options" }));
+        expect(screen.queryByRole("menuitem", { name: "Settings" })).toBeNull();
+        fireEvent.click(screen.getByRole("button", { name: "More options" }));
+
+        rerender(<CallControls {...{ ...props, isHost: true }} />);
+        fireEvent.click(screen.getByRole("button", { name: "More options" }));
+        fireEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
+        expect(props.onOpenSettings).toHaveBeenCalledTimes(1);
+        expect(screen.queryByRole("menu")).toBeNull();
     });
 });
 

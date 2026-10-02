@@ -14,12 +14,21 @@
  * camera is sending. Both are driven by `LocalMedia` (`apps/shared/media/useLocalMedia.ts`). The microphone button
  * is disabled (`micLocked`) while talking-stick mode is on and this participant isn't the current holder - see
  * `_CallView.tsx`'s doc comment.
+ *
+ * ## The "…" menu
+ *
+ * Sits between the grid/focus toggle and Leave, a catch-all for controls that don't need a dedicated button of
+ * their own: "Diagnostics" (`onOpenDiagnostics`) and "Settings" (`onOpenSettings`, host-only) each open their own
+ * persistent window/modal in `_CallView.tsx` and close this menu; "Connection method" is a four-way
+ * `menuitemradio` group (`TransportMode` - see `MeshConnectionManager.setTransportMode()`'s own doc comment)
+ * forcing how *this tab's* media reaches everyone else, independent of what anyone else has chosen. Otherwise an
+ * ordinary menu of this bar's own shape (`openMenu`, closes on Escape/outside click like every other one here).
  */
 import React, { useEffect, useRef, useState } from "react";
 import { filtersActive } from "../shared/media/filters/filterTypes.js";
 import type { ScreenTransformState } from "../shared/media/filters/ScreenTransform.js";
 import type { LocalMedia, MediaKind } from "../shared/media/useLocalMedia.js";
-import { REACTION_EMOJIS, type MeshParticipant } from "../shared/webrtc/types.js";
+import { REACTION_EMOJIS, type MeshParticipant, type TransportMode } from "../shared/webrtc/types.js";
 import EffectsPanel from "./_EffectsPanel.js";
 import {
     ChevronUpIcon,
@@ -32,11 +41,20 @@ import {
     LeaveIcon,
     MicIcon,
     MicOffIcon,
+    OverflowIcon,
     RotateIcon,
     ScreenShareIcon,
     VideoIcon,
     VideoOffIcon,
 } from "./_icons.js";
+
+/** The "…" menu's "Connection method" options, in display order - see `TransportMode`'s own doc comment. */
+const TRANSPORT_MODE_OPTIONS: { mode: TransportMode; label: string }[] = [
+    { mode: "auto", label: "Auto" },
+    { mode: "p2p", label: "P2P" },
+    { mode: "relay", label: "Relay" },
+    { mode: "websocket", label: "WebSocket Relay" },
+];
 
 export type CallViewMode = "grid" | "focus";
 
@@ -62,10 +80,16 @@ export interface CallControlsProps {
      * doc comment on talking-stick mode. Disables the microphone toggle (not the device-picker chevron, which
      * doesn't change whether anyone can hear them) rather than merely nudging it, unlike a `mute-request`. */
     micLocked?: boolean;
+    /** Whether the "…" menu's "Settings" item is offered at all - see this module's doc comment on the menu. */
+    isHost: boolean;
+    transportMode: TransportMode;
+    onSetTransportMode: (mode: TransportMode) => void;
+    onOpenDiagnostics: () => void;
+    onOpenSettings: () => void;
     onLeave: () => void;
 }
 
-type OpenMenu = MediaKind | "emoji" | "effects" | null;
+type OpenMenu = MediaKind | "emoji" | "effects" | "overflow" | null;
 
 const BUTTON = "flex items-center justify-center h-12 rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80";
 const NEUTRAL = "bg-[#3c4043] text-white hover:bg-[#4b4f53]";
@@ -102,6 +126,11 @@ export default function CallControls({
     viewMode,
     onToggleViewMode,
     micLocked,
+    isHost,
+    transportMode,
+    onSetTransportMode,
+    onOpenDiagnostics,
+    onOpenSettings,
     onLeave,
 }: CallControlsProps) {
     const [openMenu, setOpenMenu] = useState<OpenMenu>(null);
@@ -306,6 +335,74 @@ export default function CallControls({
             >
                 {viewMode === "grid" ? <FocusIcon /> : <GridIcon />}
             </button>
+
+            <div className="sm:relative">
+                <button
+                    type="button"
+                    className={`${BUTTON} w-12 ${openMenu === "overflow" ? ACTIVE : NEUTRAL}`}
+                    aria-label="More options"
+                    aria-haspopup="menu"
+                    aria-expanded={openMenu === "overflow"}
+                    onClick={() => toggleMenu("overflow")}
+                >
+                    <OverflowIcon />
+                </button>
+                {openMenu === "overflow" && (
+                    <div
+                        role="menu"
+                        aria-label="More options"
+                        className="absolute bottom-full mb-3 right-0 w-56 max-w-[calc(100vw-1rem)] rounded-2xl bg-[#2b2d30] text-white shadow-xl py-1 text-sm"
+                    >
+                        <button
+                            type="button"
+                            role="menuitem"
+                            className="w-full px-3 py-2 text-left hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                            onClick={() => {
+                                onOpenDiagnostics();
+                                setOpenMenu(null);
+                            }}
+                        >
+                            Diagnostics
+                        </button>
+                        <div className="my-1 border-t border-white/10" />
+                        <p className="px-3 pt-1 pb-0.5 text-xs font-semibold uppercase tracking-wide text-white/60">Connection method</p>
+                        {TRANSPORT_MODE_OPTIONS.map(({ mode, label }) => (
+                            <button
+                                key={mode}
+                                type="button"
+                                role="menuitemradio"
+                                aria-checked={transportMode === mode}
+                                className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                                onClick={() => {
+                                    onSetTransportMode(mode);
+                                    setOpenMenu(null);
+                                }}
+                            >
+                                <span className="w-4 text-[#8ab4f8]" aria-hidden="true">
+                                    {transportMode === mode ? "✓" : ""}
+                                </span>
+                                {label}
+                            </button>
+                        ))}
+                        {isHost && (
+                            <>
+                                <div className="my-1 border-t border-white/10" />
+                                <button
+                                    type="button"
+                                    role="menuitem"
+                                    className="w-full px-3 py-2 text-left hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                                    onClick={() => {
+                                        onOpenSettings();
+                                        setOpenMenu(null);
+                                    }}
+                                >
+                                    Settings
+                                </button>
+                            </>
+                        )}
+                    </div>
+                )}
+            </div>
 
             <button type="button" className={`${BUTTON} w-16 bg-[#d93025] text-white hover:bg-[#b3261e]`} aria-label="Leave call" onClick={() => onLeave()}>
                 <LeaveIcon />

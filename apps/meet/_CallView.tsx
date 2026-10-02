@@ -51,18 +51,17 @@
  * `MeshConnectionManager`'s own doc comment on why that needs no extra code - the header chip then says nobody has
  * the floor, until the host picks someone (or themselves) again.
  *
- * ## The navbar's "…" menu
+ * ## Diagnostics, connection method and settings
  *
- * A catch-all for controls that don't need a dedicated button of their own: "Diagnostics" opens
- * `_DiagnosticsWindow.tsx` (a persistent, draggable window - not a popover like everything else here, since
- * troubleshooting a connection is something a participant wants to keep open while they poke at the rest of the
- * call, not something that closes the moment they click elsewhere); "Connection method" is a four-way choice
- * (`TransportMode` - see `MeshConnectionManager.setTransportMode()`'s own doc comment) for forcing how *this tab's*
- * media reaches everyone else, independent of what anyone else has chosen; "Settings" (host-only) opens
- * `_SettingsModal.tsx`, which used to be the participants drawer's own header (mute-on-join, the join password, the
- * waiting-room toggle) - moved out because none of those are about *who* is in the call, which is what the drawer
- * is for. The menu itself closes on Escape, a click outside it, or picking an item; the windows it opens do not
- * close along with it.
+ * All three are opened from `_CallControls.tsx`'s own "…" menu (its doc comment covers the menu itself) via
+ * callback props, but owned here: `diagnosticsOpen` renders `_DiagnosticsWindow.tsx` (a persistent, draggable
+ * window - not a popover like the menus in the control bar, since troubleshooting a connection is something a
+ * participant wants to keep open while they poke at the rest of the call, not something that closes the moment
+ * they click elsewhere); `transportMode`/`handleSetTransportMode()` forces how *this tab's* media reaches everyone
+ * else (`TransportMode` - see `MeshConnectionManager.setTransportMode()`'s own doc comment), independent of what
+ * anyone else has chosen; `settingsOpen` renders `_SettingsModal.tsx`, which used to be the participants drawer's
+ * own header (mute-on-join, the join password, the waiting-room toggle) - moved out because none of those are
+ * about *who* is in the call, which is what the drawer is for.
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { playRaisedHandChime } from "../shared/media/chime.js";
@@ -77,7 +76,7 @@ import type { MeshParticipant, RelayTransportLike, TransportMode } from "../shar
 import { createRelayTransport } from "../shared/relay/RelayTransport.js";
 import { GuestSignalingClient } from "../shared/push/GuestSignalingClient.js";
 import CallControls, { type CallViewMode } from "./_CallControls.js";
-import { BatonIcon, OverflowIcon } from "./_icons.js";
+import { BatonIcon } from "./_icons.js";
 import {
     admitParticipant,
     denyParticipant,
@@ -138,14 +137,6 @@ const REACTION_MS = 4_000;
 const MAX_REACTIONS = 12;
 /** How often the host's drawer refreshes its own waiting-room list while open. */
 const DEFAULT_WAITING_POLL_MS = 3_000;
-
-/** The "…" menu's "Connection method" options, in display order - see `TransportMode`'s own doc comment. */
-const TRANSPORT_MODE_OPTIONS: { mode: TransportMode; label: string }[] = [
-    { mode: "auto", label: "Auto" },
-    { mode: "p2p", label: "P2P" },
-    { mode: "relay", label: "Relay" },
-    { mode: "websocket", label: "WebSocket Relay" },
-];
 
 interface Reaction {
     id: number;
@@ -229,13 +220,11 @@ export default function CallView({
     const [waitingParticipants, setWaitingParticipants] = useState<WaitingParticipant[]>([]);
     const [talkingStickActive, setTalkingStickActive] = useState(false);
     const [talkingStickHolder, setTalkingStickHolder] = useState<string | undefined>(undefined);
-    const [overflowMenuOpen, setOverflowMenuOpen] = useState(false);
     const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [transportMode, setTransportModeState] = useState<TransportMode>("auto");
 
     const managerRef = useRef<MeshConnectionManager | null>(null);
-    const overflowMenuRef = useRef<HTMLDivElement>(null);
     /** The raw capture from `getDisplayMedia()` - only ever used to stop it (releasing the OS's own share
      * indicator) and to notice the participant ending the share from the browser's own UI (`track.onended`). What's
      * actually shown and sent is `screenTransformRef`'s output (`screenStream` state) - see `handleToggleShare()`. */
@@ -409,31 +398,6 @@ export default function CallView({
         }
     }, [talkingStickActive, selfHasTalkingStick]);
 
-    // The "…" menu closes on Escape or a press anywhere outside it - matching `_CallControls.tsx`'s own menus -
-    // but never the windows it opens (diagnostics, settings), which stay open independently (see this module's
-    // doc comment on the "…" menu).
-    useEffect(() => {
-        if (!overflowMenuOpen) {
-            return;
-        }
-        const onPointerDown = (event: PointerEvent) => {
-            if (!overflowMenuRef.current?.contains(event.target as Node)) {
-                setOverflowMenuOpen(false);
-            }
-        };
-        const onKeyDown = (event: KeyboardEvent) => {
-            if (event.key === "Escape") {
-                setOverflowMenuOpen(false);
-            }
-        };
-        document.addEventListener("pointerdown", onPointerDown);
-        document.addEventListener("keydown", onKeyDown);
-        return () => {
-            document.removeEventListener("pointerdown", onPointerDown);
-            document.removeEventListener("keydown", onKeyDown);
-        };
-    }, [overflowMenuOpen]);
-
     useEffect(() => {
         if (!presenterUid) {
             setActiveSpeakerUid((prev) => pickActiveSpeaker(levels, prev));
@@ -573,12 +537,11 @@ export default function CallView({
     }
 
     /** Forces this tab's own transport policy - see `MeshConnectionManager.setTransportMode()`'s doc comment for
-     * what each mode actually does, and this module's doc comment on the "…" menu for why this is a personal,
-     * per-tab choice rather than a meeting setting. */
+     * what each mode actually does, and `_CallControls.tsx`'s doc comment on its "…" menu for why this is a
+     * personal, per-tab choice rather than a meeting setting. */
     function handleSetTransportMode(mode: TransportMode) {
         setTransportModeState(mode);
         managerRef.current?.setTransportMode(mode);
-        setOverflowMenuOpen(false);
     }
 
     /** Admits one pending request - optimistically removed from the drawer's own list (the next poll would drop it
@@ -768,70 +731,6 @@ export default function CallView({
                         >
                             {participants.length + 1}
                         </button>
-                        <div className="relative" ref={overflowMenuRef}>
-                            <button
-                                type="button"
-                                className={`w-9 h-9 flex items-center justify-center rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80 ${overflowMenuOpen ? "bg-[#4b4f53]" : "bg-[#3c4043] hover:bg-[#4b4f53]"}`}
-                                aria-label="More options"
-                                aria-haspopup="menu"
-                                aria-expanded={overflowMenuOpen}
-                                onClick={() => setOverflowMenuOpen((prev) => !prev)}
-                            >
-                                <OverflowIcon />
-                            </button>
-                            {overflowMenuOpen && (
-                                <div
-                                    role="menu"
-                                    aria-label="More options"
-                                    className="absolute top-full right-0 mt-2 w-56 rounded-2xl bg-[#2b2d30] text-white shadow-xl py-1 text-sm"
-                                >
-                                    <button
-                                        type="button"
-                                        role="menuitem"
-                                        className="w-full px-3 py-2 text-left hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
-                                        onClick={() => {
-                                            setDiagnosticsOpen(true);
-                                            setOverflowMenuOpen(false);
-                                        }}
-                                    >
-                                        Diagnostics
-                                    </button>
-                                    <div className="my-1 border-t border-white/10" />
-                                    <p className="px-3 pt-1 pb-0.5 text-xs font-semibold uppercase tracking-wide text-white/60">Connection method</p>
-                                    {TRANSPORT_MODE_OPTIONS.map(({ mode, label }) => (
-                                        <button
-                                            key={mode}
-                                            type="button"
-                                            role="menuitemradio"
-                                            aria-checked={transportMode === mode}
-                                            className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
-                                            onClick={() => handleSetTransportMode(mode)}
-                                        >
-                                            <span className="w-4 text-[#8ab4f8]" aria-hidden="true">
-                                                {transportMode === mode ? "✓" : ""}
-                                            </span>
-                                            {label}
-                                        </button>
-                                    ))}
-                                    {isHost && (
-                                        <>
-                                            <div className="my-1 border-t border-white/10" />
-                                            <button
-                                                type="button"
-                                                role="menuitem"
-                                                className="w-full px-3 py-2 text-left hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
-                                                onClick={() => {
-                                                    setSettingsOpen(true);
-                                                    setOverflowMenuOpen(false);
-                                                }}
-                                            >
-                                                Settings
-                                            </button>
-                                        </>
-                                    )}
-                                </div>
-                            )}
-                        </div>
                     </div>
                 </header>
                 {connectError && (
@@ -870,6 +769,11 @@ export default function CallView({
                         viewMode={viewMode}
                         onToggleViewMode={() => setViewMode((prev) => (prev === "grid" ? "focus" : "grid"))}
                         micLocked={micLocked}
+                        isHost={isHost}
+                        transportMode={transportMode}
+                        onSetTransportMode={handleSetTransportMode}
+                        onOpenDiagnostics={() => setDiagnosticsOpen(true)}
+                        onOpenSettings={() => setSettingsOpen(true)}
                         onLeave={onLeave}
                     />
                 </footer>
