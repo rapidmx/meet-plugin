@@ -138,6 +138,12 @@ describe("plugin manifest", () => {
         }
     });
 
+    it("marks the TURN credential and shared secret as secret, so the server's Diagnostics and settings pages never show them", () => {
+        const declared: any[] = pkg.rapidmx.plugin.settings;
+        const secret = declared.filter((s) => s.secret === true).map((s) => s.key);
+        expect(secret).toEqual(["mail:videoconf:turn:credential", "mail:videoconf:turn:shared_secret"]);
+    });
+
     it("declares the WebSocket relay as a boolean setting, on by default", () => {
         const manifest: any = parsePluginManifest(pkg);
         expect(manifest.settings.find((s: any) => s.key === "mail:videoconf:relay:enabled")).toEqual(

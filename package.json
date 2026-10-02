@@ -143,6 +143,7 @@
                     "key": "mail:videoconf:turn:credential",
                     "label": "TURN server credential (static)",
                     "type": "string",
+                    "secret": true,
                     "default": "",
                     "help": "The TURN server's password for the username above. Ignored when a shared secret is set below."
                 },
@@ -150,6 +151,7 @@
                     "key": "mail:videoconf:turn:shared_secret",
                     "label": "TURN server shared secret (for expiring credentials)",
                     "type": "string",
+                    "secret": true,
                     "default": "",
                     "help": "coturn's static-auth-secret, if configured. When set, every join mints its own short-lived username/credential pair (an HMAC-SHA1 of a timestamp with this secret) instead of handing out one permanent password to every participant - the recommended setup. Leave empty to use the static username/credential above instead."
                 },
