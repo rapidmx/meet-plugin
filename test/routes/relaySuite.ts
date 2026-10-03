@@ -189,7 +189,7 @@ export function relaySuite(ctx: RelaySuiteContext): void {
         it("Refuses an ended meeting.", async () => {
             const { uid } = await ctx.createPublicMeeting();
             const route: any = ctx.route();
-            await route.init();
+            await route.initialize();
             const spy = vi.spyOn(route.meetingRepo, "findOne").mockResolvedValue({ uid, status: "ended" });
             try {
                 expect(await connect(uid, ctx.ownerToken()).closed()).toEqual({ code: 1008, reason: "Not permitted." });
@@ -404,7 +404,7 @@ export function relaySuite(ctx: RelaySuiteContext): void {
         it("Closes with 1011 \"Relay unavailable.\" when authorizing throws, rather than leaking the error.", async () => {
             const route: any = ctx.route();
             const { uid } = await ctx.createPublicMeeting();
-            await route.init();
+            await route.initialize();
             const spy = vi.spyOn(route.meetingRepo, "findOne").mockRejectedValue(new Error("database exploded"));
             try {
                 const sock = fakeSocket();

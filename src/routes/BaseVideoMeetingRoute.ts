@@ -29,7 +29,9 @@ import {
     RELAY_LARGE_PAYLOAD_BYTES,
     RELAY_MAX_PAYLOAD_BYTES,
     RELAY_WS_MAX_BACKPRESSURE_BYTES,
+    InProcessRelayBus,
     RelayHub,
+    type RelayBus,
     type RelayConnection,
 } from "../util/RelayHub.js";
 import { stripTrustedRoles } from "../util/RouteAccessUtils.js";
@@ -430,10 +432,10 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     // Automatically injected by ObjectFactory on instantiation
     private _objectFactory?: ObjectFactory;
 
-    private meetingRepo?: RepoUtils<VM>;
-    private inviteeRepo?: RepoUtils<VMI>;
-    private mailboxRepo?: RepoUtils<M>;
-    private attendeeLinkRepo?: RepoUtils<CalendarEventAttendeeLink>;
+    protected meetingRepo?: RepoUtils<VM>;
+    protected inviteeRepo?: RepoUtils<VMI>;
+    protected mailboxRepo?: RepoUtils<M>;
+    protected attendeeLinkRepo?: RepoUtils<CalendarEventAttendeeLink>;
 
     @Inject(ACLUtils)
     private aclUtils?: ACLUtils;
@@ -482,10 +484,10 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     @Logger
     private logger: any;
 
-    /** The rooms of this process's relay sockets. One per route instance. It starts out on an in-process bus, which
-     * is what a route that was never initialized (a test's) keeps; `initRelayBus()` swaps in a hub on a Redis bus
-     * when the deployment has one, before any socket can attach. Its socket caps are per server replica. */
-    private relayHub: RelayHub = new RelayHub({ maxPayloadBytes: RELAY_MESSAGE_LIMIT_BYTES, logger: { debug: (message: string) => this.logger.debug(message) } });
+    /** The rooms of this process's relay sockets. One per route instance, built through the object factory by
+     * `initRelayBus()` - on a Redis bus when the deployment has one, else on an in-process bus - before any socket
+     * can attach. Its socket caps are per server replica. */
+    private relayHub?: RelayHub;
 
     /** The Redis bus `relayHub` runs on, when there is one. */
     private relayBus?: RedisRelayBus;
@@ -518,26 +520,44 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
      */
     @Init
     public async initRelayBus(): Promise<void> {
+        if (!this._objectFactory) {
+            throw new Error("objectFactory is not set.");
+        }
+        if (this.relayHub) {
+            return;
+        }
+        // Named after the concrete route, so the two backends' routes never share an instance.
+        const name: string = this.constructor.name;
+        let bus: RelayBus | undefined;
         const url: string | undefined = this.eventsConfig?.url;
         if (!url) {
             this.logger.warn(
                 "The `events` datastore is not configured: the video meeting relay only carries media between participants " +
                     "connected to this server instance, not between server replicas.",
             );
-            return;
+        } else {
+            const redisBus: RedisRelayBus = await this._objectFactory.newInstance(RedisRelayBus, {
+                name: `${name}RedisRelayBus`,
+                args: [{ url, logger: this.logger }],
+            });
+            try {
+                await redisBus.connect();
+                this.relayBus = redisBus;
+                bus = redisBus;
+            } catch (err: any) {
+                this.logger.error(
+                    "Could not create the video meeting relay's Redis bus, so relay only works between participants connected to this " +
+                        `server instance: ${err?.message ?? err}`,
+                );
+            }
         }
-        const bus: RedisRelayBus = new RedisRelayBus({ url, logger: this.logger });
-        try {
-            await bus.connect();
-        } catch (err: any) {
-            this.logger.error(
-                "Could not create the video meeting relay's Redis bus, so relay only works between participants connected to this " +
-                    `server instance: ${err?.message ?? err}`,
-            );
-            return;
+        if (!bus) {
+            bus = await this._objectFactory.newInstance(InProcessRelayBus, { name: `${name}InProcessRelayBus`, args: [] });
         }
-        this.relayBus = bus;
-        this.relayHub = new RelayHub({ bus, maxPayloadBytes: RELAY_MESSAGE_LIMIT_BYTES, logger: { debug: (message: string) => this.logger.debug(message) } });
+        this.relayHub = await this._objectFactory.newInstance(RelayHub, {
+            name: `${name}RelayHub`,
+            args: [{ bus, maxPayloadBytes: RELAY_MESSAGE_LIMIT_BYTES, logger: { debug: (message: string) => this.logger.debug(message) } }],
+        });
     }
 
     /** Disconnects the Redis relay bus, if there is one, when the object factory destroys the route. (The factory
@@ -548,18 +568,23 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         this.relayBus = undefined;
     }
 
-    private async init(): Promise<void> {
-        if (!this.meetingRepo) {
-            this.meetingRepo = await this._objectFactory!.newInstance(RepoUtils, { name: this.meetingClass.name, args: [this.meetingClass] });
+    /** Builds the model repositories once, before the route serves anything. */
+    @Init
+    protected async initialize(): Promise<void> {
+        if (!this._objectFactory) {
+            throw new Error("objectFactory is not set.");
         }
-        if (!this.inviteeRepo) {
-            this.inviteeRepo = await this._objectFactory!.newInstance(RepoUtils, { name: this.inviteeClass.name, args: [this.inviteeClass] });
+        if (!this.meetingRepo && this.meetingClass) {
+            this.meetingRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.meetingClass.name, args: [this.meetingClass] });
         }
-        if (!this.mailboxRepo) {
-            this.mailboxRepo = await this._objectFactory!.newInstance(RepoUtils, { name: this.mailboxClass.name, args: [this.mailboxClass] });
+        if (!this.inviteeRepo && this.inviteeClass) {
+            this.inviteeRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.inviteeClass.name, args: [this.inviteeClass] });
         }
-        if (!this.attendeeLinkRepo) {
-            this.attendeeLinkRepo = await this._objectFactory!.newInstance(RepoUtils, {
+        if (!this.mailboxRepo && this.mailboxClass) {
+            this.mailboxRepo = await this._objectFactory.newInstance(RepoUtils, { name: this.mailboxClass.name, args: [this.mailboxClass] });
+        }
+        if (!this.attendeeLinkRepo && this.attendeeLinkClass) {
+            this.attendeeLinkRepo = await this._objectFactory.newInstance(RepoUtils, {
                 name: this.attendeeLinkClass.name,
                 args: [this.attendeeLinkClass],
             });
@@ -797,7 +822,6 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         @Request req: HttpRequest,
         @AuthUser user?: JWTUser,
     ): Promise<VideoMeetingCreateResult<VM>> {
-        await this.init();
         const { mailboxUid, visibility } = this.validateCreateBody(rawBody);
         const body: CreateVideoMeetingBody = rawBody!;
         const startTime: Date | undefined = this.requireOptionalDate(body.startTime, "startTime");
@@ -858,7 +882,6 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         @Query("page") page: string | undefined,
         @AuthUser user?: JWTUser,
     ): Promise<(VM & { organizerJoinUrl?: string; publicJoinUrl?: string })[]> {
-        await this.init();
         if (typeof mailboxUid !== "string" || !mailboxUid) {
             throw new ApiError(ApiErrors.INVALID_REQUEST, 400, ApiErrorMessages.INVALID_REQUEST);
         }
@@ -888,7 +911,6 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     )
     @Get("/personal-room")
     public async personalRoom(@AuthUser user?: JWTUser): Promise<{ href: string; label: string }> {
-        await this.init();
         if (!user?.uid) {
             throw new ApiError(ApiErrors.AUTH_REQUIRED, 401, ApiErrorMessages.AUTH_REQUIRED);
         }
@@ -923,7 +945,6 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     )
     @Get("/:id")
     public async findById(@Param("id") id: string, @AuthUser user?: JWTUser): Promise<VM & { organizerJoinUrl?: string; publicJoinUrl?: string }> {
-        await this.init();
         const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.READ);
         return this.withJoinUrls(meeting);
     }
@@ -942,7 +963,6 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         body: { title?: string; status?: string; forceMuteOnJoin?: boolean; password?: string | null; waitingRoomEnabled?: boolean } | undefined,
         @AuthUser user?: JWTUser,
     ): Promise<VM> {
-        await this.init();
         const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.UPDATE);
         const patch: Record<string, any> = { uid: meeting.uid, version: (meeting as any).version };
         if (body?.title !== undefined) {
@@ -1012,7 +1032,6 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     )
     @Delete("/:id")
     public async delete(@Param("id") id: string, @AuthUser user?: JWTUser): Promise<void> {
-        await this.init();
         const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.DELETE);
         const strippedUser: JWTUser | undefined = stripTrustedRoles(user, this.trustedRoles);
         const invitees: VMI[] = await this.findInvitees(meeting);
@@ -1039,7 +1058,6 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     )
     @Post("/:id/kick/:uid")
     public async kick(@Param("id") id: string, @Param("uid") uid: string, @AuthUser user?: JWTUser): Promise<void> {
-        await this.init();
         const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.UPDATE);
         await this.revokeChannelGrant(meeting.uid, uid);
     }
@@ -1052,7 +1070,6 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     )
     @Get("/:id/waiting")
     public async listWaiting(@Param("id") id: string, @AuthUser user?: JWTUser): Promise<{ uid: string; name: string; requestedAt: string }[]> {
-        await this.init();
         const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.READ);
         const pending = this.pendingAdmissions.get(meeting.uid);
         if (!pending) {
@@ -1073,7 +1090,6 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     )
     @Post("/:id/admit/:uid")
     public async admit(@Param("id") id: string, @Param("uid") uid: string, @AuthUser user?: JWTUser): Promise<void> {
-        await this.init();
         const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.UPDATE);
         const request = this.pendingAdmissions.get(meeting.uid)?.get(uid);
         if (request) {
@@ -1089,7 +1105,6 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     )
     @Post("/:id/deny/:uid")
     public async deny(@Param("id") id: string, @Param("uid") uid: string, @AuthUser user?: JWTUser): Promise<void> {
-        await this.init();
         const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.UPDATE);
         const request = this.pendingAdmissions.get(meeting.uid)?.get(uid);
         if (request) {
@@ -1393,7 +1408,6 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     @RateLimit()
     @Get("/join/:token")
     public async join(@Param("token") token: string, @AuthUser user?: JWTUser): Promise<VideoMeetingJoinResponse> {
-        await this.init();
         const { meeting, resolvedVia } = await this.requireMeetingByToken(token);
         await this.requireOrganizerAuth(meeting, resolvedVia, user);
         const publicMeeting: PublicVideoMeeting = await this.buildPublicMeeting(meeting);
@@ -1428,7 +1442,6 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         body: { password?: string; name?: string } | undefined,
         @AuthUser user?: JWTUser,
     ): Promise<VideoMeetingJoinResult | VideoMeetingAdmissionRequiredResult> {
-        await this.init();
         const { meeting, resolvedVia } = await this.requireMeetingByToken(token);
         await this.requireOrganizerAuth(meeting, resolvedVia, user);
         const bypassed = resolvedVia === "organizerSlug";
@@ -1464,7 +1477,6 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         @Param("token") token: string,
         @AuthUser user: JWTUser,
     ): Promise<VideoMeetingJoinResult | VideoMeetingAdmissionRequiredResult> {
-        await this.init();
         const { meeting } = await this.requireMeetingByToken(token);
         const pending = this.pendingAdmissions.get(meeting.uid)?.get(user.uid);
         if (!pending) {
@@ -1510,7 +1522,6 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         if (!user || !id) {
             return RELAY_NOT_PERMITTED;
         }
-        await this.init();
         const checked: JWTUser | undefined = stripTrustedRoles(user, this.trustedRoles);
         if (!(await this.aclUtils!.hasPermission(checked, id, ACLAction.READ)) || !(await this.aclUtils!.hasPermission(checked, id, ACLAction.CREATE))) {
             return RELAY_NOT_PERMITTED;
@@ -1592,7 +1603,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         if (closed) {
             return;
         }
-        conn = this.relayHub.attach(id!, user!.uid, sock);
+        conn = this.relayHub!.attach(id!, user!.uid, sock);
         for (const message of queued) {
             conn?.message(message.data, message.isBinary);
         }

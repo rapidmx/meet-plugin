@@ -8,7 +8,7 @@
 import { EventEmitter } from "events";
 import { BaseVideoMeetingRoute } from "../../src/routes/BaseVideoMeetingRoute.js";
 import { RedisRelayBus } from "../../src/util/RedisRelayBus.js";
-import { InProcessRelayBus } from "../../src/util/RelayHub.js";
+import { InProcessRelayBus, RelayHub } from "../../src/util/RelayHub.js";
 import { FakeRedisServer } from "../util/fakeRedis.js";
 
 const redis = vi.hoisted(() => ({ createClient: vi.fn() }));
@@ -25,9 +25,18 @@ describe("BaseVideoMeetingRoute relay bus", () => {
     let server: FakeRedisServer;
     let logger: any;
 
-    /** A route as the object factory would leave it: config injected, then `@Init` run. */
+    /** The calls of the stand-in object factory: every instance it builds, in order. */
+    let built: { type: any; opts: any }[];
+
+    /** A route as the object factory would leave it: factory and config injected, then `@Init` run. */
     async function route(events: { url?: string } | null): Promise<any> {
         const r: any = new TestRoute();
+        r._objectFactory = {
+            newInstance: async (type: any, opts: any) => {
+                built.push({ type, opts });
+                return new type(...opts.args);
+            },
+        };
         r.logger = logger;
         r.eventsConfig = events;
         r.authorizeRelay = async () => undefined;
@@ -38,14 +47,41 @@ describe("BaseVideoMeetingRoute relay bus", () => {
     const busOf = (r: any): unknown => r.relayHub.bus;
 
     beforeEach(() => {
+        built = [];
         server = new FakeRedisServer();
         logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
         redis.createClient.mockReset().mockImplementation((options: any) => server.createClient(options));
     });
 
-    it("Starts out on an in-process bus, before it is initialized.", () => {
+    it("Has no relay hub until it is initialized.", () => {
         const r: any = new TestRoute();
-        expect(busOf(r)).toBeInstanceOf(InProcessRelayBus);
+        expect(r.relayHub).toBeUndefined();
+    });
+
+    it("Throws when the objectFactory is not set.", async () => {
+        const r: any = new TestRoute();
+        r.logger = logger;
+        await expect(r.initRelayBus()).rejects.toThrow("objectFactory is not set.");
+    });
+
+    it("Builds the hub and its bus through the factory, named after the route, and does not rebuild them.", async () => {
+        const r = await route(null);
+        expect(built.map((b) => [b.type, b.opts.name])).toEqual([
+            [InProcessRelayBus, "TestRouteInProcessRelayBus"],
+            [RelayHub, "TestRouteRelayHub"],
+        ]);
+        expect(built[0].opts.args).toEqual([]);
+        expect(built[1].opts.args[0].bus).toBe(busOf(r));
+        await r.initRelayBus();
+        expect(built).toHaveLength(2);
+
+        const redisRoute = await route({ url: "redis://events:6379" });
+        expect(built.slice(2).map((b) => [b.type, b.opts.name])).toEqual([
+            [RedisRelayBus, "TestRouteRedisRelayBus"],
+            [RelayHub, "TestRouteRelayHub"],
+        ]);
+        expect(built[2].opts.args[0]).toEqual({ url: "redis://events:6379", logger });
+        redisRoute.destroyRelayBus();
     });
 
     it("Uses the Redis bus when the events datastore is configured, connecting to its url.", async () => {
