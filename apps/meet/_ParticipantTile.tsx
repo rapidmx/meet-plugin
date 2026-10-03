@@ -72,7 +72,8 @@ export interface ParticipantTileProps {
     status?: string;
     /** Highlights this tile as the current presenter/focus. */
     isFocused?: boolean;
-    /** Fits the whole picture inside the tile instead of filling it - a shared screen must not be cropped. */
+    /** Marks this tile as showing a screen share rather than a camera - a screen share is never mirrored
+     * (regardless of `mirrored`/`isLocal`), since mirroring someone else's shared content would be disorienting. */
     contain?: boolean;
     /** Whether the local tile is shown mirrored, like a real mirror - ignored for a remote tile, which is never
      * mirrored. Default `true`; see this module's doc comment. */
@@ -159,7 +160,7 @@ export default function ParticipantTile({
                         autoPlay
                         playsInline
                         muted
-                        className={`w-full h-full ${contain ? "object-contain bg-black" : "object-cover"} ${isLocal && !contain && mirrored ? "[transform:scaleX(-1)]" : ""}`}
+                        className={`w-full h-full object-contain bg-black ${isLocal && !contain && mirrored ? "[transform:scaleX(-1)]" : ""}`}
                     />
                     {status && <StatusPill status={status} className="absolute top-2 left-1/2 -translate-x-1/2 whitespace-nowrap" />}
                 </>

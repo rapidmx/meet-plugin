@@ -28,13 +28,13 @@ describe("ParticipantTile", () => {
         expect(container.querySelector("video")).toBeNull();
     });
 
-    it("plays the stream in a muted video - a tile never plays sound, the call's audio elements do", () => {
+    it("plays the stream in a muted video, fitted rather than cropped so the capture device's aspect ratio is kept - a tile never plays sound, the call's audio elements do", () => {
         const stream = fakeMediaStream([fakeTrack("video")]);
         const { container } = render(<ParticipantTile name="Bob" stream={stream} />);
         const video = container.querySelector("video")!;
         expect(video.muted).toBe(true);
         expect(video.srcObject).toBe(stream);
-        expect(video.className).toContain("object-cover");
+        expect(video.className).toContain("object-contain");
         expect(video.className).not.toContain("scaleX");
     });
 

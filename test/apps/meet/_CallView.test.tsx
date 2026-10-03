@@ -386,9 +386,14 @@ describe("CallView - layout", () => {
         expect(screen.queryByTestId("main-tile")).toBeNull();
     });
 
-    it("disables the grid/focus toggle with only one other participant - there is nothing to visibly toggle", async () => {
-        await withParticipant();
+    it("disables the grid/focus toggle only while alone - there is nothing to visibly toggle yet", async () => {
+        await connected();
         expect(screen.getByRole("button", { name: "Switch to focused view" })).toBeDisabled();
+    });
+
+    it("enables the grid/focus toggle from the very first other participant", async () => {
+        await withParticipant();
+        expect(screen.getByRole("button", { name: "Switch to focused view" })).toBeEnabled();
     });
 
     it("lets a participant pin another as the focused tile, and unpin them", async () => {

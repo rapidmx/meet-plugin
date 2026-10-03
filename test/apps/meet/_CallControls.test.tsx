@@ -339,18 +339,15 @@ describe("CallControls - the rest", () => {
         expect(screen.getByRole("button", { name: "Switch to grid view" })).toBeInTheDocument();
     });
 
-    it("disables the grid/focus toggle with an explanatory title when there's nothing meaningful to toggle - fewer than two other participants", () => {
+    it("disables the grid/focus toggle with an explanatory title only while alone - there is nothing to toggle yet", () => {
         const { props, rerender } = renderControls({ participants: [] });
         const button = screen.getByRole("button", { name: "Switch to focused view" });
         expect(button).toBeDisabled();
-        expect(button).toHaveAttribute("title", "Grid and focused view look the same with only one other participant.");
+        expect(button).toHaveAttribute("title", "Grid and focused view look the same while you're alone.");
         fireEvent.click(button);
         expect(props.onToggleViewMode).not.toHaveBeenCalled();
 
         rerender(<CallControls {...props} participants={[fakeMeshParticipant({ uid: "z" })]} />);
-        expect(screen.getByRole("button", { name: "Switch to focused view" })).toBeDisabled();
-
-        rerender(<CallControls {...props} participants={[fakeMeshParticipant({ uid: "z" }), fakeMeshParticipant({ uid: "y" })]} />);
         const enabled = screen.getByRole("button", { name: "Switch to focused view" });
         expect(enabled).toBeEnabled();
         expect(enabled).not.toHaveAttribute("title");

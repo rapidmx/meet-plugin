@@ -15,7 +15,10 @@
  *
  * The call fills the viewport (`fixed inset-0`) as three rows - a slim header, the tiles (which take whatever room
  * is left and never scroll the page), and the control bar pinned to the bottom - instead of being laid out inside
- * the branded page shell, whose header, footer and padding pushed it off the screen.
+ * the branded page shell, whose header, footer and padding pushed it off the screen. In plain grid view, each tile
+ * keeps its capture device's aspect ratio (`aspect-video`) instead of being stretched to fill an equal share of the
+ * available height - the grid area itself may scroll (vertically, within that middle row) once enough
+ * aspect-ratio-sized tiles no longer all fit, rather than cropping or distorting any of them to force a fit.
  *
  * ## Where the local tile appears
  *
@@ -714,11 +717,14 @@ export default function CallView({
         );
     } else {
         // Plain grid, nobody presenting: the local tile joins the grid as an ordinary tile (unless hidden) instead
-        // of floating in a corner - see this module's doc comment.
+        // of floating in a corner - see this module's doc comment. Each tile keeps a video aspect ratio
+        // (`aspect-video`) rather than being stretched to fill whatever height an equal-row grid would otherwise
+        // force on it, so rows size to their own content (`content-start`, with a scrollbar if that overflows)
+        // instead of a fixed `auto-rows-fr` share of the stage.
         stage = (
-            <div className="h-full grid gap-2 auto-rows-fr [grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr))]">
-                {!selfHidden && selfTile("h-full", true)}
-                {participants.map((p) => remoteTile(p, "h-full"))}
+            <div className="h-full content-start overflow-y-auto grid gap-2 [grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr))]">
+                {!selfHidden && selfTile("aspect-video", true)}
+                {participants.map((p) => remoteTile(p, "aspect-video"))}
             </div>
         );
     }

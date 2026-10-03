@@ -76,8 +76,11 @@ export interface CallControlsProps {
     onToggleHand: () => void;
     onReaction: (emoji: string) => void;
     viewMode: CallViewMode;
-    /** Disabled whenever `participants.length < 2` - grid and focused view render the exact same single tile with
-     * only one other participant (or none), so there is nothing for this to visibly toggle yet. */
+    /** Disabled while alone (`participants.length === 0`) - with nobody else here, grid and focused view both just
+     * show the local tile filling the stage, so there is nothing for this to visibly toggle yet. Enabled from the
+     * very first other participant: focus view corners the local tile and gives the other participant the main
+     * slot, which already looks different from grid view's two equal-sized tiles - see `_CallView.tsx`'s doc
+     * comment on where the local tile appears. */
     onToggleViewMode: () => void;
     /** True while talking-stick mode is on and this participant doesn't currently hold it - see `_CallView.tsx`'s
      * doc comment on talking-stick mode. Disables the microphone toggle (not the device-picker chevron, which
@@ -338,8 +341,8 @@ export default function CallControls({
                 type="button"
                 className={`${BUTTON} w-12 ${NEUTRAL} disabled:opacity-40 disabled:cursor-not-allowed`}
                 aria-label={viewMode === "grid" ? "Switch to focused view" : "Switch to grid view"}
-                disabled={participants.length < 2}
-                title={participants.length < 2 ? "Grid and focused view look the same with only one other participant." : undefined}
+                disabled={participants.length === 0}
+                title={participants.length === 0 ? "Grid and focused view look the same while you're alone." : undefined}
                 onClick={onToggleViewMode}
             >
                 {viewMode === "grid" ? <FocusIcon /> : <GridIcon />}
