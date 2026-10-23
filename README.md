@@ -1,4 +1,4 @@
-# RapidMX: Video Conferencing
+# RapidMX: Meet Plugin
 
 [![CI](https://github.com/RapidMX/meet-plugin/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/RapidMX/meet-plugin/actions/workflows/build.yml)
 [![Coverage Status](https://coveralls.io/repos/github/RapidMX/meet-plugin/badge.svg?branch=main)](https://coveralls.io/github/RapidMX/meet-plugin?branch=main)
