@@ -88,3 +88,48 @@ export const RemoveIcon = () => (
         <line x1="18" y1="6" x2="6" y2="18" />
     </svg>
 );
+
+/** A speech bubble - the in-call chat. Drawn from primitives, same reasoning as `BatonIcon`. */
+export const ChatIcon = () => (
+    <svg viewBox="0 0 24 24" className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden="true" focusable="false">
+        <path d="M4 5h16v11H9l-5 4V5z" />
+        <line x1="8" y1="9.5" x2="16" y2="9.5" strokeLinecap="round" />
+        <line x1="8" y1="12.5" x2="13" y2="12.5" strokeLinecap="round" />
+    </svg>
+);
+
+/** An easel board with a squiggle on it - the shared whiteboard. */
+export const WhiteboardIcon = () => (
+    <svg viewBox="0 0 24 24" className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+        <rect x="3" y="4" width="18" height="12" rx="1" />
+        <path d="M7 12c1.5-3 3-3 4 0s2.5 3 4-1" />
+        <line x1="12" y1="16" x2="9" y2="21" />
+        <line x1="12" y1="16" x2="15" y2="21" />
+    </svg>
+);
+
+/** The letters "GIF" in a rounded box - the chat's GIF picker. */
+export const GifIcon = () => (
+    <svg viewBox="0 0 24 24" className="w-6 h-6" aria-hidden="true" focusable="false">
+        <rect x="2.5" y="5.5" width="19" height="13" rx="2.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+        <text x="12" y="15.2" textAnchor="middle" fontSize="7.5" fontWeight="700" fontFamily="system-ui, sans-serif" fill="currentColor">
+            GIF
+        </text>
+    </svg>
+);
+
+export const SendIcon = () => <Icon path="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" className="w-5 h-5" />;
+
+export const UndoIcon = () => <Icon path="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z" className="w-5 h-5" />;
+
+/** A slanted eraser block. */
+export const EraserIcon = () => (
+    <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" aria-hidden="true" focusable="false">
+        <path d="M14 4l6 6-9 9H6l-3-3z" />
+        <line x1="9" y1="9" x2="15" y2="15" />
+        <line x1="11" y1="19" x2="21" y2="19" />
+    </svg>
+);
+
+/** A trash can - clearing the whole whiteboard. */
+export const ClearIcon = () => <Icon path="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z" className="w-5 h-5" />;

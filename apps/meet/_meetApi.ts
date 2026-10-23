@@ -48,10 +48,10 @@ export interface PublicVideoMeeting {
  * Mirrors `BaseVideoMeetingRoute.ts`'s `VideoMeetingJoinResult`. `authenticated: true` means the visiting browser
  * already held a valid session for a real RapidMX identity when it called `join()` - `token`/`expiresAt` are then
  * omitted entirely (there is no guest token to hand over), and the caller (`[token].tsx`) must not write any
- * cookie of its own before connecting to `/push`: the browser's own already-existing `jwt` session cookie already
- * authenticates it there, with zero new client-side auth handling. `authenticated: false` (the common anonymous
- * case) is unchanged from Phase 1: `token`/`expiresAt` are present, and `GuestSignalingClient` applies `token` as a
- * cookie before connecting.
+ * cookie of its own before opening the signaling socket: the browser's own already-existing `jwt` session cookie
+ * already authenticates it there, with zero new client-side auth handling. `authenticated: false` (the common
+ * anonymous case) is unchanged from Phase 1: `token`/`expiresAt` are present, and `SignalingClient` applies `token` as
+ * a cookie before connecting.
  */
 export interface VideoMeetingJoinResult {
     meeting: PublicVideoMeeting;
@@ -60,7 +60,8 @@ export interface VideoMeetingJoinResult {
     /** The identity to identify as on the signaling channel/mesh - the caller's own real uid when `authenticated`
      * is `true`, otherwise a freshly minted synthetic `guest:<random>` uid. Always present. */
     selfUid: string;
-    /** A short-lived guest JWT, usable against `/push`. Present only when `authenticated` is `false`. */
+    /** A short-lived guest JWT, usable against the meeting's signaling and relay sockets. Present only when
+     * `authenticated` is `false`. */
     token?: string;
     /** ISO 8601 instant `token` expires at. Present only when `authenticated` is `false`. */
     expiresAt?: string;
@@ -192,8 +193,8 @@ export function setWaitingRoomEnabled(meetingUid: string, waitingRoomEnabled: bo
 
 /** Removes a participant from the meeting - host only, enforced server-side with the caller's own authenticated
  * session (the same mailbox-ACL check every other owner-side video-meeting route uses), not by anything the
- * client claims. Revokes `uid`'s grant on the meeting's own push channel, so they can no longer signal or relay
- * media even if their client ignores the cooperative "kicked" signal a host's UI sends alongside this
+ * client claims. Revokes `uid`'s grant on the meeting and closes every signaling socket they hold in it, so they can
+ * no longer signal or relay media even if their client ignores the cooperative "kicked" signal a host's UI sends alongside this
  * (`MeshConnectionManager.sendKick()`). `uid` is the participant's real account uid (`MeshParticipant.uid` minus
  * its tab-scoped suffix - see `_CallView.tsx`'s `accountUidOf()`), not their tab-scoped peer id. */
 export function kickParticipant(meetingUid: string, uid: string): Promise<void> {

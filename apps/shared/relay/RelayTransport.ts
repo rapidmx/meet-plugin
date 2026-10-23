@@ -58,7 +58,8 @@ export interface RelayTransportOptions {
 }
 
 /** The relay WebSocket's URL for a meeting: this deployment's origin (the API origin when the UI is served from a
- * different one, else the page's own), `http` becoming `ws` - the same derivation `pushUrl()` uses for `/push`.
+ * different one, else the page's own), `http` becoming `ws` - the same derivation `signalingUrl()` uses for the
+ * signaling socket.
  * `undefined` when there is no origin at all (not running in a browser). */
 export function relayUrl(meetingUid: string): string | undefined {
     const origin = apiOrigin() || (typeof window !== "undefined" ? window.location.origin : "");

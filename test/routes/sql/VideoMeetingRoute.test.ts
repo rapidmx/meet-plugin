@@ -21,6 +21,7 @@ import { GUEST_JWT_TTL_SECONDS, GUEST_UID_PREFIX } from "../../../src/routes/Bas
 import { turnRestCredential } from "../../../src/util/IceServerUtils.js";
 import { effectsSuite } from "../effectsSuite.js";
 import { relaySuite } from "../relaySuite.js";
+import { signalingSuite } from "../signalingSuite.js";
 import { personalRoomSuite } from "../personalRoomSuite.js";
 import { videoMeetingSecuritySuite } from "../videoMeetingSecuritySuite.js";
 
@@ -1028,6 +1029,11 @@ describe("Route:VideoMeetingSQL Tests", () => {
 
     videoMeetingSecuritySuite(suiteContext);
     relaySuite({
+        ...suiteContext,
+        wsPort: () => (server.getApplication() as any).listenPort,
+        route: () => objectFactory.getInstance("routes.VideoMeetingRoute"),
+    });
+    signalingSuite({
         ...suiteContext,
         wsPort: () => (server.getApplication() as any).listenPort,
         route: () => objectFactory.getInstance("routes.VideoMeetingRoute"),

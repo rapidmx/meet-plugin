@@ -23,7 +23,8 @@
  * - Binary messages may be dropped under backpressure and the socket may close at any moment, so this client
  * reconnects with exponential backoff and treats every media send as best effort.
  *
- * Authentication is the `jwt` cookie already in place (see `GuestSignalingClient`), so this client sets no cookie.
+ * Authentication is the `jwt` cookie already in place (see `../signaling/SignalingClient.ts`), so this client sets no
+ * cookie.
  */
 import { DEFAULT_MESSAGE_BYTES } from "./frames.js";
 import type { RelaySocket } from "./relayEnv.js";

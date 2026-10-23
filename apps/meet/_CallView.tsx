@@ -4,7 +4,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 /**
  * The in-call view: connects the full-mesh `MeshConnectionManager` to the meeting's signaling channel
- * (`GuestSignalingClient`), mirrors its events into React state, and renders the grid/focused/presentation
+ * (`SignalingClient`, this plugin's own WebSocket), mirrors its events into React state, and renders the grid/focused/presentation
  * layouts - see `apps/shared/webrtc/MeshConnectionManager.ts`'s doc comment for the who-calls-whom and
  * single-presenter rules this view relies on rather than re-deciding. These reusable, non-UI modules live under
  * `apps/shared/` rather than this plugin's backend `src/` - `tsconfig.apps.json` builds `apps/` as its own
@@ -68,6 +68,18 @@
  * `MeshConnectionManager`'s own doc comment on why that needs no extra code - the header chip then says nobody has
  * the floor, until the host picks someone (or themselves) again.
  *
+ * ## Chat and whiteboard
+ *
+ * Both run on `CollabSession` (`apps/shared/collab/CollabSession.ts`), over the same signaling channel as the mesh,
+ * and last as long as the call. The chat opens in a drawer (`_ChatPanel.tsx`) from the header's chat button - in
+ * place of the participants drawer, since one side drawer at a time is all a narrow window has room for - which
+ * counts unread messages while it is closed. The whiteboard (`_Whiteboard.tsx`) takes the stage when opened from
+ * the control bar, with everyone's video in a strip below it and the local tile in its corner, like presenting; it
+ * is a per-participant view of one shared board, so opening or closing it changes nobody else's screen. Its button
+ * shows a dot when someone draws while it is closed. Everyone's pointer shows on everyone's board with their name;
+ * while talking-stick mode is on only the holder may draw (`CollabSession.setDrawPolicy()`), the same rule as the
+ * microphone. History a late joiner receives is shown but not counted as unread.
+ *
  * ## Diagnostics, connection method and settings
  *
  * All three are opened from `_CallControls.tsx`'s own "…" menu (its doc comment covers the menu itself) via
@@ -91,9 +103,11 @@ import { createBrowserPeerConnection } from "../shared/webrtc/realPeerConnection
 import { MeshConnectionManager } from "../shared/webrtc/MeshConnectionManager.js";
 import type { MeshParticipant, RelayTransportLike, TransportMode } from "../shared/webrtc/types.js";
 import { createRelayTransport } from "../shared/relay/RelayTransport.js";
-import { GuestSignalingClient } from "../shared/push/GuestSignalingClient.js";
+import { SIGNALING_EVICTED_REASON, SignalingClient } from "../shared/signaling/SignalingClient.js";
+import { CollabSession, type ChatEntry, type RemoteCursor } from "../shared/collab/CollabSession.js";
 import CallControls, { type CallViewMode } from "./_CallControls.js";
-import { BatonIcon } from "./_icons.js";
+import ChatPanel from "./_ChatPanel.js";
+import { BatonIcon, ChatIcon } from "./_icons.js";
 import {
     admitParticipant,
     denyParticipant,
@@ -109,12 +123,13 @@ import DiagnosticsWindow from "./_DiagnosticsWindow.js";
 import ParticipantTile from "./_ParticipantTile.js";
 import ParticipantsDrawer from "./_ParticipantsDrawer.js";
 import SettingsModal from "./_SettingsModal.js";
+import Whiteboard from "./_Whiteboard.js";
 
 export interface CallViewProps {
     channel: string;
     /** Omitted when the caller already authenticated as a real RapidMX identity in `join()` - there is then no
-     * guest token to hand `GuestSignalingClient`, which relies entirely on the browser's own already-existing
-     * `jwt` session cookie instead (see its own doc comment). */
+     * guest token to hand `SignalingClient`, which relies entirely on the browser's own already-existing `jwt`
+     * session cookie instead (see its own doc comment). */
     token?: string;
     selfUid: string;
     selfName: string;
@@ -241,8 +256,23 @@ export default function CallView({
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [transportMode, setTransportModeState] = useState<TransportMode>("auto");
     const [selfHidden, setSelfHidden] = useState(false);
+    const [chatOpen, setChatOpen] = useState(false);
+    const [chatEntries, setChatEntries] = useState<readonly ChatEntry[]>([]);
+    const [unreadChat, setUnreadChat] = useState(0);
+    const [whiteboardOpen, setWhiteboardOpen] = useState(false);
+    const [boardRevision, setBoardRevision] = useState(0);
+    const [whiteboardActivity, setWhiteboardActivity] = useState(false);
+    const [boardCursors, setBoardCursors] = useState<RemoteCursor[]>([]);
 
     const managerRef = useRef<MeshConnectionManager | null>(null);
+    const collabRef = useRef<CollabSession | null>(null);
+    /** Whether the chat drawer / whiteboard is open, for the collab-event handler - set up once, like the mesh's. */
+    const chatOpenRef = useRef(chatOpen);
+    const whiteboardOpenRef = useRef(whiteboardOpen);
+    useEffect(() => {
+        chatOpenRef.current = chatOpen;
+        whiteboardOpenRef.current = whiteboardOpen;
+    }, [chatOpen, whiteboardOpen]);
     /** The raw capture from `getDisplayMedia()` - only ever used to stop it (releasing the OS's own share
      * indicator) and to notice the participant ending the share from the browser's own UI (`track.onended`). What's
      * actually shown and sent is `screenTransformRef`'s output (`screenStream` state) - see `handleToggleShare()`. */
@@ -271,7 +301,14 @@ export default function CallView({
 
     useEffect(() => {
         let cancelled = false;
-        const client = new GuestSignalingClient({ channel, token });
+        const client = new SignalingClient({
+            meetingUid: channel,
+            peerId,
+            token,
+            // The server closed the socket for good: being removed reads as the host's doing (the cooperative `kicked`
+            // usually got here first), anything else - the meeting ended, the grant is gone - as a connection error.
+            onClosed: (reason) => (reason === SIGNALING_EVICTED_REASON ? onLeave("The host removed you from this call.") : setConnectError(reason)),
+        });
         const manager = new MeshConnectionManager({
             selfUid,
             peerId,
@@ -285,6 +322,27 @@ export default function CallView({
             localState: { audioOn: media.micOn, videoOn: media.cameraOn },
         });
         managerRef.current = manager;
+        const collab = new CollabSession({ channel: client, selfUid, peerId, selfName });
+        collabRef.current = collab;
+        const unsubscribeCollab = collab.onEvent((event) => {
+            if (event.type === "board") {
+                setBoardRevision(collab.board.revision);
+                if (!whiteboardOpenRef.current) {
+                    setWhiteboardActivity(true);
+                }
+                return;
+            }
+            if (event.type === "cursors") {
+                setBoardCursors(collab.cursors);
+                return;
+            }
+            setChatEntries(collab.chat);
+            // What was said before this participant arrived (a catch-up), or a message only renamed, is not news to them.
+            if (!event.entry.self && !event.history && !event.renamed && !chatOpenRef.current) {
+                setUnreadChat((prev) => prev + 1);
+                setAnnouncement(`${event.entry.name}: ${event.entry.text.slice(0, 140)}`);
+            }
+        });
 
         const unsubscribe = manager.onEvent((event) => {
             switch (event.type) {
@@ -347,6 +405,8 @@ export default function CallView({
             .connect()
             .then(() => {
                 if (!cancelled) {
+                    // Listening before the mesh says hello, so no answering hello is missed - see `CollabSession`.
+                    collab.start();
                     manager.start();
                     setSignalingReady(true);
                 }
@@ -367,6 +427,8 @@ export default function CallView({
             cancelled = true;
             window.removeEventListener("pagehide", onPageHide);
             unsubscribe();
+            unsubscribeCollab();
+            collab.stop();
             manager.stop();
             client.close();
             for (const handle of Object.values(levelMetersRef.current)) {
@@ -415,6 +477,11 @@ export default function CallView({
             void mediaRef.current.toggleMic();
         }
     }, [talkingStickActive, selfHasTalkingStick]);
+
+    // Talking stick also decides who may draw on the whiteboard: only the holder, while it is on - see `CollabSession`.
+    useEffect(() => {
+        collabRef.current?.setDrawPolicy(talkingStickActive ? (peer) => peer === talkingStickHolder : undefined);
+    }, [talkingStickActive, talkingStickHolder]);
 
     useEffect(() => {
         if (!presenterUid) {
@@ -502,6 +569,22 @@ export default function CallView({
         if (managerRef.current?.sendReaction(emoji)) {
             showReaction(emoji, "You");
         }
+    }
+
+    function handleToggleChat() {
+        setChatOpen((prev) => !prev);
+        setDrawerOpen(false);
+        setUnreadChat(0);
+    }
+
+    function handleToggleParticipants() {
+        setDrawerOpen((prev) => !prev);
+        setChatOpen(false);
+    }
+
+    function handleToggleWhiteboard() {
+        setWhiteboardOpen((prev) => !prev);
+        setWhiteboardActivity(false);
     }
 
     function togglePin(uid: string) {
@@ -629,7 +712,7 @@ export default function CallView({
     const otherUids = participants.map((p) => p.uid);
     // A pin or an active-speaker pick can name someone who has just left, until the state catches up.
     const stillHere = (uid: string | undefined) => (uid && otherUids.includes(uid) ? uid : undefined);
-    const showFocusLayout = !!presenterUid || viewMode === "focus";
+    const showFocusLayout = !!presenterUid || viewMode === "focus" || whiteboardOpen;
     const mainUid = showFocusLayout
         ? computeMainUid({ presenterUid, pinnedUid: stillHere(pinnedUid), activeSpeakerUid: stillHere(activeSpeakerUid), otherUids })
         : undefined;
@@ -686,7 +769,32 @@ export default function CallView({
     const thumbnails = participants.filter((p) => p.uid !== mainUid);
 
     let stage: React.ReactNode;
-    if (alone) {
+    if (whiteboardOpen && collabRef.current) {
+        // The board takes the main slot, everyone else's video the strip below it - see this module's doc comment.
+        stage = (
+            <div className="h-full flex flex-col gap-2">
+                <div className="flex-1 min-h-0">
+                    <Whiteboard
+                        session={collabRef.current}
+                        revision={boardRevision}
+                        cursors={boardCursors}
+                        canDraw={!talkingStickActive || selfHasTalkingStick}
+                        drawLockedTo={talkingStickHolderName}
+                        onClose={handleToggleWhiteboard}
+                    />
+                </div>
+                {participants.length > 0 && (
+                    <div className="flex gap-2 overflow-x-auto h-24 shrink-0" data-testid="thumbnails">
+                        {participants.map((p) => (
+                            <div key={p.uid} className="w-36 shrink-0">
+                                {remoteTile(p, "h-full")}
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+        );
+    } else if (alone) {
         // Nobody else yet: the local participant fills the tile area, presenting or not - and is never hideable,
         // since there'd be nothing left to look at (see this module's doc comment on hiding the local tile).
         stage = isPresenting ? (
@@ -760,11 +868,26 @@ export default function CallView({
                         )}
                         <button
                             type="button"
+                            className={`relative w-9 h-9 flex items-center justify-center rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80 ${chatOpen ? "bg-[#a8c7fa] text-[#062e6f] hover:bg-[#8ab4f8]" : "bg-[#3c4043] hover:bg-[#4b4f53]"}`}
+                            aria-label={unreadChat > 0 ? `Chat, ${unreadChat} unread` : "Chat"}
+                            aria-haspopup="dialog"
+                            aria-expanded={chatOpen}
+                            onClick={handleToggleChat}
+                        >
+                            <ChatIcon />
+                            {unreadChat > 0 && (
+                                <span className="absolute -top-1 -right-1 min-w-5 h-5 px-1 flex items-center justify-center rounded-full bg-[#d93025] text-white text-[11px] font-semibold" data-testid="chat-unread">
+                                    {unreadChat > 99 ? "99+" : unreadChat}
+                                </span>
+                            )}
+                        </button>
+                        <button
+                            type="button"
                             className="px-3 py-1.5 rounded-full bg-[#3c4043] hover:bg-[#4b4f53] text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
                             aria-label={`${participants.length + 1} participants`}
                             aria-haspopup="dialog"
                             aria-expanded={drawerOpen}
-                            onClick={() => setDrawerOpen((prev) => !prev)}
+                            onClick={handleToggleParticipants}
                         >
                             {participants.length + 1}
                         </button>
@@ -805,6 +928,9 @@ export default function CallView({
                         onReaction={handleReaction}
                         viewMode={viewMode}
                         onToggleViewMode={() => setViewMode((prev) => (prev === "grid" ? "focus" : "grid"))}
+                        whiteboardOpen={whiteboardOpen}
+                        whiteboardActivity={whiteboardActivity}
+                        onToggleWhiteboard={handleToggleWhiteboard}
                         micLocked={micLocked}
                         selfHidden={selfHidden}
                         onToggleSelfHidden={handleToggleSelfHidden}
@@ -869,6 +995,10 @@ export default function CallView({
                     onGiveTalkingStick={handleGiveTalkingStick}
                     onClose={() => setDrawerOpen(false)}
                 />
+            )}
+
+            {chatOpen && collabRef.current && (
+                <ChatPanel entries={chatEntries} onSend={(text) => collabRef.current!.sendChat(text)} onClose={handleToggleChat} />
             )}
 
             {diagnosticsOpen && (

@@ -134,7 +134,7 @@ export interface VideoElementLike {
     pause(): void;
 }
 
-/** The subset of `WebSocket` the relay client uses (the same seam shape `GuestSignalingClient`'s `PushSocket` has). */
+/** The subset of `WebSocket` the relay client uses (the same seam shape `SignalingClient`'s `SignalingSocket` has). */
 export interface RelaySocket {
     readyState: number;
     /** Bytes queued by `send()` that the browser has not yet handed to the network - the backpressure signal. */

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- **Chat during a call.** The chat button beside the participant count opens a chat everyone in the call can see. Messages support Markdown (**bold**, *italic*, ~~strikethrough~~, `code`, code blocks, quotes, lists and links), and have an emoji picker and a GIF picker (the same ones as the mail composer; GIF search uses the server's Giphy setting). A web address typed or pasted on its own becomes a link, and one that points at an image (a GIF, PNG, JPEG, WebP and so on) shows the image instead. The button counts messages that arrived while the chat was closed. Someone who joins late sees what was said before they arrived. Messages last as long as the call: they are not stored on the server.
+- **A shared whiteboard.** The whiteboard button in the control bar opens a board everyone in the call draws on together, with everyone's video in a strip below it. Draw with a ballpoint pen, sharpie, marker (translucent, like a highlighter), crayon or coloring pencil, drag out lines, arrows, rectangles, ellipses, triangles and stars with the stencil, place stamps, and erase. Pick a color from the swatches or any color from the color wheel, and a pen size. Undo (or Ctrl+Z) takes back your own last drawing; Clear empties the board for everyone. Opening the board changes only your own screen; its button shows a dot when someone draws while you have it closed. Everyone's pointer shows on the board as the tool and color they have picked, with their name beside it. While talking stick is on, only the participant holding the stick can draw; everyone else can still point. Someone who joins late sees the board as it is. Like the chat, the board lasts as long as the call.
+
+### Changed
+
+- **The call's signaling has its own connection.** Each participant's browser now exchanges everything that sets up and runs the call (connection setup, who is in the call, moderation, chat and whiteboard) over one WebSocket to this plugin's own `/api/mail/video-meetings/signal/<meeting>` endpoint, instead of the server's shared push channel, with a separate web request for every message sent. Setting up a connection is quicker, and a connection's setup details reach only the participant they are for. Removing a participant now disconnects them at once. With several server replicas, signaling crosses replicas through the same Redis (`events` datastore) the media relay uses; without it, only participants connected to the same replica reach each other. Proxies and load balancers in front of the server must allow WebSocket upgrades on that path, as they already must for the media relay's.
+
 ## v0.15.0
 
 ## v0.14.1

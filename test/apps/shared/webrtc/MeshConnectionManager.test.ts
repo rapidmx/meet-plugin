@@ -41,8 +41,9 @@ function manualChannel(): SignalingChannel & { emit: (message: SignalMessage) =>
 }
 
 /** A small in-memory pub/sub bus wiring several managers' channels together - fans every send out to every
- * registered handler, including the sender's own (matching the real `/push` transport - see
- * `MeshConnectionManager`'s own doc comment on why it filters its own uid at the top of `handleMessage()`). */
+ * registered handler, including the sender's own and those a `to` does not address. The real transport
+ * (`SignalingClient`) delivers neither, but `MeshConnectionManager` filters both itself at the top of
+ * `handleMessage()`, and this bus exercises that. */
 function bus() {
     const allHandlers = new Set<(message: SignalMessage) => void>();
     return {

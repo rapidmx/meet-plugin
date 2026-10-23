@@ -18,7 +18,7 @@ const { FakeSignalingClient, createdPcs, levelMeterRegistrations, displayMediaMo
         handlers = new Set<(message: SignalMessage) => void>();
         connectResult: Promise<void> = FakeSignalingClient.nextConnectResult ?? Promise.resolve();
         closed = false;
-        constructor(public opts: { channel: string; token?: string }) {
+        constructor(public opts: { meetingUid: string; peerId: string; token?: string; onClosed?: (reason: string) => void }) {
             FakeSignalingClient.instances.push(this);
         }
         connect() {
@@ -74,7 +74,7 @@ vi.mock("../../../apps/shared/relay/RelayTransport.js", () => ({
     },
 }));
 
-vi.mock("../../../apps/shared/push/GuestSignalingClient.js", () => ({ GuestSignalingClient: FakeSignalingClient }));
+vi.mock("../../../apps/shared/signaling/SignalingClient.js", () => ({ SignalingClient: FakeSignalingClient, SIGNALING_EVICTED_REASON: "Removed from the meeting." }));
 vi.mock("../../../apps/shared/webrtc/realPeerConnection.js", async () => {
     const utils = await import("../testUtils.js");
     return {
@@ -130,6 +130,7 @@ vi.mock("../../../apps/meet/_meetApi.js", () => ({
 }));
 
 import CallView, { accountUidOf, computeMainUid, newPeerId } from "../../../apps/meet/_CallView.js";
+import { CollabSession } from "../../../apps/shared/collab/CollabSession.js";
 
 /** This tab's own id on the channel - `CallView` appends a random suffix to the uid it is given (stubbed below). */
 const SELF = "local-me~fixed";
@@ -222,7 +223,7 @@ describe("newPeerId", () => {
 describe("CallView - connecting", () => {
     it("connects, starts the mesh under its own peer id, and announces its name and what it sends", async () => {
         const { client } = await connected();
-        expect(client.opts).toEqual({ channel: "meeting-1", token: "guest-token" });
+        expect(client.opts).toEqual({ meetingUid: "meeting-1", peerId: expect.stringMatching(/^local-me~/), token: "guest-token", onClosed: expect.any(Function) });
         expect(client.sent).toContainEqual({ type: "video-meeting-signal", kind: "hello", from: "local-me", peer: SELF, name: "Alice", state: STATE });
         expect(screen.getByRole("heading", { name: "Standup" })).toBeInTheDocument();
         expect(screen.getByLabelText("1 participants")).toBeInTheDocument();
@@ -244,7 +245,16 @@ describe("CallView - connecting", () => {
     it("connects with no signaling token at all for an already-authenticated real caller (join()'s 'authenticated: true' case)", async () => {
         const { client } = await connected({ token: undefined });
         expect(client.opts.token).toBeUndefined();
-        expect(client.opts.channel).toBe("meeting-1");
+        expect(client.opts.meetingUid).toBe("meeting-1");
+        expect(client.opts.peerId).toMatch(/^local-me~/);
+    });
+
+    it("leaves as removed when the server closes signaling for removal, and shows any other final close as an error", async () => {
+        const { client, onLeave } = await connected();
+        act(() => client.opts.onClosed?.("The meeting has ended."));
+        expect(screen.getByRole("alert")).toHaveTextContent("The meeting has ended.");
+        act(() => client.opts.onClosed?.("Removed from the meeting."));
+        expect(onLeave).toHaveBeenCalledWith("The host removed you from this call.");
     });
 
     it("shows a connection error when the signaling channel fails to connect", async () => {
@@ -1509,5 +1519,361 @@ describe("CallView - host waiting room", () => {
         fireEvent.click(screen.getByRole("button", { name: "Close participants" }));
         await new Promise((resolve) => setTimeout(resolve, 10));
         expect(listWaitingParticipantsMock.mock.calls.length).toBe(callsSoFar);
+    });
+});
+
+describe("CallView - chat", () => {
+    const chat = (from: string, id: string, text: string): SignalMessage => ({ type: "video-meeting-signal", kind: "chat", from, chat: { id, text, sentAt: Date.now() } });
+    const chatButton = () => screen.getByRole("button", { name: /^Chat/ });
+
+    it("opens the chat drawer from its button and closes it from the same button and its own close", async () => {
+        await connected();
+        expect(chatButton()).toHaveAttribute("aria-expanded", "false");
+        fireEvent.click(chatButton());
+        expect(chatButton()).toHaveAttribute("aria-expanded", "true");
+        const drawer = screen.getByRole("dialog", { name: "Chat" });
+        expect(within(drawer).getByText(/Messages are visible to everyone/)).toBeInTheDocument();
+        fireEvent.click(chatButton());
+        expect(screen.queryByRole("dialog", { name: "Chat" })).toBeNull();
+
+        fireEvent.click(chatButton());
+        fireEvent.click(screen.getByRole("button", { name: "Close chat" }));
+        expect(screen.queryByRole("dialog", { name: "Chat" })).toBeNull();
+    });
+
+    it("shows one side drawer at a time: the chat closes the participants drawer, and the other way round", async () => {
+        await connected();
+        const participants = screen.getByRole("button", { name: "1 participants" });
+        fireEvent.click(participants);
+        expect(screen.getByRole("dialog", { name: "Participants" })).toBeInTheDocument();
+
+        fireEvent.click(chatButton());
+        expect(screen.getByRole("dialog", { name: "Chat" })).toBeInTheDocument();
+        expect(screen.queryByRole("dialog", { name: "Participants" })).toBeNull();
+        expect(participants).toHaveAttribute("aria-expanded", "false");
+
+        fireEvent.click(participants);
+        expect(screen.getByRole("dialog", { name: "Participants" })).toBeInTheDocument();
+        expect(screen.queryByRole("dialog", { name: "Chat" })).toBeNull();
+        expect(chatButton()).toHaveAttribute("aria-expanded", "false");
+    });
+
+    it("sends a message to everyone and shows it as the participant's own", async () => {
+        const { client } = await connected();
+        fireEvent.click(chatButton());
+        fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "hello all" } });
+        fireEvent.keyDown(screen.getByRole("textbox", { name: "Message" }), { key: "Enter" });
+        expect(client.sent).toContainEqual({
+            type: "video-meeting-signal",
+            kind: "chat",
+            from: "local-me",
+            peer: SELF,
+            chat: { id: expect.any(String), text: "hello all", sentAt: expect.any(Number) },
+        });
+        const drawer = screen.getByRole("dialog", { name: "Chat" });
+        expect(within(drawer).getByText("You")).toBeInTheDocument();
+        expect(within(drawer).getByText("hello all")).toBeInTheDocument();
+        expect(screen.queryByTestId("chat-unread")).toBeNull();
+    });
+
+    it("counts and announces messages that arrive while the chat is closed, and clears the count on opening it", async () => {
+        const { client } = await withParticipant();
+        expect(screen.queryByTestId("chat-unread")).toBeNull();
+
+        client.emit(chat("zzz", "1", "hi there"));
+        expect(screen.getByTestId("chat-unread")).toHaveTextContent("1");
+        expect(screen.getByRole("button", { name: "Chat, 1 unread" })).toBeInTheDocument();
+        expect(screen.getByRole("status")).toHaveTextContent("Zed: hi there");
+
+        client.emit(chat("zzz", "2", `long ${"x".repeat(300)}`));
+        expect(screen.getByTestId("chat-unread")).toHaveTextContent("2");
+        // A long message is announced only in part.
+        expect(screen.getByRole("status").textContent).toBe(`Zed: long ${"x".repeat(135)}`);
+
+        fireEvent.click(chatButton());
+        expect(screen.queryByTestId("chat-unread")).toBeNull();
+        expect(chatButton()).toHaveAccessibleName("Chat");
+        const drawer = screen.getByRole("dialog", { name: "Chat" });
+        expect(within(drawer).getByText("hi there")).toBeInTheDocument();
+
+        // While it is open, a new message is just shown.
+        client.emit(chat("zzz", "3", "still here"));
+        expect(within(drawer).getByText("still here")).toBeInTheDocument();
+        expect(screen.queryByTestId("chat-unread")).toBeNull();
+        fireEvent.click(chatButton());
+        expect(screen.queryByTestId("chat-unread")).toBeNull();
+    });
+
+    it("caps the unread badge at 99+", async () => {
+        const { client } = await withParticipant();
+        for (let i = 0; i < 100; i++) {
+            client.emit(chat("zzz", `m${i}`, `message ${i}`));
+        }
+        expect(screen.getByTestId("chat-unread")).toHaveTextContent("99+");
+        expect(screen.getByRole("button", { name: "Chat, 100 unread" })).toBeInTheDocument();
+    });
+
+    it("does not count the participant's own messages arriving while the chat is closed (a catch-up carrying them)", async () => {
+        const { client } = await withParticipant();
+        // The participant who answered our hello was asked for a catch-up - see `CollabSession`.
+        expect(client.sent).toContainEqual(expect.objectContaining({ kind: "collab-sync-request", to: "zzz" }));
+        client.emit({
+            type: "video-meeting-signal",
+            kind: "collab-sync",
+            from: "zzz",
+            to: SELF,
+            sync: { part: 0, of: 1, epoch: 0, chat: [{ id: "old", peer: SELF, name: "Alice", text: "from before", sentAt: 1 }], ops: [] },
+        });
+        expect(screen.queryByTestId("chat-unread")).toBeNull();
+        fireEvent.click(chatButton());
+        expect(within(screen.getByRole("dialog", { name: "Chat" })).getByText("from before")).toBeInTheDocument();
+    });
+});
+
+describe("CallView - whiteboard", () => {
+    let getContext: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+        // jsdom has no canvas - the board draws nothing, which is all this view's tests need.
+        getContext = vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    });
+    afterEach(() => {
+        getContext.mockRestore();
+    });
+
+    /** The control bar's whiteboard button - the board's own is "Back to video". */
+    const barButton = () => within(screen.getByRole("toolbar", { name: "Call controls" })).getByRole("button", { name: /whiteboard/ });
+
+    const stamp = (from: string, n: number): SignalMessage => ({
+        type: "video-meeting-signal",
+        kind: "whiteboard",
+        from,
+        whiteboard: { op: "add", element: { kind: "stamp", id: `${from}:${n}`, epoch: 0, stamp: "⭐", size: 32, x: 10, y: 10 } },
+    });
+
+    it("opens the board in the stage with everyone's video in a strip below it, and closes it again", async () => {
+        await withParticipant();
+        expect(screen.queryByTestId("whiteboard")).toBeNull();
+
+        fireEvent.click(screen.getByRole("button", { name: "Open whiteboard" }));
+        expect(screen.getByTestId("whiteboard")).toBeInTheDocument();
+        expect(within(screen.getByTestId("thumbnails")).getByText("Zed")).toBeInTheDocument();
+        expect(screen.getByTestId("self-view")).toBeInTheDocument();
+        expect(screen.queryByTestId("main-tile")).toBeNull();
+
+        // The control bar's button and the board's own ("Back to video") both close it.
+        expect(barButton()).toHaveAccessibleName("Close whiteboard");
+        expect(barButton()).toHaveAttribute("aria-pressed", "true");
+        fireEvent.click(within(screen.getByTestId("whiteboard")).getByRole("button", { name: "Back to video" }));
+        expect(screen.queryByTestId("whiteboard")).toBeNull();
+        fireEvent.click(barButton());
+        expect(screen.getByTestId("whiteboard")).toBeInTheDocument();
+        fireEvent.click(barButton());
+        expect(screen.queryByTestId("whiteboard")).toBeNull();
+    });
+
+    it("shows no video strip under the board while alone", async () => {
+        await connected();
+        fireEvent.click(screen.getByRole("button", { name: "Open whiteboard" }));
+        expect(screen.getByTestId("whiteboard")).toBeInTheDocument();
+        expect(screen.queryByTestId("thumbnails")).toBeNull();
+        expect(screen.queryByTestId("self-view")).toBeNull();
+    });
+
+    it("lights a dot on the whiteboard button when someone draws while it is closed, and clears it on opening", async () => {
+        const { client } = await withParticipant();
+        expect(screen.queryByTestId("whiteboard-activity")).toBeNull();
+
+        client.emit(stamp("zzz", 1));
+        expect(screen.getByTestId("whiteboard-activity")).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Open whiteboard, new drawing" }));
+        expect(screen.queryByTestId("whiteboard-activity")).toBeNull();
+
+        // Drawing seen as it happens leaves no dot behind.
+        client.emit(stamp("zzz", 2));
+        fireEvent.click(barButton());
+        expect(screen.queryByTestId("whiteboard-activity")).toBeNull();
+        expect(screen.getByRole("button", { name: "Open whiteboard" })).toBeInTheDocument();
+    });
+
+    it("draws on the shared board, sending each drawing to everyone", async () => {
+        const { client } = await connected();
+        fireEvent.click(screen.getByRole("button", { name: "Open whiteboard" }));
+        fireEvent.click(screen.getByRole("button", { name: "Stamp" }));
+        fireEvent.pointerDown(screen.getByTestId("whiteboard-canvas"), { clientX: 10, clientY: 10, button: 0 });
+        expect(client.sent).toContainEqual(
+            expect.objectContaining({ kind: "whiteboard", peer: SELF, whiteboard: { op: "add", element: expect.objectContaining({ kind: "stamp" }) } }),
+        );
+        // Its own drawing never lights the dot.
+        fireEvent.click(barButton());
+        expect(screen.queryByTestId("whiteboard-activity")).toBeNull();
+    });
+});
+
+describe("CallView - chat and whiteboard lifetime", () => {
+    it("stops the chat and whiteboard session when the call view goes away", async () => {
+        const stop = vi.spyOn(CollabSession.prototype, "stop");
+        const { client, unmount } = await connected();
+        unmount();
+        expect(stop).toHaveBeenCalledTimes(1);
+        // Nothing listens on the channel any more.
+        expect(client.handlers.size).toBe(0);
+        stop.mockRestore();
+    });
+});
+
+describe("CallView - whiteboard pointers, talking stick and catch-up", () => {
+    let getContext: ReturnType<typeof vi.spyOn>;
+    let start: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+        getContext = vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+        // To reach the view's own session: the one started on connecting.
+        start = vi.spyOn(CollabSession.prototype, "start");
+    });
+    afterEach(() => {
+        getContext.mockRestore();
+        start.mockRestore();
+    });
+
+    const session = () => start.mock.contexts[0] as CollabSession;
+    const barButton = () => within(screen.getByRole("toolbar", { name: "Call controls" })).getByRole("button", { name: /whiteboard/ });
+    const board = () => screen.getByTestId("whiteboard");
+    /** A stamp drawn by `from`'s tab `peer`. */
+    const stampFrom = (from: string, peer: string, n: number): SignalMessage => ({
+        type: "video-meeting-signal",
+        kind: "whiteboard",
+        from,
+        peer,
+        whiteboard: { op: "add", element: { kind: "stamp", id: `${peer}:${n}`, epoch: 0, stamp: "⭐", size: 32, x: 10, y: 10 } },
+    });
+    const drawStamp = () => {
+        fireEvent.click(within(board()).getByRole("button", { name: "Stamp" }));
+        fireEvent.pointerDown(screen.getByTestId("whiteboard-canvas"), { clientX: 10, clientY: 10, button: 0 });
+    };
+    const sentDrawings = (client: InstanceType<typeof FakeSignalingClient>) => client.sent.filter((message) => message.kind === "whiteboard");
+
+    it("lets only the holder draw while the talking stick is on, and everyone again once it is off", async () => {
+        const { client } = await connected({ selfUid: "local-me", hostUid: "other-host" });
+        client.emit({ type: "video-meeting-signal", kind: "hello", from: "other-host", peer: "other-host~tab", name: "Hank", state: STATE });
+        client.emit({ type: "video-meeting-signal", kind: "hello", from: "zzz", peer: "zzz~tab", name: "Zed", state: STATE });
+        await screen.findAllByText("Zed");
+        client.emit({ type: "video-meeting-signal", kind: "talking-stick", from: "other-host", peer: "other-host~tab", active: true, holder: "other-host~tab" });
+        expect(session().canDraw).toBe(false);
+
+        fireEvent.click(screen.getByRole("button", { name: "Open whiteboard" }));
+        expect(within(board()).getByText(/Only Hank can draw while the talking stick is on/)).toBeInTheDocument();
+        expect(screen.getByTestId("whiteboard-canvas").className).toContain("cursor-not-allowed");
+        expect(within(board()).getByRole("button", { name: "Undo" })).toBeDisabled();
+        drawStamp();
+        expect(sentDrawings(client)).toEqual([]);
+        expect(session().board.size).toBe(0);
+
+        // The holder's drawing reaches this board; anyone else's doesn't.
+        client.emit(stampFrom("zzz", "zzz~tab", 1));
+        expect(session().board.size).toBe(0);
+        client.emit(stampFrom("other-host", "other-host~tab", 1));
+        expect(session().board.elements.map((element) => element.id)).toEqual(["other-host~tab:1"]);
+
+        // Off again: everyone may draw, this participant included.
+        client.emit({ type: "video-meeting-signal", kind: "talking-stick", from: "other-host", peer: "other-host~tab", active: false });
+        expect(session().canDraw).toBe(true);
+        expect(within(board()).queryByText(/can draw/)).toBeNull();
+        expect(screen.getByTestId("whiteboard-canvas").className).not.toContain("cursor-not-allowed");
+        client.emit(stampFrom("zzz", "zzz~tab", 2));
+        expect(session().board.size).toBe(2);
+        fireEvent.pointerDown(screen.getByTestId("whiteboard-canvas"), { clientX: 10, clientY: 10, button: 0 });
+        expect(sentDrawings(client)).toEqual([expect.objectContaining({ peer: SELF, whiteboard: expect.objectContaining({ op: "add" }) })]);
+    });
+
+    it("says nobody can draw while the stick is on and nobody here holds it", async () => {
+        const { client } = await connected({ selfUid: "local-me", hostUid: "other-host" });
+        client.emit({ type: "video-meeting-signal", kind: "talking-stick", from: "other-host", active: true, holder: "gone~tab" });
+        fireEvent.click(screen.getByRole("button", { name: "Open whiteboard" }));
+        expect(within(board()).getByText(/Nobody can draw until the host hands out the talking stick/)).toBeInTheDocument();
+    });
+
+    it("lets the host draw while holding the stick, and not once it is given away", async () => {
+        const { client } = await connected({ selfUid: "local-me", hostUid: "local-me" });
+        client.emit({ type: "video-meeting-signal", kind: "hello", from: "zzz", peer: "zzz~tab", name: "Zed", state: STATE });
+        await screen.findAllByText("Zed");
+        fireEvent.click(screen.getByRole("button", { name: "Talking stick" }));
+        fireEvent.click(screen.getByRole("button", { name: "Open whiteboard" }));
+        expect(within(board()).queryByText(/can draw/)).toBeNull();
+        expect(session().canDraw).toBe(true);
+        drawStamp();
+        expect(sentDrawings(client)).toHaveLength(1);
+        // Zed's drawing is refused while the host holds the stick.
+        client.emit(stampFrom("zzz", "zzz~tab", 1));
+        expect(session().board.size).toBe(1);
+
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        const drawer = screen.getByRole("dialog", { name: "Participants" });
+        fireEvent.click(within(within(drawer).getByText("Zed").closest("li")!).getByRole("button", { name: "Give the talking stick to Zed" }));
+        expect(within(board()).getByText(/Only Zed can draw while the talking stick is on/)).toBeInTheDocument();
+        fireEvent.pointerDown(screen.getByTestId("whiteboard-canvas"), { clientX: 20, clientY: 20, button: 0 });
+        expect(sentDrawings(client)).toHaveLength(1);
+        client.emit(stampFrom("zzz", "zzz~tab", 2));
+        expect(session().board.size).toBe(2);
+
+        fireEvent.click(screen.getByRole("button", { name: "End talking stick" }));
+        expect(within(board()).queryByText(/can draw/)).toBeNull();
+        fireEvent.pointerDown(screen.getByTestId("whiteboard-canvas"), { clientX: 30, clientY: 30, button: 0 });
+        expect(sentDrawings(client)).toHaveLength(2);
+    });
+
+    it("shows everyone else's pointer on the open board with their name, until it leaves", async () => {
+        const { client } = await withParticipant();
+        const cursor = (value: unknown): SignalMessage => ({ type: "video-meeting-signal", kind: "whiteboard-cursor", from: "zzz", cursor: value });
+        // Received while the board is closed, and shown once it opens.
+        client.emit(cursor({ x: 800, y: 450, tool: "marker", color: "#d93025" }));
+        expect(screen.queryByTestId("remote-cursor")).toBeNull();
+        fireEvent.click(barButton());
+        expect(screen.getByTestId("remote-cursor")).toHaveTextContent("Zed");
+
+        client.emit(cursor({ x: 100, y: 100, tool: "stamp", color: "#000000", stamp: "🎉" }));
+        expect(screen.getAllByTestId("remote-cursor")).toHaveLength(1);
+        expect(screen.getByTestId("remote-cursor")).toHaveTextContent("🎉Zed");
+
+        client.emit(cursor({ hidden: true }));
+        expect(screen.queryByTestId("remote-cursor")).toBeNull();
+    });
+
+    it("shares this participant's pointer while it moves over the board", async () => {
+        const { client } = await withParticipant();
+        fireEvent.click(barButton());
+        fireEvent.pointerMove(screen.getByTestId("whiteboard-canvas"), { clientX: 0, clientY: 0 });
+        await waitFor(() => expect(client.sent).toContainEqual(expect.objectContaining({ kind: "whiteboard-cursor", peer: SELF, cursor: expect.objectContaining({ tool: "ballpoint" }) })));
+        fireEvent.pointerLeave(screen.getByTestId("whiteboard-canvas"));
+        expect(client.sent[client.sent.length - 1]).toMatchObject({ kind: "whiteboard-cursor", cursor: { hidden: true } });
+    });
+
+    it("neither counts nor announces chat history from a catch-up, but does a live message after it", async () => {
+        const { client } = await withParticipant();
+        expect(client.sent).toContainEqual(expect.objectContaining({ kind: "collab-sync-request", to: "zzz" }));
+        client.emit({
+            type: "video-meeting-signal",
+            kind: "collab-sync",
+            from: "zzz",
+            to: SELF,
+            sync: {
+                part: 0,
+                of: 1,
+                epoch: 0,
+                chat: [
+                    { id: "old1", peer: "zzz", name: "Zed", text: "said before you came", sentAt: 1 },
+                    { id: "old2", peer: "yan~tab", name: "Yan", text: "me too", sentAt: 2 },
+                ],
+                ops: [],
+            },
+        });
+        expect(screen.queryByTestId("chat-unread")).toBeNull();
+        expect(screen.getByRole("status")).not.toHaveTextContent(/said before you came|me too/);
+
+        client.emit({ type: "video-meeting-signal", kind: "chat", from: "zzz", chat: { id: "new", text: "welcome", sentAt: Date.now() } });
+        expect(screen.getByTestId("chat-unread")).toHaveTextContent("1");
+        expect(screen.getByRole("status")).toHaveTextContent("Zed: welcome");
+        fireEvent.click(screen.getByRole("button", { name: /^Chat/ }));
+        const drawer = screen.getByRole("dialog", { name: "Chat" });
+        expect(within(drawer).getByText("said before you came")).toBeInTheDocument();
+        expect(within(drawer).getByText("me too")).toBeInTheDocument();
     });
 });
