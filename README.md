@@ -30,32 +30,6 @@ color wheel). Both travel over the call's own signaling WebSocket (`/api/mail/vi
 last only as long as the call - a late joiner gets them from a participant already there, and nothing is stored on
 the server.
 
-This plugin's `apps/` also ship the public join/lobby/in-call pages and the personal Settings screen - see
-`package.json`'s `rapidmx.plugin.ui` for exactly what's mounted where. Its `ui.appRail` entry adds a **Meet** button
-to the web client's app rail, shown only for a user who has a personal room: the entry's `resolveFrom`
-(`/mail/video-meetings/personal-room`, i.e. `GET /api/mail/video-meetings/personal-room`) answers
-`{ href: "/meet/<token>", label }` for the caller's personal room (the oldest still-active public meeting of the first
-mailbox they own that has one) or 404 when there is none, in which case the button stays hidden.
-
-## What it adds
-
-_(Filled in as each phase lands - see `.claude/NOTES.md` for the running detail, and `RELEASE_NOTES.md` for the
-full changelog.)_
-
-**Phase 1 (backend data model, routes, signaling) - done.** A mailbox owner creates a `VideoMeeting` through
-`/api/mail/video-meetings` - `private` (one join link minted per invitee) or `public` (one shared link) - and an
-anonymous participant joins through `GET .../join/:token`, which hands back the meeting's public details, an ICE
-server list (public STUN always, TURN when configured) and a short-lived guest token already authorized to
-exchange WebRTC signaling on that one meeting's channel over the server's existing `/push` route. No new realtime
-infrastructure and no UI yet - see `.claude/NOTES.md`'s dated entry for the full design.
-
-## Development
-
-Same layout and tooling as this project's other plugins (`@rapidmx/booking-plugin`, `@rapidmx/mapi-plugin`,
-`@rapidmx/autodiscover-plugin`): `yarn install`, `yarn test:prod`, `yarn build`. `@rapidmx/restapi` and
-`@rapidmx/web-client` are portal-linked in `package.json`'s `resolutions` during local development against a
-matching working tree of those repos.
-
 ## License
 
 MPL-2.0 - see `LICENSE`.
