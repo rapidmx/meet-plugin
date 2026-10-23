@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-23
+
+### Added
+- Added in-call chat and a shared whiteboard, over a dedicated signaling WebSocket
+- Added an in-call chat with Markdown, emoji and GIF pickers, auto-linked URLs and image URLs shown as images, caught up for late joiners
+- Added a shared whiteboard with ballpoint, sharpie, marker, crayon and coloring pencil pens, a shape stencil, stamps, an eraser, swatches and a color wheel, undo and clear
+- Added only the talking-stick holder to draw while talking stick is on
+
+### Changed
+- Enable the grid/focus toggle at one other participant; keep video aspect ratio
+- The toggle disabled itself until there were two other participants, a
+- threshold left over from before the local tile moved into the grid -
+- now that grid and focus view genuinely look different with just one
+- other participant (two equal tiles vs. a cornered self view and a main
+- tile), it only needs to stay disabled while alone.
+- Grid-mode tiles also no longer stretch to fill an equal share of the
+- available height: each one keeps a video aspect ratio, and every tile
+- (camera or screen) fits its picture inside the frame instead of
+- cropping it, so the capture device's own aspect ratio is never
+- distorted.
+- Publish a prerelease version to npm under the next tag, which npm requires, and a release under latest
+- Build the repositories of the video meeting route once in an @Init hook, and the relay bus and hub through the ObjectFactory
+- Move call signaling off the shared /push channel onto the plugin's own /signal/:id WebSocket (SignalingHub on the relay's bus): the server stamps each message's sender, routes to-addressed messages to that peer only, and closes a kicked participant's sockets on every replica
+- Show every participant's pointer on the whiteboard as their tool and color with their name
+- Bump dompurify, follow-redirects, handlebars, source-map-js and vite in the lockfile to versions without known high or critical advisories
+- Cleaning up readme
+- Updated readme title
+
 ## [0.15.0] - 2026-10-02
 
 ### Added
@@ -605,7 +633,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/rapidmx/meet-plugin/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/rapidmx/meet-plugin/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/rapidmx/meet-plugin/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/rapidmx/meet-plugin/compare/v0.13.1...v0.14.0

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.16.0
+
 ### Added
 
 - **Chat during a call.** The chat button beside the participant count opens a chat everyone in the call can see. Messages support Markdown (**bold**, *italic*, ~~strikethrough~~, `code`, code blocks, quotes, lists and links), and have an emoji picker and a GIF picker (the same ones as the mail composer; GIF search uses the server's Giphy setting). A web address typed or pasted on its own becomes a link, and one that points at an image (a GIF, PNG, JPEG, WebP and so on) shows the image instead. The button counts messages that arrived while the chat was closed. Someone who joins late sees what was said before they arrived. Messages last as long as the call: they are not stored on the server.
