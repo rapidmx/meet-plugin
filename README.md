@@ -24,6 +24,12 @@ browser (MediaPipe, loaded only when a filter needs it - from public CDNs by def
 `mail:videoconf:effects:assets_url`), and the devices, on/off state and filters a participant chose are remembered in
 their browser's `localStorage` for next time.
 
+During a call, participants can **chat** (Markdown, emoji, GIFs from the server's Giphy proxy, and image links shown
+as images) and draw together on a **shared whiteboard** (five pen types, a stencil for shapes, stamps, swatches and a
+color wheel). Both travel over the call's own signaling WebSocket (`/api/mail/video-meetings/signal/<meeting>`) and
+last only as long as the call - a late joiner gets them from a participant already there, and nothing is stored on
+the server.
+
 This plugin's `apps/` also ship the public join/lobby/in-call pages and the personal Settings screen - see
 `package.json`'s `rapidmx.plugin.ui` for exactly what's mounted where. Its `ui.appRail` entry adds a **Meet** button
 to the web client's app rail, shown only for a user who has a personal room: the entry's `resolveFrom`

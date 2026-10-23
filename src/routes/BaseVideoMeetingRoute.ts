@@ -35,6 +35,7 @@ import {
     type RelayConnection,
 } from "../util/RelayHub.js";
 import { stripTrustedRoles } from "../util/RouteAccessUtils.js";
+import { SIGNALING_LARGE_PAYLOAD_BYTES, SIGNALING_MAX_PAYLOAD_BYTES, SignalingHub } from "../util/SignalingHub.js";
 import { JOIN_TOKEN_PATTERN, PUBLIC_SLUG_PATTERN, mintJoinToken, mintPublicSlug } from "../util/TokenUtils.js";
 import { VideoMeeting, VideoMeetingInvitee, VideoMeetingStatus, VideoMeetingVisibility } from "../models/types.js";
 const { Config, Destroy, Init, Inject, Logger } = ObjectDecorators;
@@ -56,6 +57,14 @@ const RELAY_MESSAGE_LIMIT_BYTES: number = WS_ROUTE_OPTIONS_SUPPORTED ? RELAY_LAR
 const RELAY_WS_OPTIONS = WS_ROUTE_OPTIONS_SUPPORTED
     ? { maxPayloadLength: RELAY_LARGE_PAYLOAD_BYTES, maxBackpressure: RELAY_WS_MAX_BACKPRESSURE_BYTES }
     : undefined;
+
+/** The largest message a signaling socket may send: what the route asks the framework for and what `ready` tells
+ * the client. */
+const SIGNALING_MESSAGE_LIMIT_BYTES: number = WS_ROUTE_OPTIONS_SUPPORTED ? SIGNALING_LARGE_PAYLOAD_BYTES : SIGNALING_MAX_PAYLOAD_BYTES;
+
+/** The signaling route's WebSocket options: bigger messages, so a late joiner's whiteboard catch-up is a few messages.
+ * `undefined` (the framework's defaults) where it cannot be set. */
+const SIGNALING_WS_OPTIONS = WS_ROUTE_OPTIONS_SUPPORTED ? { maxPayloadLength: SIGNALING_LARGE_PAYLOAD_BYTES } : undefined;
 
 /** Upper bounds on caller-supplied text, matching the general shape `booking-plugin`'s `BaseBookingRoute` bounds
  * its own free-text fields with. */
@@ -190,12 +199,12 @@ export interface PublicVideoMeeting {
  * **`authenticated`/`selfUid`/`token` - reading this shape correctly.** A caller who already presented a valid
  * session for a real, non-guest RapidMX identity (see `join()`'s doc comment for exactly how that's told apart
  * from a returning guest) gets `authenticated: true` and no `token`/`expiresAt` at all - there is no guest JWT to
- * hand over, because the caller's own already-existing session cookie/header already authenticates `/push` for
- * them, with zero new client-side auth handling. The frontend must not write any cookie in that case (doing so
- * would be pointless at best, and at worst overwrite the caller's real cookie with... the value it already has).
- * The common anonymous case (`authenticated: false`) is unchanged from Phase 1: `token`/`expiresAt` are present
- * and the frontend applies `token` as the `jwt` cookie before connecting - see
- * `apps/shared/push/GuestSignalingClient.ts`.
+ * hand over, because the caller's own already-existing session cookie/header already authenticates the meeting's
+ * WebSockets (`signal()`, `relay()`) for them, with zero new client-side auth handling. The frontend must not write
+ * any cookie in that case (doing so would be pointless at best, and at worst overwrite the caller's real cookie
+ * with... the value it already has). The common anonymous case (`authenticated: false`) is unchanged from Phase 1:
+ * `token`/`expiresAt` are present and the frontend applies `token` as the `jwt` cookie before connecting - see
+ * `apps/shared/signaling/SignalingClient.ts`.
  */
 export interface VideoMeetingJoinResult {
     meeting: PublicVideoMeeting;
@@ -203,14 +212,14 @@ export interface VideoMeetingJoinResult {
     /** `true` when the caller already presented a valid session for a real RapidMX identity when calling `join()`;
      * `false` for the common anonymous case, where a fresh guest identity was just minted instead. */
     authenticated: boolean;
-    /** The identity now holding `READ`/`CREATE` on the meeting's own push channel, and the uid the frontend's mesh
+    /** The identity now holding `READ`/`CREATE` on the meeting's uid (what `signal()` and `relay()` check), and the uid the frontend's mesh
      * connection manager (`apps/shared/webrtc/MeshConnectionManager.ts`) must identify itself as: the caller's own
      * real uid when `authenticated` is `true`, otherwise the freshly minted synthetic `guest:<random>` uid `token`
      * authenticates as. Always present - this replaces Phase 1's guest-only `guestUid` field now that the same
      * grant-and-identify step also runs for a real, already-authenticated caller. */
     selfUid: string;
-    /** A short-lived guest JWT, immediately usable against `/push` to subscribe to and publish on `meeting.uid` -
-     * and nothing else. Present only when `authenticated` is `false`; omitted entirely for an already-authenticated
+    /** A short-lived guest JWT, immediately usable to open the meeting's signaling (`signal()`) and relay (`relay()`)
+     * WebSockets for `meeting.uid` - and nothing else. Present only when `authenticated` is `false`; omitted entirely for an already-authenticated
      * real caller, who has no guest token minted for them at all (see `join()`). See this class's doc comment. */
     token?: string;
     /** ISO 8601 instant `token` expires at. Present only when `authenticated` is `false`, exactly when `token`
@@ -230,7 +239,7 @@ export interface VideoMeetingJoinResult {
  * (`meeting.hasPassword`) that the caller has not yet submitted - see `join()`'s doc comment for exactly when this
  * applies (never for the organizer's own slug, which already proves stronger authority). Carries only enough to
  * show a password prompt (the meeting's title/host, so the prompt isn't a bare form); nothing here grants
- * `/push` access, mints a guest identity, or includes ICE servers - that only happens once
+ * signaling access, mints a guest identity, or includes ICE servers - that only happens once
  * `verifyPassword()` succeeds, returning an ordinary `VideoMeetingJoinResult` instead. The literal `true` is a
  * discriminant: a caller narrows on `"requiresPassword" in result && result.requiresPassword`.
  */
@@ -292,11 +301,11 @@ export type VideoMeetingJoinResponse = VideoMeetingJoinResult | VideoMeetingPass
  *
  * ## Why `VideoMeeting` gets its own per-record `AccessControlList`
  *
- * Unlike `Booking`, `VideoMeeting.uid` doubles as a `/push` signaling channel (see `.claude/NOTES.md`'s "Signaling"
- * design note): SDP offers/answers and ICE candidates are ordinary `NotificationUtils.sendMessage()` payloads
- * published to it, exactly as `MailPushRoute`'s doc comment describes for a `Mailbox`/`Folder` channel. A `/push`
- * channel is authorized purely by `ACLUtils.hasPermission(user, channelUid, action)` against a per-record
- * `AccessControlList` document keyed by that exact uid - there being no such document at all (the case for
+ * Unlike `Booking`, `VideoMeeting.uid` doubles as the meeting's signaling channel: SDP offers/answers and ICE
+ * candidates travel over `signal()`'s WebSocket (see "The signaling WebSocket" below; until it replaced them they
+ * were published on the server's shared `/push` route), whose room is the meeting's uid. Like a `/push` channel
+ * before it, that socket is authorized purely by `ACLUtils.hasPermission(user, meetingUid, action)` against a
+ * per-record `AccessControlList` document keyed by that exact uid - there being no such document at all (the case for
  * `Booking`, whose `@Protect` sets `recordACL: false`) makes `hasPermission()` always answer `false`. So
  * `VideoMeetingMongo`/`VideoMeetingSQL` set `recordACL: true`, and `create()` below claims that per-record ACL
  * with `parentUid` set to the meeting's own `mailboxUid` (mirroring `BaseFolderRoute`'s identical `acl: { uid,
@@ -307,17 +316,17 @@ export type VideoMeetingJoinResponse = VideoMeetingJoinResult | VideoMeetingPass
  *
  * ## The channel-ACL-grant mechanism
  *
- * An anonymous guest holds no `AccessControlList` grant of their own and has no `JWTUser` to authenticate `/push`
- * with in the first place - `join()` therefore does two things together: it mints a short-lived, scope-limited
+ * An anonymous guest holds no `AccessControlList` grant of their own and has no `JWTUser` to authenticate the
+ * meeting's WebSockets with in the first place - `join()` therefore does two things together: it mints a short-lived, scope-limited
  * guest JWT (`mintGuestToken()`: a synthetic `guest:<random>` uid, no roles, `GUEST_JWT_TTL_SECONDS` expiry, real and
  * verifiable since it's signed with the same `auth` config every other token is), and it adds an explicit
  * `ACLRecord` for that exact uid onto the meeting's own `AccessControlList` (`ensureChannelGrant()`), granting
- * `READ` (so `BasePushRoute`'s SUBSCRIBE succeeds) and `CREATE` (so a publish does - see `MailPushRoute`'s doc
- * comment: "publishing to a channel needs CREATE on it as an ordinary user would"). The grant is scoped to exactly
+ * `READ` and `CREATE` - the pair `signal()` and `relay()` both require (`authorizeMeetingSocket()`), the same pair
+ * `/push` demanded to subscribe to and publish on a channel when signaling still went through it. The grant is scoped to exactly
  * that one meeting's uid, nothing else - the same "possession of a link is the credential" pattern
  * `BaseBookingRoute.requireBookingByToken()`/`resolveEffectiveUser()`'s `share:<token>` identity already establish
- * elsewhere in this codebase, extended one step further because signaling needs a channel *subscription*, not just
- * a stateless REST call.
+ * elsewhere in this codebase, extended one step further because signaling needs a long-lived socket, not just a
+ * stateless REST call.
  *
  * **Known limitation, documented rather than silently assumed away**: because each `join()` call for an anonymous
  * caller mints a *fresh* random guest uid (so simultaneous participants of one shared link are distinguishable from
@@ -337,16 +346,16 @@ export type VideoMeetingJoinResponse = VideoMeetingJoinResult | VideoMeetingPass
  * authenticated-optional endpoint in this codebase's family (e.g. `BaseScopedChildRoute.resolveEffectiveUser()`'s
  * "prefer the real authenticated user, fall back to the anonymous token" precedent). This matters because a
  * logged-in RapidMX user's browser already carries a real, `HttpOnly` `jwt` session cookie for this origin - a
- * cookie `apps/shared/push/GuestSignalingClient.ts` cannot overwrite with a guest token even if `join()` minted one
+ * cookie `apps/shared/signaling/SignalingClient.ts` cannot overwrite with a guest token even if `join()` minted one
  * (browsers refuse to let a script override an `HttpOnly` cookie of the same name), so a guest-only `join()` would
- * leave that browser's `/push` WebSocket authenticating as the real session while the meeting's ACL only names a
- * synthetic guest uid - the subscribe is simply, safely refused, and the real user could never actually join.
+ * leave that browser's signaling WebSocket authenticating as the real session while the meeting's ACL only names a
+ * synthetic guest uid - the socket is simply, safely refused, and the real user could never actually join.
  *
  * The fix: when `user` is present and is a *real* identity - not a guest uid from a previous `join()` call, told
  * apart by the `GUEST_UID_PREFIX` a guest uid always starts with and a real, mailbox-owning identity never can -
  * `join()` grants `user.uid` itself (not a synthetic one) `READ`/`CREATE` on the meeting's channel via
  * `ensureChannelGrant()`, mints no guest JWT at all, and returns `authenticated: true` with `selfUid: user.uid`. The
- * caller's own already-existing session cookie now already authenticates `/push` for them with zero new
+ * caller's own already-existing session cookie now already authenticates `signal()` for them with zero new
  * client-side auth handling - the frontend must not write a cookie of its own in this case (see
  * `VideoMeetingJoinResult`'s doc comment). When `user` is absent (the common, true-anonymous case - no existing
  * session at all), behavior is exactly Phase 1's: a fresh guest identity is minted and granted instead.
@@ -406,6 +415,19 @@ export type VideoMeetingJoinResponse = VideoMeetingJoinResult | VideoMeetingPass
  * thing can be turned off with `mail:videoconf:relay:enabled` (default `true`; `false`/`"false"`/`0`/`"0"` disable
  * it): a disabled relay closes every socket with 1008 "Relay disabled." and `join()` reports `relayEnabled: false`, so
  * clients don't try it.
+ *
+ * ## The signaling WebSocket (`signal()`)
+ *
+ * Every participant's offers, answers, ICE candidates, presence, moderation signals, chat messages and whiteboard
+ * strokes travel over this plugin's own WebSocket, `signal()` at `/signal/:id`
+ * (`/api/mail/video-meetings/signal/<meetingUid>`), not the server's shared `/push` route: one socket in both
+ * directions, so a message is not a whole HTTP request, and a meeting's traffic never mixes with the webmail's own
+ * push notifications. `SignalingHub` carries the messages (see it for the protocol and limits) on the same bus as the
+ * relay, so it crosses replicas exactly when the relay does. It is authorized exactly as `relay()` is (the same
+ * `READ`/`CREATE` grant from `join()`, the same live-meeting check, the same "Not permitted." for every refusal) but
+ * is never switched off - without it there is no call. The hub stamps every message with the socket's own uid and
+ * peer id, so nobody can speak as someone else, and a point-to-point message (`to`) reaches only that peer. `kick()`
+ * closes the removed participant's sockets at once.
  *
  * ## Other known limitations
  *
@@ -492,6 +514,10 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     /** The Redis bus `relayHub` runs on, when there is one. */
     private relayBus?: RedisRelayBus;
 
+    /** The rooms of this process's signaling sockets (`signal()`), on the same bus as `relayHub` - built alongside it
+     * by `initRelayBus()`. Its socket caps are per server replica. */
+    private signalingHub?: SignalingHub;
+
     /** Every meeting's pending admission requests (`VideoMeeting.waitingRoomEnabled`), keyed by meeting uid then by
      * the requester's own uid (real or freshly minted guest). In-memory and per server instance only - the same
      * accepted tradeoff `relayHub` above already has: a restart drops anyone currently waiting, who simply
@@ -512,9 +538,9 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     }
 
     /**
-     * Picks how relay frames travel between server replicas, once the route is created: over Redis pub/sub
-     * (`RedisRelayBus`) when `datastores:events` is configured, else in-process only with a single warning that
-     * participants on different replicas cannot relay to each other. A Redis bus that cannot be created (the `redis`
+     * Picks how relay frames and signaling messages travel between server replicas, once the route is created: over
+     * Redis pub/sub (`RedisRelayBus`) when `datastores:events` is configured, else in-process only with a single
+     * warning that participants on different replicas cannot reach each other. A Redis bus that cannot be created (the `redis`
      * package is missing, an unusable URL) falls back the same way, with the error logged. Runs before the route
      * serves anything, so no socket is attached to the hub it replaces.
      */
@@ -532,7 +558,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         const url: string | undefined = this.eventsConfig?.url;
         if (!url) {
             this.logger.warn(
-                "The `events` datastore is not configured: the video meeting relay only carries media between participants " +
+                "The `events` datastore is not configured: video meeting signaling and the media relay only reach participants " +
                     "connected to this server instance, not between server replicas.",
             );
         } else {
@@ -546,7 +572,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
                 bus = redisBus;
             } catch (err: any) {
                 this.logger.error(
-                    "Could not create the video meeting relay's Redis bus, so relay only works between participants connected to this " +
+                    "Could not create the video meeting relay's Redis bus, so signaling and relay only work between participants connected to this " +
                         `server instance: ${err?.message ?? err}`,
                 );
             }
@@ -557,6 +583,10 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         this.relayHub = await this._objectFactory.newInstance(RelayHub, {
             name: `${name}RelayHub`,
             args: [{ bus, maxPayloadBytes: RELAY_MESSAGE_LIMIT_BYTES, logger: { debug: (message: string) => this.logger.debug(message) } }],
+        });
+        this.signalingHub = await this._objectFactory.newInstance(SignalingHub, {
+            name: `${name}SignalingHub`,
+            args: [{ bus, maxPayloadBytes: SIGNALING_MESSAGE_LIMIT_BYTES, logger: { debug: (message: string) => this.logger.debug(message) } }],
         });
     }
 
@@ -1027,7 +1057,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     @Description(
         "Deletes the meeting, every one of its invitees and the calendar invite links written for them. Deleting the meeting also removes its own " +
             "per-record AccessControlList (RepoUtils.delete()'s standard recordACL cleanup - see the VideoMeeting " +
-            "interface's doc comment), so its uid stops working as a push channel immediately. Requires DELETE on " +
+            "interface's doc comment), so its uid stops authorizing a signaling or relay socket immediately. Requires DELETE on " +
             "the meeting's owning mailbox.",
     )
     @Delete("/:id")
@@ -1044,8 +1074,8 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
 
     @Summary("Removes a participant from a video meeting.")
     @Description(
-        "Revokes 'uid's grant on the meeting's own push channel (revokeChannelGrant()), so they can no longer " +
-            "subscribe to or publish on it - and therefore can no longer signal or relay media, even if their " +
+        "Revokes 'uid's grant on the meeting (revokeChannelGrant()) and closes every signaling socket they hold in it " +
+            "(on every replica the bus reaches), so they can no longer signal, chat, draw or relay media, even if their " +
             "client ignores the cooperative 'kicked' signal the host's own UI also sends over the mesh (see " +
             "SignalMessage's doc comment for why that signal alone isn't enforcement). A no-op if 'uid' holds no " +
             "grant (already removed, or never joined). Requires UPDATE on the meeting's owning mailbox. " +
@@ -1060,6 +1090,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     public async kick(@Param("id") id: string, @Param("uid") uid: string, @AuthUser user?: JWTUser): Promise<void> {
         const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.UPDATE);
         await this.revokeChannelGrant(meeting.uid, uid);
+        this.signalingHub?.evict(meeting.uid, uid);
     }
 
     @Summary("Lists a video meeting's pending admission requests.")
@@ -1220,9 +1251,9 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
 
     /**
      * Removes `uid`'s `ACLRecord` from `meetingUid`'s own `AccessControlList`, if it has one - the mirror image of
-     * `ensureChannelGrant()`, used to enforce a kick (see `kick()`): once removed, `uid` can no longer subscribe to
-     * or publish on the meeting's `/push` channel, so even a client that ignores the cooperative `"kicked"` signal
-     * (`SignalMessage`'s doc comment) cannot keep participating. A no-op when `uid` holds no grant (already kicked,
+     * `ensureChannelGrant()`, used to enforce a kick (see `kick()`, which also closes `uid`'s open signaling sockets):
+     * once removed, `uid` can no longer open the meeting's signaling (`signal()`) or relay (`relay()`) socket, so even
+     * a client that ignores the cooperative `"kicked"` signal (`SignalMessage`'s doc comment) cannot keep participating. A no-op when `uid` holds no grant (already kicked,
      * or never joined) or the meeting has no ACL, rather than an error - the caller wants "not able to rejoin",
      * which is already true either way. Same optimistic-lock retry as `ensureChannelGrant()`, for the same reason:
      * a concurrent joiner or the owner editing the ACL directly may save first.
@@ -1391,11 +1422,11 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     @Description(
         "Resolves an invitee's join token or a public meeting's slug. If the caller already presents a valid " +
             "session for a real RapidMX identity (not a returning guest), that identity is granted READ/CREATE " +
-            "on the meeting's own push channel directly and the response carries 'authenticated: true' with no " +
-            "guest token at all - the caller's own existing session cookie/header already authenticates /push " +
-            "for them. Otherwise (the common anonymous case) mints a short-lived guest JWT (see " +
-            "GUEST_JWT_TTL_SECONDS) already granted READ/CREATE on the same channel, ready to use against /push " +
-            "to exchange WebRTC signaling messages. Requires no authentication beyond the token itself; a " +
+            "on the meeting directly and the response carries 'authenticated: true' with no " +
+            "guest token at all - the caller's own existing session cookie/header already authenticates the " +
+            "meeting's signaling WebSocket (/signal/<meetingUid>) for them. Otherwise (the common anonymous case) " +
+            "mints a short-lived guest JWT (see GUEST_JWT_TTL_SECONDS) already granted READ/CREATE on the same " +
+            "meeting, ready to use against /signal/<meetingUid> to exchange WebRTC signaling messages. Requires no authentication beyond the token itself; a " +
             "stale/unknown token answers 404. The one exception is a private meeting's organizerSlug, which is " +
             "never an anonymous surface: it additionally requires an already-authenticated caller holding READ on " +
             "the meeting's owning mailbox, and answers the very same 404 for anyone else. If the meeting requires " +
@@ -1505,7 +1536,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     /**
      * Decides whether `user` may open a relay socket to meeting `id`: the relay must be enabled, `user` must hold BOTH
      * `READ` and `CREATE` on the meeting's uid - exactly what `ensureChannelGrant()` gives a joined participant, and
-     * what `/push` demands to subscribe and publish - and the meeting must exist and be neither cancelled nor ended.
+     * what `signal()` demands too (`authorizeMeetingSocket()`) - and the meeting must exist and be neither cancelled nor ended.
      * Returns the reason to close the socket with, or `undefined` when permitted.
      *
      * `hasPermission()` gets `user` with its trusted roles stripped (`stripTrustedRoles()`), exactly as
@@ -1518,6 +1549,13 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         if (!this.isRelayEnabled()) {
             return "Relay disabled.";
         }
+        return this.authorizeMeetingSocket(id, user);
+    }
+
+    /** Why a meeting WebSocket (`relay()`, `signal()`) of `user` for meeting `id` must be refused, or `undefined` to
+     * accept it - see `authorizeRelay()`'s doc comment for the rules, which are the same for both apart from the
+     * relay's own on/off setting. */
+    private async authorizeMeetingSocket(id: string | undefined, user: JWTUser | undefined): Promise<string | undefined> {
         // `hasPermission()` answers `true` for an empty ACL uid, so an empty id must never reach it.
         if (!user || !id) {
             return RELAY_NOT_PERMITTED;
@@ -1534,14 +1572,14 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     }
 
     /**
-     * The meeting uid a relay socket's URL names. `@Param("id")` is filled in by the Bun router, but NOT by the uWS
+     * The meeting uid a relay or signaling socket's URL names. `@Param("id")` is filled in by the Bun router, but NOT by the uWS
      * router this framework actually serves with: it never populates `req.params` for a WebSocket upgrade (a
      * `@WebSocket()` route has, so far, never had a path parameter - `BasePushRoute.connect()` has none). So when the
      * decorated argument is empty this reads the last segment of the request path instead, which the
-     * `/relay/:id` pattern guarantees is the id (the framework also registers the trailing-slash form; the path
+     * `/relay/:id` and `/signal/:id` patterns guarantee is the id (the framework also registers the trailing-slash form; the path
      * never carries the query string). Returns `undefined` when there is none or it isn't valid percent-encoding.
      */
-    private relayMeetingId(paramId: string | undefined, req: HttpRequest | undefined): string | undefined {
+    private socketMeetingId(paramId: string | undefined, req: HttpRequest | undefined): string | undefined {
         if (typeof paramId === "string" && paramId) {
             return paramId;
         }
@@ -1568,7 +1606,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     @Auth(["jwt"])
     @WebSocket("/relay/:id", RELAY_WS_OPTIONS)
     public async relay(@Param("id") paramId: string | undefined, @Request req: HttpRequest, @Socket sock: any, @AuthUser user?: JWTUser): Promise<void> {
-        const id: string | undefined = this.relayMeetingId(paramId, req);
+        const id: string | undefined = this.socketMeetingId(paramId, req);
         // Listeners first, before the first await: the client may send its `hello` the moment the socket opens,
         // while the meeting is still being looked up, and an event with no listener is lost. Whatever arrives until
         // the socket is admitted is held (a few messages at most) and replayed to it.
@@ -1604,6 +1642,59 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             return;
         }
         conn = this.relayHub!.attach(id!, user!.uid, sock);
+        for (const message of queued) {
+            conn?.message(message.data, message.isBinary);
+        }
+    }
+
+    @Summary("Carries a video meeting's signaling over a WebSocket.")
+    @Description(
+        "The meeting's own signaling channel: a WebSocket at /signal/<meetingUid> carrying JSON messages - WebRTC " +
+            "offers, answers and ICE candidates, presence, moderation, chat and whiteboard - between the meeting's " +
+            "participants (see SignalingHub for the protocol: a 'hello' first, answered with 'ready', then 'signal' " +
+            "messages both ways). The server stamps each message with the sender's own uid and peer id, and delivers a " +
+            "message naming a recipient ('to') to that participant only. Requires a JWT (a real user's, or the guest " +
+            "token join() minted) holding READ and CREATE on the meeting - the grant join() gives - and an existing, " +
+            "unended, uncancelled meeting; anything else closes the socket with code 1008. Removing a participant " +
+            "(kick) closes their sockets. With the events datastore (Redis) configured, messages reach participants " +
+            "connected to other server replicas too.",
+    )
+    @Auth(["jwt"])
+    @WebSocket("/signal/:id", SIGNALING_WS_OPTIONS)
+    public async signal(@Param("id") paramId: string | undefined, @Request req: HttpRequest, @Socket sock: any, @AuthUser user?: JWTUser): Promise<void> {
+        const id: string | undefined = this.socketMeetingId(paramId, req);
+        // Listeners first, before the first await - see `relay()`, which this mirrors.
+        let conn: RelayConnection | undefined;
+        let closed = false;
+        const queued: { data: string | Uint8Array; isBinary: boolean }[] = [];
+        sock.on("message", (data: string | Uint8Array, isBinary: boolean) => {
+            if (conn) {
+                conn.message(data, isBinary);
+            } else if (queued.length < RELAY_MAX_QUEUED_MESSAGES) {
+                queued.push({ data, isBinary });
+            }
+        });
+        sock.on("close", () => {
+            closed = true;
+            conn?.close();
+        });
+
+        let refusal: string | undefined;
+        try {
+            refusal = await this.authorizeMeetingSocket(id, user);
+        } catch (err: any) {
+            this.logger.error(`Failed to authorize a signaling socket for meeting ${id}: ${err?.message ?? err}`);
+            sock.close(1011, "Signaling unavailable.");
+            return;
+        }
+        if (refusal) {
+            sock.close(1008, refusal);
+            return;
+        }
+        if (closed) {
+            return;
+        }
+        conn = this.signalingHub!.attach(id!, user!.uid, sock);
         for (const message of queued) {
             conn?.message(message.data, message.isBinary);
         }

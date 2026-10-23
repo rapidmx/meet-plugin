@@ -1508,3 +1508,61 @@ accessible name, not visible text.
 
 Verified with the full suite: `npx eslint`, both `tsc --noEmit` runs, and `npx vitest run --coverage.reporter=text`
 clean at 100%/98.56%/100%/100%.
+
+## 2026-10-22 (new features): in-call chat and shared whiteboard, on a dedicated signaling WebSocket
+
+**Asked for**: a whiteboard participants draw on together (ballpoint, sharpie, marker, crayon, coloring pencil and
+stencil, color swatches and a color wheel, stamps) and an integrated text chat (Markdown, embedded GIFs through the
+existing Giphy picker, emoji, bare URLs auto-linked, image URLs rendered as images). Mid-task JP added two transport
+requirements: signaling must be bi-directional over the WebSocket, and it must be this plugin's own WebSocket, not
+restapi's `/push`. (A first cut added a `PUBLISH` frame to restapi's `MailPushRoute`; it was reverted, untouched
+restapi files only, once the second requirement arrived.)
+
+**Signaling transport** (`src/util/SignalingHub.ts`, `BaseVideoMeetingRoute.signal()` at `/signal/:id`,
+`apps/shared/signaling/SignalingClient.ts`, replacing `apps/shared/push/GuestSignalingClient.ts`): hello/ready
+handshake then `{"op":"signal","data"}` both ways, modelled on `RelayHub` and sharing its `RelayBus` (rooms namespaced
+`signal:<uid>`), so it crosses replicas over Redis exactly when the relay does. The hub stamps `from`/`peer` from the
+authenticated socket (replacing `MailPushRoute`'s reject-a-forged-`from` check) and routes `to`-addressed messages
+to that peer only - SDP and ICE no longer fan out to every participant. Authorization is the relay's (factored into
+`authorizeMeetingSocket()`), minus the relay on/off switch. `kick()` now evicts the uid's signaling sockets on every
+replica (`evict()` publishes under the reserved sender `~evict` - an empty sender is silently dropped by
+`RedisRelayBus`, which the cross-replica test caught). Message limit 64 KiB where `@rapidrest/service-core` lets the
+route raise it, else 16 KiB; per-socket message and byte buckets sized for whiteboard drawing plus ICE bursts. The
+client queues while not ready, reconnects with backoff, treats 1008 as final (`onClosed`), and keeps the guest
+`jwt` cookie handling the relay socket also relies on. The ACL grant `join()` gives is unchanged; it still also lets
+a client use `/push`, which nothing in the plugin does any more.
+
+**Chat and whiteboard** (`apps/shared/collab/`): new `SignalMessage` kinds `chat`, `whiteboard`,
+`collab-sync-request`, `collab-sync`, owned by `CollabSession` (the mesh ignores them). Nothing is persisted - the
+same "in-call runtime state only" stance as talking stick and presenter. A late joiner asks the first participant
+whose `hello` it hears within 15 s for a catch-up (chat history + the board as ops), sent in parts sized to the
+server's `maxMessageBytes` and paced to its rate limit, retrying the next participant after 5 s. Every received payload
+goes through `protocol.ts`'s validators first. Board elements are owned by id prefix (`<peer>:<n>`): only the author
+extends one, anyone erases; clearing bumps an epoch so stale elements can't come back; `WhiteboardModel` is
+order-independent (out-of-order points held, tombstones for erased ids). Pens are drawn distinctly in
+`whiteboardRender.ts`, crayon/pencil grain from a PRNG seeded by element id so every screen draws the same texture.
+"Stencil" was read as a shape tool (line/arrow/rectangle/ellipse/triangle/star) - flag if JP meant something else.
+Chat Markdown is a small hand-written parser producing React elements (no HTML injection path, no new dependency);
+image detection is by file extension, with a fall-back to a link if the image fails to load. Emoji and GIF pickers
+are web-client's own `EmojiPicker`/`GifPicker`; Giphy search goes through the server's `jwt`-authenticated proxy,
+which the guest cookie satisfies.
+
+**Follow-up the same day (JP)**: live pointers and talking-stick drawing rights. Pointers are a new ephemeral
+`whiteboard-cursor` kind (`parseCursor()`), throttled to one per 80 ms, never sent mid-stroke (receivers follow the
+stroke's own points instead, which saves rate budget), dropped on `hidden`/`bye`/30 s idle, never caught up on, drawn as
+DOM over the canvas (tool glyph in the participant's color plus a name chip) so they never trigger a board redraw.
+Talking stick feeds `CollabSession.setDrawPolicy()`: only the holder's drawing calls do anything and only the holder's
+received ops apply (catch-up ops still do) - cooperative, like the mic lock; an op in flight as the stick moves can land
+on some boards and not others. The test agents' findings were fixed along the way: an infinite loop in the Markdown
+parser on deeply nested quotes (any participant could freeze everyone's tab), a stroke truncated for a late joiner when
+a clear dropped held points, the last points of a stroke lost on stop, multi-part history out of order; plus
+coordinates clamped to the board, point batches capped per op, an empty catch-up retried with the next participant,
+catch-up requests answered once per 10 s per requester, catch-up history not counted as unread, chat Escape scoped to
+the panel.
+
+**Known limits**: a catch-up is one participant's account and can't be verified (its chat history names who said
+what; only the envelope is server-stamped). Images in chat are loaded from wherever their URL points (no referrer
+sent), which reveals viewers' IP addresses to that host - inherent in "render image URLs as images". The whiteboard
+redraws every element on each change (fine at the 5000-element cap in practice; an offscreen layer would be the next
+step if it isn't).
+

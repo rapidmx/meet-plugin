@@ -209,7 +209,7 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
                 channel={joinResult.meeting.uid}
                 // `token` is present only for the common anonymous case (`authenticated: false`) - when the
                 // caller's own existing session already authenticated them (`authenticated: true`), there is no
-                // guest token to apply as a cookie at all, and `GuestSignalingClient` relies entirely on the
+                // guest token to apply as a cookie at all, and `SignalingClient` relies entirely on the
                 // browser's own already-existing `jwt` session cookie instead (see its own doc comment and
                 // `VideoMeetingJoinResult`'s doc comment in `_meetApi.ts`).
                 token={joinResult.token}

@@ -2,10 +2,9 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
-/** Shared types for `MeshConnectionManager.ts` and its signaling transport (`apps/shared/push/GuestSignalingClient.ts`) -
- * kept in their own module so a test can depend on the shapes alone. `GuestSignalingClient` itself now also serves
- * an already-authenticated real caller (`VideoMeetingJoinResult.authenticated`), not only a synthetic guest - see
- * its own doc comment. */
+/** Shared types for `MeshConnectionManager.ts` and its signaling transport (`apps/shared/signaling/SignalingClient.ts`) -
+ * kept in their own module so a test can depend on the shapes alone. `SignalingClient` serves both a guest and an
+ * already-authenticated real caller (`VideoMeetingJoinResult.authenticated`) - see its own doc comment. */
 
 /** What a participant is sending, and whether their hand is up. Announced in `hello` and re-sent as a `state`
  * message on every change, so a tile can show a muted microphone, an avatar for a camera that is off, and a raised
@@ -37,16 +36,19 @@ export const REACTION_EMOJIS = ["👍", "👏", "❤️", "🎉", "😂", "😮"
 export type TransportMode = "auto" | "p2p" | "relay" | "websocket";
 
 /**
- * One WebRTC signaling message, published as the JSON body of `POST /push/:meetingUid` (`BasePushRoute.send()`)
- * and received back over `/push`'s WebSocket, exactly as `BaseVideoMeetingRoute`'s doc comment describes ("SDP
- * offers/answers and ICE candidates are ordinary `NotificationUtils.sendMessage()` payloads"). `type` is a fixed
- * literal so a listener on the meeting's channel (which will also see other frame shapes if this server ever
- * grows other push consumers) can cheaply recognize and skip anything that isn't one of these.
+ * One WebRTC signaling message, sent as the `data` of a `{"op":"signal"}` frame over the meeting's own signaling
+ * WebSocket (`apps/shared/signaling/SignalingClient.ts`, served by `BaseVideoMeetingRoute.signal()` and the backend's
+ * `SignalingHub`) and delivered to the other participants the same way. `type` is a fixed literal so a listener can
+ * cheaply recognize and skip anything that isn't one of these.
+ *
+ * `chat`/`whiteboard` (see `../collab/CollabSession.ts`) are broadcast like `reaction`.
  *
  * `hello`/`bye`/`presenter-claim`/`presenter-release`/`state`/`reaction`/`talking-stick` are broadcast (`to` left
- * unset - every participant is relevant); `offer`/`answer`/`ice-candidate`/`mute-request`/`kicked` are
- * point-to-point (`to` is the intended peer's uid) - a recipient that isn't `to` (when set) ignores the message,
- * since a channel's pub/sub fans every message out to every subscriber, sender included.
+ * unset - every other participant receives it); `offer`/`answer`/`ice-candidate`/`mute-request`/`kicked` are
+ * point-to-point (`to` is the intended peer's id) - the server delivers one only to the socket of that peer, so
+ * nobody else ever sees it. The sender never receives its own messages back either. (A recipient still ignores a
+ * message whose `to` isn't itself, and its own messages - harmless with this transport, and kept so
+ * `MeshConnectionManager` does not depend on how its transport routes.)
  *
  * `mute-request`/`kicked`/`talking-stick` are host moderation signals (see `MeshConnectionManager`'s doc comment) -
  * purely cooperative, like every other message here: the recipient's own client decides whether to honor one, and
@@ -78,16 +80,22 @@ export interface SignalMessage {
         | "mute-request"
         | "kicked"
         | "talking-stick"
-        | "restart-connection";
+        | "restart-connection"
+        | "chat"
+        | "whiteboard"
+        | "collab-sync-request"
+        | "collab-sync"
+        | "whiteboard-cursor";
     /** The sender's authenticated uid - the real caller's own uid when `join()` returned `authenticated: true`, else
-     * the `guest:<random>` uid `BaseVideoMeetingRoute.join()` minted. The server refuses a published message whose
-     * `from` isn't the authenticated caller's uid (it stops one participant speaking as another), so this must be
-     * exactly that uid. */
+     * the `guest:<random>` uid `BaseVideoMeetingRoute.join()` minted. The server overwrites whatever the sender put
+     * here with the uid its signaling socket authenticated as (it stops one participant speaking as another), so a
+     * received message's `from` is always that uid. */
     from: string;
     /** Which of the sender's tabs or devices this is: `<from>~<random>`. The same account joining from two devices is
-     * two participants, not one that ignores its own messages. A `peer` that doesn't start with `<from>~` is
-     * ignored, so it can't name someone else's tab. Absent from a sender that predates it (the participant is then
-     * identified by `from`). */
+     * two participants, not one that ignores its own messages. The server overwrites it with the peer id the sender's
+     * socket announced in its `hello` (which must be `<from>` or start with `<from>~`), so every received message
+     * carries one; a received `peer` that is neither is still ignored, so it can't name someone else's tab, and one
+     * that is absent identifies the participant by `from`. */
     peer?: string;
     /** Set only on a point-to-point message (`offer`/`answer`/`ice-candidate`/`relay-fallback`). */
     to?: string;
@@ -106,16 +114,27 @@ export interface SignalMessage {
     sdp?: RTCSessionDescriptionInit;
     /** `ice-candidate` only. */
     candidate?: RTCIceCandidateInit;
+    /** `chat` only - a `ChatPayload` (`../collab/protocol.ts`), validated by `parseChat()` before use. Typed `unknown`
+     * since it is another participant's input until then; the same goes for the next two. */
+    chat?: unknown;
+    /** `whiteboard` only - a `WhiteboardOp`, validated by `parseWhiteboardOp()`. */
+    whiteboard?: unknown;
+    /** `collab-sync` only - one `SyncPayload` part of a newcomer's catch-up, validated by `parseSync()`. `collab-sync`
+     * and `collab-sync-request` are point-to-point (`to` set) - see `CollabSession`'s doc comment. */
+    sync?: unknown;
+    /** `whiteboard-cursor` only - a `CursorPayload`, validated by `parseCursor()`; broadcast, never stored. */
+    cursor?: unknown;
 }
 
 /** What `MeshConnectionManager` needs from a signaling transport - implemented by
- * `apps/shared/push/GuestSignalingClient.ts` for a real call, and by an in-memory fake for `MeshConnectionManager`'s own
- * tests (see `test/webrtc/MeshConnectionManager.test.ts`), which never opens a real network connection. */
+ * `apps/shared/signaling/SignalingClient.ts` for a real call, and by an in-memory fake for `MeshConnectionManager`'s own
+ * tests (see `test/apps/shared/webrtc/MeshConnectionManager.test.ts`), which never opens a real network connection. */
 export interface SignalingChannel {
     send(message: SignalMessage): void;
-    /** Calls `handler` with every message received on the channel (including, per the pub/sub fan-out this
-     * transport is built on, this same client's own sends - `MeshConnectionManager` filters those out itself
-     * rather than relying on the transport to). Returns the function that stops listening. */
+    /** Calls `handler` with every message received on the channel. `SignalingClient` never delivers this client's own
+     * sends, nor a `to`-addressed message meant for another peer, but `MeshConnectionManager` filters both out itself
+     * rather than relying on the transport to (its tests' fake echoes everything to everyone). Returns the function
+     * that stops listening. */
     onMessage(handler: (message: SignalMessage) => void): () => void;
 }
 

@@ -4,7 +4,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 /**
  * Full-mesh WebRTC connection management: one direct `RTCPeerConnection` per other participant, signaled entirely
- * over the meeting's own push channel (`SignalingChannel` - see `types.ts`) as this plugin's Phase 2
+ * over the meeting's own signaling channel (`SignalingChannel` - see `types.ts`) as this plugin's Phase 2
  * `.claude/NOTES.md` entry lays out. Pure state machine, no JSX/DOM rendering - `apps/meet/_CallView.tsx` owns one
  * instance per call and mirrors its events into React state.
  *
@@ -31,17 +31,17 @@
  *
  * ## Join announcement and roster discovery
  *
- * The channel has no history (a push event published while a socket was down is never replayed - see
- * `@rapidmx/web-client`'s `lib/mail/pushClient.ts` doc comment for the identical guarantee on the mail push channel this
- * one shares its transport with), so a newcomer's `hello` would only reach participants who happened to already be
- * subscribed *and* who joined before them - never the other way around. Every participant who learns of a
+ * The channel has no history (the server delivers a message only to the sockets connected at that moment, and never
+ * replays one to a socket that connects later - see the backend's `SignalingHub`), so a newcomer's `hello` would only
+ * reach participants who happened to already be connected *and* who joined before them - never the other way around. Every participant who learns of a
  * genuinely new peer (from any message, not just `hello`) therefore echoes its own `hello` right back, once, the
  * first time it becomes aware of that peer - so within one extra round trip everyone converges on the same full
  * roster regardless of join order. This is naturally bounded (each participant echoes at most once per peer it
  * ever discovers) rather than a risk of runaway flooding.
  *
- * Each message is its own `POST`, so nothing guarantees they arrive in the order they were sent. Two consequences
- * are handled here: an `offer` that beats its sender's `hello` creates the peer under a placeholder name that the
+ * Nothing in `SignalingChannel` itself promises that messages arrive in the order they were sent (one socket keeps
+ * one sender's messages in order today, but the transport this replaced sent each message as its own `POST`, and
+ * this manager does not depend on which transport it has). Two consequences are handled here: an `offer` that beats its sender's `hello` creates the peer under a placeholder name that the
  * `hello` then replaces (`participant-updated`), and an ICE candidate that beats its offer is held until the peer
  * exists rather than dropped.
  *
@@ -863,7 +863,7 @@ export class MeshConnectionManager {
         }
         const peer = this.peers.get(message.from);
         if (!peer) {
-            // A candidate that raced ahead of its own offer (each message is a separate `POST`) - hold it for
+            // A candidate that raced ahead of its own offer (see this module's doc comment on ordering) - hold it for
             // the peer to claim when it is created. Bounded, see `MAX_ORPHAN_PEERS`.
             const held = this.orphanCandidates.get(message.from);
             if (held) {

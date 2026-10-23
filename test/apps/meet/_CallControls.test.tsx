@@ -26,6 +26,8 @@ function renderControls(overrides: Partial<CallControlsProps> = {}) {
         onReaction: vi.fn(),
         viewMode: "grid",
         onToggleViewMode: vi.fn(),
+        whiteboardOpen: false,
+        onToggleWhiteboard: vi.fn(),
         isHost: false,
         transportMode: "auto",
         onSetTransportMode: vi.fn(),
@@ -351,6 +353,36 @@ describe("CallControls - the rest", () => {
         const enabled = screen.getByRole("button", { name: "Switch to focused view" });
         expect(enabled).toBeEnabled();
         expect(enabled).not.toHaveAttribute("title");
+    });
+
+    it("opens and closes the whiteboard, lighting up while it is open", () => {
+        const { props, rerender } = renderControls();
+        const open = screen.getByRole("button", { name: "Open whiteboard" });
+        expect(open).toHaveAttribute("aria-pressed", "false");
+        expect(open.className).not.toContain("bg-[#a8c7fa]");
+        fireEvent.click(open);
+        expect(props.onToggleWhiteboard).toHaveBeenCalledTimes(1);
+
+        rerender(<CallControls {...props} whiteboardOpen />);
+        const close = screen.getByRole("button", { name: "Close whiteboard" });
+        expect(close).toHaveAttribute("aria-pressed", "true");
+        expect(close.className).toContain("bg-[#a8c7fa]");
+        fireEvent.click(close);
+        expect(props.onToggleWhiteboard).toHaveBeenCalledTimes(2);
+    });
+
+    it("shows a dot on the whiteboard button when someone drew while it was closed - but not while it is open", () => {
+        const { props, rerender } = renderControls({ whiteboardActivity: true });
+        expect(screen.getByRole("button", { name: "Open whiteboard, new drawing" })).toBeInTheDocument();
+        expect(screen.getByTestId("whiteboard-activity")).toBeInTheDocument();
+
+        rerender(<CallControls {...props} whiteboardOpen />);
+        expect(screen.getByRole("button", { name: "Close whiteboard" })).toBeInTheDocument();
+        expect(screen.queryByTestId("whiteboard-activity")).toBeNull();
+
+        rerender(<CallControls {...props} whiteboardActivity={false} />);
+        expect(screen.getByRole("button", { name: "Open whiteboard" })).toBeInTheDocument();
+        expect(screen.queryByTestId("whiteboard-activity")).toBeNull();
     });
 
     it("leaves", () => {

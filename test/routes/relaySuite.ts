@@ -21,7 +21,7 @@ export interface RelaySuiteContext extends VideoMeetingSecuritySuiteContext {
 }
 
 /** A thin client over Node's `WebSocket` that records everything the server sends and how it closed the socket. */
-class RelayClient {
+export class RelayClient {
     public readonly messages: (string | Buffer)[] = [];
     public closeInfo?: { code: number; reason: string };
     public readonly opened: Promise<void>;

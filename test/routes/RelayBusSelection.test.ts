@@ -9,6 +9,7 @@ import { EventEmitter } from "events";
 import { BaseVideoMeetingRoute } from "../../src/routes/BaseVideoMeetingRoute.js";
 import { RedisRelayBus } from "../../src/util/RedisRelayBus.js";
 import { InProcessRelayBus, RelayHub } from "../../src/util/RelayHub.js";
+import { SignalingHub } from "../../src/util/SignalingHub.js";
 import { FakeRedisServer } from "../util/fakeRedis.js";
 
 const redis = vi.hoisted(() => ({ createClient: vi.fn() }));
@@ -69,18 +70,23 @@ describe("BaseVideoMeetingRoute relay bus", () => {
         expect(built.map((b) => [b.type, b.opts.name])).toEqual([
             [InProcessRelayBus, "TestRouteInProcessRelayBus"],
             [RelayHub, "TestRouteRelayHub"],
+            [SignalingHub, "TestRouteSignalingHub"],
         ]);
         expect(built[0].opts.args).toEqual([]);
         expect(built[1].opts.args[0].bus).toBe(busOf(r));
+        // The signaling hub shares the relay's bus.
+        expect(built[2].opts.args[0].bus).toBe(busOf(r));
+        expect(r.signalingHub).toBeInstanceOf(SignalingHub);
         await r.initRelayBus();
-        expect(built).toHaveLength(2);
+        expect(built).toHaveLength(3);
 
         const redisRoute = await route({ url: "redis://events:6379" });
-        expect(built.slice(2).map((b) => [b.type, b.opts.name])).toEqual([
+        expect(built.slice(3).map((b) => [b.type, b.opts.name])).toEqual([
             [RedisRelayBus, "TestRouteRedisRelayBus"],
             [RelayHub, "TestRouteRelayHub"],
+            [SignalingHub, "TestRouteSignalingHub"],
         ]);
-        expect(built[2].opts.args[0]).toEqual({ url: "redis://events:6379", logger });
+        expect(built[3].opts.args[0]).toEqual({ url: "redis://events:6379", logger });
         redisRoute.destroyRelayBus();
     });
 
@@ -159,6 +165,43 @@ describe("BaseVideoMeetingRoute relay bus", () => {
         alice.emit("message", Buffer.from([4]), true);
         await server.settle();
         expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining("Dropped a relay frame for bob"));
+
+        alice.emit("close");
+        bob.emit("close");
+        replica1.destroyRelayBus();
+        replica2.destroyRelayBus();
+    });
+
+    it("Carries signaling to, and evicts, a participant connected to another replica.", async () => {
+        const replica1 = await route({ url: "redis://events:6379" });
+        const replica2 = await route({ url: "redis://events:6379" });
+        replica1.authorizeMeetingSocket = async () => undefined;
+        replica2.authorizeMeetingSocket = async () => undefined;
+
+        const connect = async (r: any, uid: string): Promise<any> => {
+            const sock: any = new EventEmitter();
+            sock.send = vi.fn();
+            sock.close = vi.fn();
+            await r.signal("meeting-1", { path: "/signal/meeting-1" }, sock, { uid });
+            sock.emit("message", JSON.stringify({ op: "hello", v: 1, peer: uid }), false);
+            return sock;
+        };
+        const alice = await connect(replica1, "alice");
+        const bob = await connect(replica2, "bob");
+
+        alice.emit("message", JSON.stringify({ op: "signal", data: { type: "offer", to: "bob" } }), false);
+        await server.settle();
+        const received = bob.send.mock.calls.map((c: any[]) => JSON.parse(c[0])).filter((m: any) => m.op === "signal");
+        expect(received).toEqual([{ op: "signal", data: { type: "offer", to: "bob", from: "alice", peer: "alice" } }]);
+
+        // The signaling hub of a route logs through the route's logger too.
+        replica2.relayHub.bus.publish("signal:meeting-1", "x", Buffer.from("garbled"));
+        expect(logger.debug).toHaveBeenCalledWith("Ignored an unreadable signaling frame in signal:meeting-1.");
+
+        replica1.signalingHub.evict("meeting-1", "bob");
+        await server.settle();
+        expect(bob.close).toHaveBeenCalledWith(1008, "Removed from the meeting.");
+        expect(alice.close).not.toHaveBeenCalled();
 
         alice.emit("close");
         bob.emit("close");

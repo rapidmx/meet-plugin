@@ -6,7 +6,7 @@
  * The in-call control bar, fixed to the bottom of the call (`_CallView.tsx` lays it out below the tiles, never over
  * them). Its menus open upward, centered on the whole bar on a phone (where the bar wraps onto two rows and a menu
  * hung from its own button would run off the edge) and from their own button on a wider window: microphone and camera (each a mute/unmute or on/off button next to a menu that picks the device), share
- * screen, reactions, raise hand, grid/focus and leave. The effects button opens the video filter picker
+ * screen, whiteboard, reactions, raise hand, grid/focus and leave. The effects button opens the video filter picker
  * (`_EffectsPanel.tsx`) and lights up while any filter is on.
  *
  * The microphone button shows a live level while it is unmuted - bars that move with the sound the microphone is
@@ -49,6 +49,7 @@ import {
     ScreenShareIcon,
     VideoIcon,
     VideoOffIcon,
+    WhiteboardIcon,
 } from "./_icons.js";
 
 /** The "…" menu's "Connection method" options, in display order - see `TransportMode`'s own doc comment. */
@@ -82,6 +83,11 @@ export interface CallControlsProps {
      * slot, which already looks different from grid view's two equal-sized tiles - see `_CallView.tsx`'s doc
      * comment on where the local tile appears. */
     onToggleViewMode: () => void;
+    /** Whether this participant has the shared whiteboard open - see `_CallView.tsx`'s doc comment. */
+    whiteboardOpen: boolean;
+    /** Someone drew on the whiteboard while it was closed here - its button shows a dot. */
+    whiteboardActivity?: boolean;
+    onToggleWhiteboard: () => void;
     /** True while talking-stick mode is on and this participant doesn't currently hold it - see `_CallView.tsx`'s
      * doc comment on talking-stick mode. Disables the microphone toggle (not the device-picker chevron, which
      * doesn't change whether anyone can hear them) rather than merely nudging it, unlike a `mute-request`. */
@@ -135,6 +141,9 @@ export default function CallControls({
     onReaction,
     viewMode,
     onToggleViewMode,
+    whiteboardOpen,
+    whiteboardActivity,
+    onToggleWhiteboard,
     micLocked,
     isHost,
     transportMode,
@@ -290,6 +299,19 @@ export default function CallControls({
                     </button>
                 </>
             )}
+
+            <button
+                type="button"
+                className={`${BUTTON} relative w-12 ${whiteboardOpen ? ACTIVE : NEUTRAL}`}
+                aria-label={whiteboardOpen ? "Close whiteboard" : whiteboardActivity ? "Open whiteboard, new drawing" : "Open whiteboard"}
+                aria-pressed={whiteboardOpen}
+                onClick={onToggleWhiteboard}
+            >
+                <WhiteboardIcon />
+                {whiteboardActivity && !whiteboardOpen && (
+                    <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-[#fbbc04]" data-testid="whiteboard-activity" />
+                )}
+            </button>
 
             <div className="sm:relative">
                 <button

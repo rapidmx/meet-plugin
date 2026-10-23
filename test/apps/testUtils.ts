@@ -4,7 +4,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 /** Shared test fakes for `apps/meet/**`, mirroring `booking-plugin`'s own `test/apps/testUtils.ts` conventions
  * (`jsonResponse`/`mockFetch`), extended with fakes for the browser APIs this plugin is the first in this codebase
- * to use at all - `navigator.mediaDevices`, `RTCPeerConnection` and the push `WebSocket` (see this plugin's Phase 2
+ * to use at all - `navigator.mediaDevices`, `RTCPeerConnection` and the signaling `WebSocket` (see this plugin's Phase 2
  * `.claude/NOTES.md` entry: there was no existing mocking convention for any of these to follow). */
 import { vi, type Mock } from "vitest";
 import { NO_FILTERS } from "../../apps/shared/media/filters/filterTypes.js";
@@ -212,27 +212,29 @@ export function fakeRTCPeerConnection(claimKinds: ("audio" | "video")[] = ["audi
     return pc;
 }
 
-/** `fakePushSocket()`'s return shape - see `FakeRTCPeerConnection`'s doc comment on why `send`/`close` are typed
+/** `fakeSignalingSocket()`'s return shape - see `FakeRTCPeerConnection`'s doc comment on why `send`/`close` are typed
  * as plain `Mock` rather than inferred. */
-export interface FakePushSocket {
+export interface FakeSignalingSocket {
     readyState: number;
     send: Mock;
     close: Mock;
     onopen: ((event: unknown) => void) | null;
     onmessage: ((event: { data: unknown }) => void) | null;
-    onclose: ((event: unknown) => void) | null;
+    onclose: ((event: { code?: number; reason?: string }) => void) | null;
     onerror: ((event: unknown) => void) | null;
     sent: string[];
     open(): void;
     message(data: unknown): void;
-    triggerClose(): void;
+    triggerClose(code?: number, reason?: string): void;
 }
 
-/** A fake `PushSocket` (`apps/shared/push/GuestSignalingClient.ts`'s own seam, mirroring `PushClient`'s identical one) -
- * `open()`/`message()`/`triggerClose()` drive it as the server would. */
-export function fakePushSocket(): FakePushSocket {
+/** A fake `SignalingSocket` (`apps/shared/signaling/SignalingClient.ts`'s own seam, its `createSocket` option) -
+ * `open()`/`message()`/`triggerClose()` drive it as the server would: `message()` delivers a frame (an object is
+ * JSON-encoded first), and `triggerClose()` closes it with the given close code and reason (e.g. 1008 for the server
+ * refusing the socket). */
+export function fakeSignalingSocket(): FakeSignalingSocket {
     const sent: string[] = [];
-    const socket: FakePushSocket = {
+    const socket: FakeSignalingSocket = {
         readyState: 0,
         send: vi.fn((data: string) => sent.push(data)),
         close: vi.fn(),
@@ -248,9 +250,9 @@ export function fakePushSocket(): FakePushSocket {
         message(data: unknown) {
             socket.onmessage?.({ data: typeof data === "string" ? data : JSON.stringify(data) });
         },
-        triggerClose() {
+        triggerClose(code?: number, reason?: string) {
             socket.readyState = 3;
-            socket.onclose?.({});
+            socket.onclose?.({ code, reason });
         },
     };
     return socket;
