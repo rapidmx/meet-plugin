@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-24
+
+### Changed
+- Build against @rapidmx/restapi ^0.34.0 and @rapidmx/web-client ^0.36.0
+
 ## [0.16.0] - 2026-10-23
 
 ### Added
@@ -633,7 +638,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/rapidmx/meet-plugin/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/rapidmx/meet-plugin/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/rapidmx/meet-plugin/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/rapidmx/meet-plugin/compare/v0.14.0...v0.14.1
