@@ -11,6 +11,16 @@ import { VideoSender } from "./VideoSender.js";
 
 const SEQ_MODULUS = 0x10000;
 
+/** The most frames waiting to be sealed before a new one is dropped (and reported so, which makes the video sender ask for a key
+ * frame) - sealing is quick, so a queue this long means it can't keep up. */
+export const MAX_FRAMES_SEALING = 8;
+
+/** How a protected meeting's frames are sealed and opened (`MeetingCipher`, `specs/meeting_privacy.md` §5.2). */
+export interface FrameCipher {
+    encryptFrame(kind: number, frame: Uint8Array): Promise<Uint8Array>;
+    decryptFrame(kind: number, senderPeer: string, payload: Uint8Array): Promise<Uint8Array | undefined>;
+}
+
 /** Numbers and fragments the frames of one sender. The counters belong to the transport rather than to a capture
  * session, so stopping and restarting sending never resets `seq` - a receiver still holding the old value would
  * otherwise treat the restarted stream as older than what it has already seen. */
@@ -25,18 +35,45 @@ export class FramePublisher {
     /** `send` returns whether one message was accepted by the socket. */
     /** `maxMessageBytes` is the largest message the socket may send right now (it changes when the server's `ready`
      * announces a limit), so it is read for every frame rather than fixed at construction. */
+    private sealing = 0;
+    private chain: Promise<void> = Promise.resolve();
+
+    /** `cipher`: a protected meeting's - every frame is sealed before it is fragmented, in order. */
     constructor(
         private readonly send: (message: Uint8Array) => boolean,
         private readonly maxMessageBytes: () => number = () => DEFAULT_MESSAGE_BYTES,
+        private readonly cipher?: FrameCipher,
     ) {}
 
     /** Fragments and sends one frame, stopping at the first fragment the socket refuses (the rest could not be
-     * used without it). Returns whether the whole frame went out. */
+     * used without it). Returns whether the whole frame went out - or, sealing it first, whether it was queued. */
     publish: PublishFrame = (kind, keyFrame, data, timestampMs) => {
         const seq = this.seqs[kind];
         this.seqs[kind] = (seq + 1) % SEQ_MODULUS;
+        const cipher = this.cipher;
+        if (!cipher) {
+            return this.sendFrame(kind, keyFrame, seq, timestampMs, data, false);
+        }
+        if (this.sealing >= MAX_FRAMES_SEALING) {
+            this.stats[kind].framesDropped += 1;
+            return false;
+        }
+        this.sealing += 1;
+        this.chain = this.chain.then(async () => {
+            try {
+                this.sendFrame(kind, keyFrame, seq, timestampMs, await cipher.encryptFrame(kind, data), true);
+            } catch {
+                this.stats[kind].framesDropped += 1;
+            } finally {
+                this.sealing -= 1;
+            }
+        });
+        return true;
+    };
+
+    private sendFrame(kind: FrameKind, keyFrame: boolean, seq: number, timestampMs: number, data: Uint8Array, encrypted: boolean): boolean {
         const stats = this.stats[kind];
-        const fragments = fragmentFrame(kind, keyFrame, seq, timestampMs, data, this.maxMessageBytes());
+        const fragments = fragmentFrame(kind, keyFrame, seq, timestampMs, data, this.maxMessageBytes(), encrypted);
         if (fragments.length === 0) {
             stats.framesDropped += 1;
             return false;
@@ -50,7 +87,7 @@ export class FramePublisher {
         }
         stats.framesSent += 1;
         return true;
-    };
+    }
 }
 
 export interface RelaySenderOptions {
@@ -59,6 +96,8 @@ export interface RelaySenderOptions {
     canSend: () => boolean;
     /** The socket's current message limit; defaults to what an older server accepts. */
     maxMessageBytes?: () => number;
+    /** A protected meeting's cipher: frames are sealed before they go. */
+    cipher?: FrameCipher;
 }
 
 /** The publishing half of the relay: the two capture paths plus the frame numbering they share. */
@@ -68,7 +107,7 @@ export class RelaySender {
     private readonly video: VideoSender;
 
     constructor(options: RelaySenderOptions) {
-        this.publisher = new FramePublisher(options.send, options.maxMessageBytes);
+        this.publisher = new FramePublisher(options.send, options.maxMessageBytes, options.cipher);
         const deps = { env: options.env, publish: this.publisher.publish, canSend: options.canSend };
         this.audio = new AudioSender(deps);
         this.video = new VideoSender(deps);

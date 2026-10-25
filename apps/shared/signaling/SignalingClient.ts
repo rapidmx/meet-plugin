@@ -33,6 +33,7 @@
  * calls `onClosed` with the server's reason. (The one 1008 that is not final, "Replaced.", only ever reaches a socket
  * this client has already let go of.)
  */
+import type { SignalCipher } from "../crypto/MeetingCipher.js";
 import { apiOrigin } from "@rapidmx/web-client/lib/util/api.js";
 import type { SignalMessage, SignalingChannel } from "../webrtc/types.js";
 
@@ -101,6 +102,9 @@ export interface SignalingClientOptions {
     /** Overrides `document`, for a test - see `applyAuthCookie()`. */
     documentRef?: Pick<Document, "cookie"> & { location?: Pick<Location, "protocol"> };
     random?: () => number;
+    /** A protected meeting's cipher (`MeetingCipher`, `specs/meeting_privacy.md` §5.1): every message is sealed before it is sent and
+     * opened before listeners see it, in order, and nothing travels in the clear. Absent: messages go as they are. */
+    cipher?: SignalCipher;
 }
 
 export class SignalingClient implements SignalingChannel {
@@ -116,6 +120,9 @@ export class SignalingClient implements SignalingChannel {
     private readonly queue: string[] = [];
     private readonly listeners = new Set<(message: SignalMessage) => void>();
     private pendingConnect: { resolve: () => void; reject: (err: Error) => void } | undefined;
+    /** Seals, then opens, one message at a time, so neither direction is reordered by encryption. */
+    private sealing: Promise<void> = Promise.resolve();
+    private opening: Promise<void> = Promise.resolve();
 
     constructor(private readonly options: SignalingClientOptions) {}
 
@@ -172,7 +179,20 @@ export class SignalingClient implements SignalingChannel {
         if (this.closed) {
             return;
         }
-        const text = JSON.stringify({ op: "signal", data: message });
+        const cipher = this.options.cipher;
+        if (cipher) {
+            this.sealing = this.sealing.then(async () => {
+                const data = await cipher.seal(message);
+                if (!this.closed) {
+                    this.enqueue(JSON.stringify({ op: "signal", data }));
+                }
+            });
+            return;
+        }
+        this.enqueue(JSON.stringify({ op: "signal", data: message }));
+    }
+
+    private enqueue(text: string): void {
         // Straight out only when nothing is waiting, so a message never overtakes one queued before it.
         if (this.ready && this.queue.length === 0 && this.write(text)) {
             return;
@@ -235,9 +255,24 @@ export class SignalingClient implements SignalingChannel {
         if (frame.op === "ready") {
             this.handleReady(frame.maxMessageBytes);
         } else if (frame.op === "signal" && frame.data && typeof frame.data === "object") {
-            for (const listener of [...this.listeners]) {
-                listener(frame.data as SignalMessage);
+            const cipher = this.options.cipher;
+            const data = frame.data as Record<string, unknown>;
+            if (!cipher) {
+                this.deliver(data as unknown as SignalMessage);
+                return;
             }
+            this.opening = this.opening.then(async () => {
+                const message = await cipher.open(data);
+                if (message && !this.closed) {
+                    this.deliver(message);
+                }
+            });
+        }
+    }
+
+    private deliver(message: SignalMessage): void {
+        for (const listener of [...this.listeners]) {
+            listener(message);
         }
     }
 

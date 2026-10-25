@@ -37,7 +37,8 @@ import {
 import { stripTrustedRoles } from "../util/RouteAccessUtils.js";
 import { SIGNALING_LARGE_PAYLOAD_BYTES, SIGNALING_MAX_PAYLOAD_BYTES, SignalingHub } from "../util/SignalingHub.js";
 import { JOIN_TOKEN_PATTERN, PUBLIC_SLUG_PATTERN, mintJoinToken, mintPublicSlug } from "../util/TokenUtils.js";
-import { VideoMeeting, VideoMeetingInvitee, VideoMeetingStatus, VideoMeetingVisibility } from "../models/types.js";
+import { isSealedValue, type MeetingProtection, type MeetingProtectionBody, PROTECTED_MEETING_TITLE, validateProtection } from "../util/MeetingProtectionUtils.js";
+import { type MeetingKeyWrap, VideoMeeting, VideoMeetingInvitee, VideoMeetingStatus, VideoMeetingVisibility } from "../models/types.js";
 const { Config, Destroy, Init, Inject, Logger } = ObjectDecorators;
 const { Description, Summary } = DocDecorators;
 const { Transactional } = DatabaseDecorators;
@@ -101,6 +102,9 @@ export const GUEST_UID_PREFIX = "guest:";
 const GUEST_GRANT_MAX_ATTEMPTS = 5;
 
 /** The `label` of every `CalendarEventAttendeeLink` `persistMeeting()` writes. */
+/** The most wraps of a protected meeting's key: one per zero-access key of the organizer's (a rotation leaves a few). */
+const MAX_KEY_WRAPS = 4;
+
 const ATTENDEE_LINK_LABEL = "Join video call";
 
 /** The reason `relay()` closes (1008) a socket it refuses for any authorization reason - a caller with no grant, a
@@ -121,8 +125,13 @@ export interface CreateVideoMeetingBody {
     calendarEventUid?: string;
     startTime?: string;
     endTime?: string;
-    /** Required (and non-empty), only when `visibility` is `"private"`. */
-    invitees?: { email?: string; displayName?: string }[];
+    /** Required (and non-empty), only when `visibility` is `"private"`. In a protected meeting a name is sealed (`sealedFields`, no
+     * `displayName`). */
+    invitees?: { email?: string; displayName?: string; sealedFields?: { displayName?: unknown } }[];
+    /** Makes the meeting protected end to end (`specs/meeting_privacy.md`): its key's certificate, the organizer's wrap of the key, its
+     * sealed title and when the key is discarded. `title` is then omitted - the stored one is `"Meeting"` - and every invitee's link
+     * works only with the key, which the organizer's client adds after `#` when it invites. */
+    protection?: MeetingProtectionBody;
     /** See `VideoMeeting.forceMuteOnJoin`. */
     forceMuteOnJoin?: boolean;
     /** The plaintext password to require for this meeting, hashed before storage (see `VideoMeeting.passwordHash`) -
@@ -191,6 +200,16 @@ export interface PublicVideoMeeting {
      * on, including `VideoMeetingAdmissionRequiredResult` - so a client already on the admission-request screen
      * knows one is even needed without a second field. Omitted (reads as `false`) when disabled. */
     waitingRoomEnabled?: boolean;
+    /** A protected meeting (`specs/meeting_privacy.md`): `title` is the placeholder, the real one is in `sealedFields`, and every
+     * signal and relayed frame must be sealed with the meeting's live key. */
+    protected?: true;
+    sealedFields?: Record<string, string>;
+    /** The meeting key's certificate - what a link's key opens with. */
+    meetingKeyCertificate?: string;
+    /** When the key is discarded and joining ends. */
+    keyExpiresAt?: Date;
+    /** The caller's own wraps of the meeting's key - only those of mailboxes the caller may read. */
+    keyWraps?: MeetingKeyWrap[];
 }
 
 /**
@@ -647,17 +666,22 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         if (typeof body?.mailboxUid !== "string" || !body.mailboxUid) {
             throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "'mailboxUid' is required.");
         }
-        if (typeof body.title !== "string" || !body.title.trim()) {
+        const protectedMeeting: boolean = body.protection != null;
+        if (protectedMeeting) {
+            // Its title is sealed: a readable one would be stored for the server to read.
+            if (body.title !== undefined && body.title !== PROTECTED_MEETING_TITLE) {
+                throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "A protected meeting's title is sealed: send 'protection.sealedFields.title', not 'title'.");
+            }
+        } else if (typeof body.title !== "string" || !body.title.trim()) {
             throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "'title' is required.");
-        }
-        if (body.title.trim().length > MAX_TITLE_LENGTH) {
+        } else if (body.title.trim().length > MAX_TITLE_LENGTH) {
             throw new ApiError(ApiErrors.INVALID_REQUEST, 400, `'title' must be at most ${MAX_TITLE_LENGTH} characters.`);
         }
         if (body.visibility !== VideoMeetingVisibility.PRIVATE && body.visibility !== VideoMeetingVisibility.PUBLIC) {
             throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "'visibility' must be 'private' or 'public'.");
         }
         if (body.visibility === VideoMeetingVisibility.PRIVATE) {
-            const invitees: { email?: string; displayName?: string }[] = body.invitees ?? [];
+            const invitees: NonNullable<CreateVideoMeetingBody["invitees"]> = body.invitees ?? [];
             if (!Array.isArray(invitees) || invitees.length === 0) {
                 throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "A private meeting requires at least one invitee.");
             }
@@ -671,6 +695,9 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
                     !EMAIL_PATTERN.test(invitee.email.trim())
                 ) {
                     throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "Each invitee requires a valid 'email'.");
+                }
+                if (protectedMeeting && (invitee.displayName != null || (invitee.sealedFields?.displayName !== undefined && !isSealedValue(invitee.sealedFields.displayName)))) {
+                    throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "A protected meeting's invitee names are sealed: send 'sealedFields.displayName', not 'displayName'.");
                 }
                 if (invitee.displayName != null && (typeof invitee.displayName !== "string" || invitee.displayName.length > MAX_DISPLAY_NAME_LENGTH)) {
                     throw new ApiError(
@@ -719,6 +746,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         startTime: Date | undefined,
         endTime: Date | undefined,
         user: JWTUser | undefined,
+        protection?: MeetingProtection,
     ): Promise<{ meeting: VM; invitees: VMI[] }> {
         const strippedUser: JWTUser | undefined = stripTrustedRoles(user, this.trustedRoles);
         const publicSlug: string | undefined = visibility === VideoMeetingVisibility.PUBLIC ? mintPublicSlug() : undefined;
@@ -735,7 +763,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         // pattern exactly.
         const instance: VM = new this.meetingClass({
             mailboxUid,
-            title: body.title!.trim(),
+            title: protection ? PROTECTED_MEETING_TITLE : body.title!.trim(),
             visibility,
             calendarEventUid: body.calendarEventUid?.trim() || undefined,
             status: VideoMeetingStatus.SCHEDULED,
@@ -746,6 +774,16 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             forceMuteOnJoin: body.forceMuteOnJoin,
             passwordHash,
             waitingRoomEnabled: body.waitingRoomEnabled,
+            ...(protection
+                ? {
+                      keyProtected: true,
+                      meetingKeyCertificate: protection.certificate,
+                      meetingKeyFingerprint: protection.fingerprint,
+                      keyExpiresAt: protection.keyExpiresAt,
+                      keyWraps: protection.keyWraps,
+                      sealedFields: { title: protection.sealedTitle },
+                  }
+                : {}),
         });
         const meeting: VM = await this.meetingRepo!.create(instance, {
             user: strippedUser,
@@ -763,7 +801,8 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
                             meetingUid: meeting.uid,
                             mailboxUid,
                             email: raw.email!.trim().toLowerCase(),
-                            displayName: raw.displayName?.trim() || undefined,
+                            displayName: protection ? undefined : raw.displayName?.trim() || undefined,
+                            ...(protection && raw.sealedFields?.displayName ? { sealedFields: { displayName: raw.sealedFields.displayName as string } } : {}),
                             joinToken: mintJoinToken(),
                         }),
                         { user: strippedUser, ignoreACL: true },
@@ -786,6 +825,8 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
                                 attendeeAddress: invitee.email,
                                 url,
                                 label: ATTENDEE_LINK_LABEL,
+                                // A protected meeting's link works only with the meeting key, added when the invitation is sent.
+                                keyed: protection ? true : undefined,
                             }),
                             { user: strippedUser, ignoreACL: true },
                         );
@@ -856,9 +897,10 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         const body: CreateVideoMeetingBody = rawBody!;
         const startTime: Date | undefined = this.requireOptionalDate(body.startTime, "startTime");
         const endTime: Date | undefined = this.requireOptionalDate(body.endTime, "endTime");
+        const protection: MeetingProtection | undefined = body.protection ? validateProtection(body.protection, mailboxUid, Date.now(), MAX_KEY_WRAPS) : undefined;
         await this.requireMailboxAccess(mailboxUid, user, ACLAction.CREATE);
 
-        const { meeting, invitees } = await this.persistMeeting(mailboxUid, body, visibility, startTime, endTime, user);
+        const { meeting, invitees } = await this.persistMeeting(mailboxUid, body, visibility, startTime, endTime, user, protection);
 
         const result: VideoMeetingCreateResult<VM> = { meeting: this.withoutPasswordHash(meeting) };
         if (visibility === VideoMeetingVisibility.PRIVATE) {
@@ -990,11 +1032,22 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     @Put("/:id")
     public async update(
         @Param("id") id: string,
-        body: { title?: string; status?: string; forceMuteOnJoin?: boolean; password?: string | null; waitingRoomEnabled?: boolean } | undefined,
+        body:
+            | { title?: string; sealedFields?: { title?: unknown }; status?: string; forceMuteOnJoin?: boolean; password?: string | null; waitingRoomEnabled?: boolean }
+            | undefined,
         @AuthUser user?: JWTUser,
     ): Promise<VM> {
         const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.UPDATE);
         const patch: Record<string, any> = { uid: meeting.uid, version: (meeting as any).version };
+        if (meeting.keyProtected && body?.title !== undefined) {
+            throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "A protected meeting's title is sealed: send 'sealedFields.title', not 'title'.");
+        }
+        if (body?.sealedFields?.title !== undefined) {
+            if (!meeting.keyProtected || !isSealedValue(body.sealedFields.title)) {
+                throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "'sealedFields.title' is the sealed title of a protected meeting.");
+            }
+            patch.sealedFields = { ...(meeting.sealedFields ?? {}), title: body.sealedFields.title };
+        }
         if (body?.title !== undefined) {
             if (typeof body.title !== "string" || !body.title.trim() || body.title.trim().length > MAX_TITLE_LENGTH) {
                 throw new ApiError(ApiErrors.INVALID_REQUEST, 400, `'title' must be a non-empty string of at most ${MAX_TITLE_LENGTH} characters.`);
@@ -1037,12 +1090,13 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             patch.status === undefined &&
             patch.forceMuteOnJoin === undefined &&
             patch.passwordHash === undefined &&
-            patch.waitingRoomEnabled === undefined
+            patch.waitingRoomEnabled === undefined &&
+            patch.sealedFields === undefined
         ) {
             throw new ApiError(
                 ApiErrors.INVALID_REQUEST,
                 400,
-                "Nothing to update: supply 'title', 'forceMuteOnJoin', 'password', 'waitingRoomEnabled' and/or 'status'.",
+                "Nothing to update: supply 'title' (or, for a protected meeting, 'sealedFields.title'), 'forceMuteOnJoin', 'password', 'waitingRoomEnabled' and/or 'status'.",
             );
         }
         const strippedUser: JWTUser | undefined = stripTrustedRoles(user, this.trustedRoles);
@@ -1164,7 +1218,18 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
      * invitee token and a `publicSlug` are each a self-contained credential ("possession of the link"), while an
      * `organizerSlug` is not - see `join()`'s doc comment and `VideoMeeting.organizerSlug`.
      */
+    /** `resolveMeetingByToken()`, answering 410 for a protected meeting whose key has been discarded or is due to be
+     * (`specs/meeting_privacy.md` §8): its guests' access ends with it. */
     private async requireMeetingByToken(token: string): Promise<{ meeting: VM; resolvedVia: VideoMeetingTokenResolution }> {
+        const resolved = await this.resolveMeetingByToken(token);
+        const { meeting } = resolved;
+        if (meeting.keyProtected && (meeting.keyDiscardedAt || (meeting.keyExpiresAt && new Date(meeting.keyExpiresAt).valueOf() <= Date.now()))) {
+            throw new ApiError(ApiErrors.NOT_FOUND, 410, "This meeting has ended.");
+        }
+        return resolved;
+    }
+
+    private async resolveMeetingByToken(token: string): Promise<{ meeting: VM; resolvedVia: VideoMeetingTokenResolution }> {
         /* v8 ignore if -- unreachable via real usage: `@Param("token")` always supplies a string (a URL path
            segment can't be anything else); this guards only a directly-invoked, non-HTTP call. */
         if (typeof token !== "string") {
@@ -1311,9 +1376,19 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     /** The `PublicVideoMeeting` projection shared by `join()`'s two possible responses (granted or
      * password-required) and `verifyPassword()`'s - computed once a token/slug has resolved, before either method
      * decides what else (if anything) to grant. */
-    private async buildPublicMeeting(meeting: VM): Promise<PublicVideoMeeting> {
+    private async buildPublicMeeting(meeting: VM, user?: JWTUser): Promise<PublicVideoMeeting> {
         const { hostDisplayName, hostUid } = await this.hostInfo(meeting.mailboxUid);
+        const protection: Partial<PublicVideoMeeting> = meeting.keyProtected
+            ? {
+                  protected: true,
+                  sealedFields: meeting.sealedFields ?? undefined,
+                  meetingKeyCertificate: meeting.meetingKeyCertificate ?? undefined,
+                  keyExpiresAt: meeting.keyExpiresAt ?? undefined,
+                  keyWraps: await this.readableWraps(meeting, user),
+              }
+            : {};
         return {
+            ...protection,
             uid: meeting.uid,
             title: meeting.title,
             visibility: meeting.visibility,
@@ -1324,6 +1399,22 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             hasPassword: meeting.passwordHash ? true : undefined,
             waitingRoomEnabled: meeting.waitingRoomEnabled || undefined,
         };
+    }
+
+    /** The wraps of `meeting`'s key that `user` - a signed-in account, never a guest - may read: those of mailboxes it holds READ on,
+     * trusted roles stripped. `undefined` when there are none. */
+    private async readableWraps(meeting: VM, user: JWTUser | undefined): Promise<MeetingKeyWrap[] | undefined> {
+        if (!user?.uid || String(user.uid).startsWith("guest:") || !meeting.keyWraps?.length) {
+            return undefined;
+        }
+        const reader: JWTUser | undefined = stripTrustedRoles(user, this.trustedRoles);
+        const readable: MeetingKeyWrap[] = [];
+        for (const wrap of meeting.keyWraps) {
+            if (await this.aclUtils!.hasPermission(reader, wrap.mailboxUid, ACLAction.READ)) {
+                readable.push(wrap);
+            }
+        }
+        return readable.length > 0 ? readable : undefined;
     }
 
     /**
@@ -1441,7 +1532,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     public async join(@Param("token") token: string, @AuthUser user?: JWTUser): Promise<VideoMeetingJoinResponse> {
         const { meeting, resolvedVia } = await this.requireMeetingByToken(token);
         await this.requireOrganizerAuth(meeting, resolvedVia, user);
-        const publicMeeting: PublicVideoMeeting = await this.buildPublicMeeting(meeting);
+        const publicMeeting: PublicVideoMeeting = await this.buildPublicMeeting(meeting, user);
         if (resolvedVia !== "organizerSlug") {
             if (meeting.waitingRoomEnabled) {
                 return { meeting: publicMeeting, requiresAdmission: true };
@@ -1481,7 +1572,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
                 throw new ApiError(ApiErrors.AUTH_PERMISSION_FAILURE, 403, "Incorrect password.");
             }
         }
-        const publicMeeting: PublicVideoMeeting = await this.buildPublicMeeting(meeting);
+        const publicMeeting: PublicVideoMeeting = await this.buildPublicMeeting(meeting, user);
         if (!bypassed && meeting.waitingRoomEnabled) {
             if (typeof body?.name !== "string" || !body.name.trim()) {
                 throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "'name' is required to request admission.");
@@ -1517,7 +1608,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             this.pendingAdmissions.get(meeting.uid)?.delete(user.uid);
             throw new ApiError(ApiErrors.AUTH_PERMISSION_FAILURE, 403, "The host denied your request to join.");
         }
-        const publicMeeting: PublicVideoMeeting = await this.buildPublicMeeting(meeting);
+        const publicMeeting: PublicVideoMeeting = await this.buildPublicMeeting(meeting, user);
         if (pending.status === "pending") {
             return { meeting: publicMeeting, requiresAdmission: true, authenticated: !user.uid.startsWith(GUEST_UID_PREFIX), selfUid: user.uid };
         }

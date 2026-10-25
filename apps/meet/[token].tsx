@@ -36,6 +36,7 @@ import React, { useState } from "react";
 import useBranding from "@rapidmx/web-client/lib/branding/useBranding.js";
 import { Branding } from "@rapidmx/web-client/lib/branding/brandingApi.js";
 import { ApiRequestError } from "@rapidmx/web-client/lib/util/api.js";
+import { openProtectedMeeting, takeMeetingKey, type OpenedMeeting } from "./_meetingKey.js";
 import Button from "@rapidmx/web-client/lib/components/buttons/Button.js";
 import Alert from "@rapidmx/web-client/lib/components/feedback/Alert.js";
 import FormField from "@rapidmx/web-client/lib/components/forms/FormField.js";
@@ -52,7 +53,7 @@ import {
     verifyMeetingPassword,
 } from "./_meetApi.js";
 
-type Phase = "loading" | "not-found" | "password" | "admission-request" | "waiting" | "denied" | "lobby" | "in-call" | "ended";
+type Phase = "loading" | "not-found" | "missing-key" | "password" | "admission-request" | "waiting" | "denied" | "lobby" | "in-call" | "ended";
 
 const INPUT_CLASS = "w-full text-base py-2.5 px-3.5 border border-border rounded-md bg-surface text-text focus:outline-none focus:border-primary";
 
@@ -61,14 +62,18 @@ const ADMISSION_POLL_MS = 3_000;
 
 export default function MeetJoinPage({ params }: { params: { token: string } }) {
     const { branding } = useBranding();
-    return <MeetJoinContent token={params.token} branding={branding} />;
+    // Taken once, before anything renders: the key never stays in the address bar or reaches the server.
+    const [linkKey] = useState<Uint8Array | undefined>(() => (typeof window === "undefined" ? undefined : takeMeetingKey()));
+    return <MeetJoinContent token={params.token} branding={branding} linkKey={linkKey} />;
 }
 
 /** Owns the camera and microphone (`useLocalMedia()`) for the whole visit, so the tracks the lobby previews are the
  * ones the call sends. Every phase but the call is drawn inside the branded page shell; the call fills the whole
  * window instead (see `_CallView.tsx`). */
-function MeetJoinContent({ token, branding }: { token: string; branding: Branding | null }) {
+function MeetJoinContent({ token, branding, linkKey }: { token: string; branding: Branding | null; linkKey?: Uint8Array }) {
     const [phase, setPhase] = useState<Phase>("loading");
+    /** A protected meeting opened with the link's key: its real title, and the live key the call is sealed with. */
+    const [opened, setOpened] = useState<OpenedMeeting | null>(null);
     const [name, setName] = useState("");
     const [loadError, setLoadError] = useState<string | null>(null);
     const [joinResult, setJoinResult] = useState<VideoMeetingJoinResult | null>(null);
@@ -99,9 +104,26 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
     React.useEffect(() => {
         let cancelled = false;
         joinMeeting(token)
-            .then((result) => {
+            .then(async (result) => {
                 if (cancelled) {
                     return;
+                }
+                if (result.meeting.protected) {
+                    // A protected meeting is joined only with its key, which only the link carries.
+                    const meeting = linkKey ? await openProtectedMeeting(result.meeting, linkKey) : undefined;
+                    if (cancelled) {
+                        return;
+                    }
+                    if (!meeting) {
+                        setLoadError(
+                            linkKey
+                                ? "This link's key doesn't open this meeting. Open the link exactly as it was sent to you."
+                                : "This link is missing its key. Open the link exactly as it was sent to you - everything after the # included.",
+                        );
+                        setPhase("missing-key");
+                        return;
+                    }
+                    setOpened(meeting);
                 }
                 if ("requiresAdmission" in result) {
                     setAdmissionMeeting(result.meeting);
@@ -121,6 +143,11 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
                     return;
                 }
                 if (err instanceof ApiRequestError && err.status === 404) {
+                    setPhase("not-found");
+                    return;
+                }
+                if (err instanceof ApiRequestError && err.status === 410) {
+                    setLoadError("This meeting has ended.");
                     setPhase("not-found");
                     return;
                 }
@@ -215,7 +242,8 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
                 token={joinResult.token}
                 selfUid={joinResult.selfUid}
                 selfName={name}
-                meetingTitle={joinResult.meeting.title}
+                meetingTitle={opened?.title ?? joinResult.meeting.title}
+                liveKey={opened?.liveKey}
                 iceServers={joinResult.iceServers}
                 relayEnabled={joinResult.relayEnabled}
                 hostUid={joinResult.meeting.hostUid}
@@ -235,6 +263,12 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
                 <p className="text-base text-text-muted">Loading&hellip;</p>
             </MeetCard>
         );
+    } else if (phase === "missing-key") {
+        content = (
+            <MeetCard>
+                <Alert>{loadError}</Alert>
+            </MeetCard>
+        );
     } else if (phase === "not-found") {
         content = (
             <MeetCard>
@@ -244,7 +278,7 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
     } else if (phase === "password") {
         content = (
             <MeetCard>
-                <h1 className="text-2xl font-bold tracking-tight">{passwordMeeting?.title}</h1>
+                <h1 className="text-2xl font-bold tracking-tight">{opened?.title ?? passwordMeeting?.title}</h1>
                 {passwordMeeting?.hostDisplayName && <p className="text-sm text-text-muted mt-1">Hosted by {passwordMeeting.hostDisplayName}</p>}
                 <p className="text-base text-text-muted mt-4 mb-3">This meeting requires a password to join.</p>
                 <form onSubmit={(e) => void handleSubmitPassword(e)}>
@@ -268,7 +302,7 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
     } else if (phase === "admission-request") {
         content = (
             <MeetCard>
-                <h1 className="text-2xl font-bold tracking-tight">{admissionMeeting?.title}</h1>
+                <h1 className="text-2xl font-bold tracking-tight">{opened?.title ?? admissionMeeting?.title}</h1>
                 {admissionMeeting?.hostDisplayName && <p className="text-sm text-text-muted mt-1">Hosted by {admissionMeeting.hostDisplayName}</p>}
                 <p className="text-base text-text-muted mt-4 mb-3">The host must let you in before you can join.</p>
                 <form onSubmit={(e) => void handleRequestAdmission(e)}>
@@ -307,7 +341,7 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
     } else if (phase === "waiting") {
         content = (
             <MeetCard>
-                <h1 className="text-2xl font-bold tracking-tight">{admissionMeeting?.title}</h1>
+                <h1 className="text-2xl font-bold tracking-tight">{opened?.title ?? admissionMeeting?.title}</h1>
                 <p className="text-base text-text-muted mt-4">Waiting for the host to let you in&hellip;</p>
             </MeetCard>
         );
@@ -333,7 +367,13 @@ function MeetJoinContent({ token, branding }: { token: string; branding: Brandin
         // phase === "lobby" (joinResult is always set by then - see the effect above).
         content = (
             <MeetCard maxWidth="max-w-4xl">
-                <MeetLobby meeting={joinResult!.meeting} media={media} initialName={name} onJoin={handleJoin} />
+                <MeetLobby meeting={opened ? { ...joinResult!.meeting, title: opened.title } : joinResult!.meeting} media={media} initialName={name} onJoin={handleJoin} />
+                {joinResult!.meeting.protected && (
+                    <p className="text-sm text-text-muted mt-4">
+                        This meeting is end-to-end encrypted: the server can't see what is said or shared in it. Access ends when the meeting
+                        does.
+                    </p>
+                )}
             </MeetCard>
         );
     }

@@ -337,3 +337,23 @@ describe("TimestampUnwrapper", () => {
         expect(unwrapper.next(1020)).toBe(20);
     });
 });
+
+describe("sealed frames", () => {
+    it("carry their sealed flag through fragmenting and reassembly, and never mix with unsealed fragments of the same frame", () => {
+        const data = Uint8Array.from({ length: 30_000 }, (_, i) => i % 251);
+        const sealed = fragmentFrame(KIND_VIDEO, true, 5, 50, data, undefined, true);
+        expect(sealed.every((f) => decodeFragment(f)!.encrypted)).toBe(true);
+        expect(decodeFragment(fragmentFrame(KIND_VIDEO, true, 5, 50, data)[0])!.encrypted).toBe(false);
+
+        const reassembler = new FrameReassembler();
+        expect(reassembler.push(decodeFragment(sealed[0])!)).toBeUndefined();
+        // The same frame's next fragment claiming it isn't sealed is inconsistent: ignored.
+        expect(reassembler.push(decodeFragment(fragmentFrame(KIND_VIDEO, true, 5, 50, data)[1])!)).toBeUndefined();
+        let frame;
+        for (const fragment of sealed.slice(1)) {
+            frame = reassembler.push(decodeFragment(fragment)!);
+        }
+        expect(frame).toMatchObject({ encrypted: true, seq: 5 });
+        expect(frame!.data).toEqual(data);
+    });
+});

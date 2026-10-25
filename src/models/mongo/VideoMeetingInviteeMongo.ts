@@ -53,6 +53,12 @@ export class VideoMeetingInviteeMongo extends BaseMongoEntity implements VideoMe
     public displayName?: string;
 
     @Column()
+    @Description("A protected meeting: the invitee's sealed name.")
+    @Nullable
+    public sealedFields?: Record<string, string> | null;
+
+
+    @Column()
     @Description("The unguessable token embedded in this invitee's join link. Minted server-side, immutable.")
     public joinToken: string = "";
 
@@ -64,6 +70,7 @@ export class VideoMeetingInviteeMongo extends BaseMongoEntity implements VideoMe
             this.mailboxUid = other.mailboxUid !== undefined ? other.mailboxUid : this.mailboxUid;
             this.email = other.email !== undefined ? other.email : this.email;
             this.displayName = "displayName" in other ? other.displayName : this.displayName;
+            this.sealedFields = "sealedFields" in other ? other.sealedFields : this.sealedFields;
             this.joinToken = other.joinToken !== undefined ? other.joinToken : this.joinToken;
         }
     }

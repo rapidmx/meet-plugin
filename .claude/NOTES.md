@@ -1566,3 +1566,26 @@ sent), which reveals viewers' IP addresses to that host - inherent in "render im
 redraws every element on each change (fine at the 5000-element cap in practice; an offscreen layer would be the next
 step if it isn't).
 
+## 2026-10-24: Protected meetings (per-meeting keys)
+
+- Spec: `specs/meeting_privacy.md`. Plan: `C:/Users/caska/.claude/plans/meeting-keys-external-attendees.md`.
+- JP's decisions:
+  - Every participant gets the meeting key in their link (`#k=`).
+  - The organizer keeps a wrap of the key to their own zero-access certificate.
+  - The key expires an hour after the end, or at the last occurrence of a series; at most five years.
+  - Media encryption is required.
+  - With no zero-access key, the organizer gets today's behaviour plus a notice.
+- Server:
+  - `VideoMeeting` gains `keyProtected`, `meetingKeyCertificate`/`Fingerprint`, `keyExpiresAt`, `keyDiscardedAt`, `keyWraps` and `sealedFields.title`; the stored title is `"Meeting"`. `VideoMeetingInvitee.sealedFields.displayName`.
+  - Create takes `protection` (validated in `util/MeetingProtectionUtils.ts`): no readable title or names; at most 4 wraps, all the organizer's; the fingerprint is computed server-side.
+  - Every invitee link is written `keyed` on restapi's `CalendarEventAttendeeLink`.
+  - Join returns `protected`, `sealedFields`, `meetingKeyCertificate`, `keyExpiresAt`, and the wraps only to callers with READ on the mailbox (never guests). It answers 410 once the key has expired.
+  - Update takes only `sealedFields.title` for a protected meeting.
+  - `MeetingKeyExpiryJob` (exported from `./mongo`/`./sql`; schedule `mail:videoconf:key_expiry:schedule`, every 5 minutes) clears the key material and sealed fields, replaces the join tokens, deletes keyed links and sets `keyDiscardedAt`.
+- Client:
+  - `apps/shared/crypto/MeetingCipher.ts` provides the signaling v2 envelope `{to?, e}`, with the sealed sender, a replay counter and meeting-bound AAD, and per-frame AES-GCM for the relay (`FLAG_ENCRYPTED`).
+  - `SignalingClient` and the relay transport, sender and receiver take a `cipher`; protected meetings drop anything unsealed.
+  - `apps/meet/_meetingKey.ts` takes the `#k=` key once (and strips it), then opens the title. `[token].tsx` refuses a missing or wrong key, shows the real title and an E2E note, handles 410, and passes `liveKey` to `CallView`.
+  - Key material comes from web-client `lib/crypto/meetingKeys.ts`.
+- SQL gotcha: `string | null` and `Date | null` class props break TypeORM type reflection (it reads them as `Object`). Declare the class props `?: string`/`?: Date`.
+- Not done: "expire when the last participant leaves" for meetings without an end time (24h only, set client-side).

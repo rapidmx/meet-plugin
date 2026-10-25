@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { fragmentFrame, KIND_AUDIO, KIND_VIDEO } from "../../../../apps/shared/relay/frames.js";
 import { RelayReceiver } from "../../../../apps/shared/relay/RelayReceiver.js";
 import { createFakeRelayEnv, FakeAudioContext, FakeAudioData, FakeVideoFrame } from "./relayFakes.js";
@@ -85,5 +85,44 @@ describe("RelayReceiver.handleMedia", () => {
         }
         expect(fake.encodedAudioChunks).toHaveLength(0);
         expect(fake.encodedVideoChunks).toHaveLength(0);
+    });
+});
+
+describe("RelayReceiver in a protected meeting", () => {
+    function protectedSetup(open: (kind: number, payload: Uint8Array) => Promise<Uint8Array | undefined>) {
+        const fake = createFakeRelayEnv();
+        const receiver = new RelayReceiver(fake.env, new FakeAudioContext(48_000), open);
+        return { fake, receiver };
+    }
+    const sealed = (seq: number, byte: number) => fragmentFrame(KIND_AUDIO, true, seq, 100 + seq, Uint8Array.of(byte, 0xee), undefined, true)[0];
+
+    it("plays only sealed frames that open, in the order they arrived", async () => {
+        let slow = true;
+        const { fake, receiver } = protectedSetup(async (_kind, payload) => {
+            if (slow) {
+                slow = false;
+                await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            return payload[0] === 9 ? undefined : payload.subarray(0, 1);
+        });
+        receiver.handleMedia(sealed(0, 1));
+        receiver.handleMedia(sealed(1, 9));
+        receiver.handleMedia(fragmentFrame(KIND_AUDIO, true, 2, 102, Uint8Array.of(3))[0]);
+        receiver.handleMedia(sealed(3, 4));
+        await vi.waitFor(() => expect(fake.encodedAudioChunks.map((c) => Array.from(c.data))).toEqual([[1], [4]]));
+    });
+
+    it("drops what is still being opened when it closes, and an unprotected meeting drops sealed frames", async () => {
+        let release: () => void = () => undefined;
+        const { fake, receiver } = protectedSetup(() => new Promise((resolve) => (release = () => resolve(Uint8Array.of(1)))));
+        receiver.handleMedia(sealed(0, 1));
+        receiver.close();
+        release();
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        expect(fake.encodedAudioChunks).toHaveLength(0);
+
+        const plain = setup();
+        plain.receiver.handleMedia(sealed(0, 1));
+        expect(plain.fake.encodedAudioChunks).toHaveLength(0);
     });
 });

@@ -5,7 +5,7 @@
 import { ObjectDecorators } from "@rapidrest/core";
 import { BaseEntity, DocDecorators, ModelDecorators, PersistenceDecorators } from "@rapidrest/service-core";
 import { MailboxScopedData } from "@rapidmx/restapi";
-import { VideoMeeting, VideoMeetingStatus, VideoMeetingVisibility } from "../types.js";
+import { MeetingKeyWrap, VideoMeeting, VideoMeetingStatus, VideoMeetingVisibility } from "../types.js";
 const { Description } = DocDecorators;
 const { DataStore, Protect } = ModelDecorators;
 const { Column, Entity, Index } = PersistenceDecorators;
@@ -101,6 +101,41 @@ export class VideoMeetingSQL extends BaseEntity implements VideoMeeting {
     @Nullable
     public endTime?: Date;
 
+    @Column({ type: "boolean", nullable: true })
+    @Description("The meeting is protected end to end: its title and names are sealed and its live traffic encrypted.")
+    @Nullable
+    public keyProtected?: boolean | null;
+
+    @Column({ type: "text", nullable: true })
+    @Description("A protected meeting with external guests: its per-meeting key's certificate (base64 DER). Never the private key.")
+    @Nullable
+    public meetingKeyCertificate?: string | null;
+
+    @Column({ nullable: true })
+    @Description("SHA-256 of meetingKeyCertificate.")
+    @Nullable
+    public meetingKeyFingerprint?: string;
+
+    @Column({ nullable: true })
+    @Description("When a protected meeting's key is discarded and joining ends.")
+    @Nullable
+    public keyExpiresAt?: Date;
+
+    @Column({ nullable: true })
+    @Description("When the meeting's key, wraps and guest-readable sealed copies were discarded.")
+    @Nullable
+    public keyDiscardedAt?: Date;
+
+    @Column({ type: "simple-json", nullable: true })
+    @Description("The meeting's key sealed to each local participant's zero-access certificate.")
+    @Nullable
+    public keyWraps?: MeetingKeyWrap[] | null;
+
+    @Column({ type: "simple-json", nullable: true })
+    @Description("A protected meeting's sealed title.")
+    @Nullable
+    public sealedFields?: Record<string, string> | null;
+
     constructor(other?: Partial<VideoMeetingSQL>) {
         super(other);
 
@@ -117,6 +152,13 @@ export class VideoMeetingSQL extends BaseEntity implements VideoMeeting {
             this.waitingRoomEnabled = "waitingRoomEnabled" in other ? other.waitingRoomEnabled : this.waitingRoomEnabled;
             this.startTime = "startTime" in other ? other.startTime : this.startTime;
             this.endTime = "endTime" in other ? other.endTime : this.endTime;
+            this.keyProtected = "keyProtected" in other ? other.keyProtected : this.keyProtected;
+            this.meetingKeyCertificate = "meetingKeyCertificate" in other ? other.meetingKeyCertificate : this.meetingKeyCertificate;
+            this.meetingKeyFingerprint = "meetingKeyFingerprint" in other ? other.meetingKeyFingerprint : this.meetingKeyFingerprint;
+            this.keyExpiresAt = "keyExpiresAt" in other ? other.keyExpiresAt : this.keyExpiresAt;
+            this.keyDiscardedAt = "keyDiscardedAt" in other ? other.keyDiscardedAt : this.keyDiscardedAt;
+            this.keyWraps = "keyWraps" in other ? other.keyWraps : this.keyWraps;
+            this.sealedFields = "sealedFields" in other ? other.sealedFields : this.sealedFields;
         }
     }
 }

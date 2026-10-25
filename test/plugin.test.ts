@@ -8,7 +8,7 @@
 import "reflect-metadata";
 import fs from "fs";
 import { fileURLToPath } from "url";
-import { PersistenceDecorators } from "@rapidrest/service-core";
+import { BackgroundService, PersistenceDecorators } from "@rapidrest/service-core";
 import { isMailboxScopedData, parsePluginManifest } from "@rapidmx/restapi";
 import * as RootEntry from "../src/index.js";
 import * as MongoEntry from "../src/mongo.js";
@@ -21,6 +21,9 @@ function describeExport(clazz: any): string {
     if (Reflect.getMetadata("rrst:datasource", clazz)) {
         return `model ${Reflect.getMetadata("rrst:datasource", clazz)}${isMailboxScopedData(clazz) ? " mailbox-scoped" : ""}`;
     }
+    if (clazz.prototype instanceof BackgroundService) {
+        return "job";
+    }
     return "other";
 }
 
@@ -30,11 +33,12 @@ describe("plugin entry points", () => {
     it.each([
         ["mongo", MongoEntry, "Mongo", "mongo"],
         ["sql", SqlEntry, "SQL", "sql"],
-    ])("./%s exports only the mounted route and the mailbox-scoped models", (_name, entry, suffix, datastore) => {
+    ])("./%s exports only the mounted route, the mailbox-scoped models and the key expiry job", (_name, entry, suffix, datastore) => {
         expect(Object.fromEntries(Object.entries(entry).map(([name, clazz]) => [name, describeExport(clazz)]))).toEqual({
             [`VideoMeetingRoute${suffix}`]: "route /api/mail/video-meetings",
             [`VideoMeeting${suffix}`]: `model ${datastore} mailbox-scoped`,
             [`VideoMeetingInvitee${suffix}`]: `model ${datastore} mailbox-scoped`,
+            [`MeetingKeyExpiryJob${suffix}`]: "job",
         });
     });
 
@@ -111,6 +115,10 @@ describe("plugin entry points", () => {
                 "stripTrustedRoles",
                 "VideoMeetingVisibility",
                 "VideoMeetingStatus",
+                "MeetingKeyExpiryJob",
+                "isSealedValue",
+                "PROTECTED_MEETING_TITLE",
+                "validateProtection",
             ].sort(),
         );
     });

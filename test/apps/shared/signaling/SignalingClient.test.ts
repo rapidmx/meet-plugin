@@ -761,3 +761,76 @@ describe("SignalingClient.close", () => {
         expect(() => client.close()).not.toThrow();
     });
 });
+
+describe("SignalingClient with a protected meeting's cipher", () => {
+    /** A stand-in cipher: seals to `{ e: <kind> }`, opens what names a kind, drops the rest - slowly for the first message, to show order. */
+    function fakeCipher() {
+        let delay = 20;
+        return {
+            seal: vi.fn(async (message: SignalMessage) => {
+                const wait = delay;
+                delay = 0;
+                await new Promise((resolve) => setTimeout(resolve, wait));
+                return message.to ? { to: message.to, e: message.kind } : { e: message.kind };
+            }),
+            open: vi.fn(async (data: Record<string, unknown>) => {
+                const wait = delay;
+                delay = 0;
+                await new Promise((resolve) => setTimeout(resolve, wait));
+                return typeof data.e === "string" ? signal(data.e as SignalMessage["kind"], String(data.from)) : undefined;
+            }),
+        };
+    }
+
+    it("sends only sealed messages, in the order they were sent, and nothing once closed", async () => {
+        const cipher = fakeCipher();
+        const { client, sockets } = setup({ cipher });
+        const connected = client.connect();
+        ready(sockets[0]);
+        await connected;
+        client.send(signal("hello"));
+        client.send({ ...signal("offer"), to: "bob~1" });
+        await vi.waitFor(() => expect(frames(sockets[0])).toHaveLength(3));
+        expect(frames(sockets[0]).slice(1)).toEqual([
+            { op: "signal", data: { e: "hello" } },
+            { op: "signal", data: { to: "bob~1", e: "offer" } },
+        ]);
+        client.close();
+        client.send(signal("bye"));
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        expect(frames(sockets[0])).toHaveLength(3);
+    });
+
+    it("hands listeners only what opens, in the order it arrived", async () => {
+        const cipher = fakeCipher();
+        const { client, sockets } = setup({ cipher });
+        const received: SignalMessage[] = [];
+        client.onMessage((message) => received.push(message));
+        const connected = client.connect();
+        ready(sockets[0]);
+        await connected;
+        sockets[0].message({ op: "signal", data: { e: "hello", from: "bob" } });
+        sockets[0].message({ op: "signal", data: { kind: "chat", from: "mallory" } });
+        sockets[0].message({ op: "signal", data: { e: "state", from: "bob" } });
+        await vi.waitFor(() => expect(cipher.open).toHaveBeenCalledTimes(3));
+        await vi.waitFor(() => expect(received.map((m) => m.kind)).toEqual(["hello", "state"]));
+        client.close();
+    });
+
+    it("drops what was still being sealed or opened when it closed", async () => {
+        const cipher = fakeCipher();
+        const { client, sockets } = setup({ cipher });
+        const received: SignalMessage[] = [];
+        client.onMessage((message) => received.push(message));
+        const connected = client.connect();
+        ready(sockets[0]);
+        await connected;
+        client.send(signal("hello"));
+        sockets[0].message({ op: "signal", data: { e: "state", from: "bob" } });
+        client.close();
+        await vi.waitFor(() => expect(cipher.open).toHaveBeenCalledTimes(1));
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(frames(sockets[0])).toHaveLength(1);
+        expect(received).toEqual([]);
+    });
+});

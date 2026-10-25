@@ -29,6 +29,9 @@ export type FrameKind = typeof KIND_AUDIO | typeof KIND_VIDEO;
 
 /** Bit 0 of the flags byte: this frame is independently decodable (always set for audio packets). */
 export const FLAG_KEY_FRAME = 1;
+/** Bit 1 of the flags byte: the frame's bytes are sealed with the meeting's live key (`MeetingCipher.encryptFrame()`,
+ * `specs/meeting_privacy.md` §5.2). A protected meeting drops frames without it, and any other drops frames with it. */
+export const FLAG_ENCRYPTED = 2;
 
 export const HEADER_BYTES = 10;
 /** The largest client-to-server message an older server accepts, and what a client assumes until the server's
@@ -61,6 +64,7 @@ export interface Fragment {
     fragCount: number;
     timestampMs: number;
     data: Uint8Array;
+    encrypted: boolean;
 }
 
 /** A completely reassembled frame. */
@@ -70,6 +74,7 @@ export interface Frame {
     seq: number;
     timestampMs: number;
     data: Uint8Array;
+    encrypted: boolean;
 }
 
 /** The payload bytes per fragment for a server that accepts messages of `maxMessageBytes`. At or below the
@@ -92,6 +97,7 @@ export function fragmentFrame(
     timestampMs: number,
     data: Uint8Array,
     maxMessageBytes = DEFAULT_MESSAGE_BYTES,
+    encrypted = false,
 ): Uint8Array[] {
     const payload = fragmentPayloadSize(maxMessageBytes);
     const fragCount = Math.max(1, Math.ceil(data.length / payload));
@@ -104,7 +110,7 @@ export function fragmentFrame(
         const out = new Uint8Array(HEADER_BYTES + part.length);
         const view = new DataView(out.buffer);
         view.setUint8(0, kind);
-        view.setUint8(1, keyFrame ? FLAG_KEY_FRAME : 0);
+        view.setUint8(1, (keyFrame ? FLAG_KEY_FRAME : 0) | (encrypted ? FLAG_ENCRYPTED : 0));
         view.setUint16(2, seq % SEQ_MODULUS);
         view.setUint8(4, index);
         view.setUint8(5, fragCount);
@@ -139,6 +145,7 @@ export function decodeFragment(bytes: Uint8Array): Fragment | undefined {
         fragCount,
         timestampMs: view.getUint32(6),
         data: bytes.subarray(HEADER_BYTES),
+        encrypted: (view.getUint8(1) & FLAG_ENCRYPTED) !== 0,
     };
 }
 
@@ -153,6 +160,7 @@ interface Pending {
     seq: number;
     fragCount: number;
     keyFrame: boolean;
+    encrypted: boolean;
     timestampMs: number;
     parts: (Uint8Array | undefined)[];
     received: number;
@@ -212,6 +220,7 @@ export class FrameReassembler {
                 seq: fragment.seq,
                 fragCount: fragment.fragCount,
                 keyFrame: fragment.keyFrame,
+                encrypted: fragment.encrypted,
                 timestampMs: fragment.timestampMs,
                 parts: new Array<Uint8Array | undefined>(fragment.fragCount).fill(undefined),
                 received: 0,
@@ -222,6 +231,7 @@ export class FrameReassembler {
         if (
             fragment.fragCount !== pending.fragCount ||
             fragment.keyFrame !== pending.keyFrame ||
+            fragment.encrypted !== pending.encrypted ||
             fragment.timestampMs !== pending.timestampMs ||
             pending.parts[fragment.fragIndex] !== undefined
         ) {
@@ -251,7 +261,7 @@ export class FrameReassembler {
             data.set(part, offset);
             offset += part.length;
         }
-        return { kind: fragment.kind, keyFrame: fragment.keyFrame, seq: fragment.seq, timestampMs: fragment.timestampMs, data };
+        return { kind: fragment.kind, keyFrame: fragment.keyFrame, seq: fragment.seq, timestampMs: fragment.timestampMs, data, encrypted: fragment.encrypted };
     }
 }
 

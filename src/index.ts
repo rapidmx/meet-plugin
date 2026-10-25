@@ -24,3 +24,5 @@ export * from "./util/RelayHub.js";
 export * from "./util/RouteAccessUtils.js";
 export * from "./util/TokenUtils.js";
 export * from "./routes/BaseVideoMeetingRoute.js";
+export * from "./jobs/MeetingKeyExpiryJob.js";
+export * from "./util/MeetingProtectionUtils.js";

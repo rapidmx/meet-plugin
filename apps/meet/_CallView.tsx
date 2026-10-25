@@ -104,6 +104,7 @@ import { MeshConnectionManager } from "../shared/webrtc/MeshConnectionManager.js
 import type { MeshParticipant, RelayTransportLike, TransportMode } from "../shared/webrtc/types.js";
 import { createRelayTransport } from "../shared/relay/RelayTransport.js";
 import { SIGNALING_EVICTED_REASON, SignalingClient } from "../shared/signaling/SignalingClient.js";
+import { MeetingCipher } from "../shared/crypto/MeetingCipher.js";
 import { CollabSession, type ChatEntry, type RemoteCursor } from "../shared/collab/CollabSession.js";
 import CallControls, { type CallViewMode } from "./_CallControls.js";
 import ChatPanel from "./_ChatPanel.js";
@@ -134,6 +135,9 @@ export interface CallViewProps {
     selfUid: string;
     selfName: string;
     meetingTitle: string;
+    /** A protected meeting's live key (`_meetingKey.ts`): every signal and relayed frame is sealed with it, and nothing unsealed is
+     * accepted. Absent for an unprotected meeting. */
+    liveKey?: CryptoKey;
     iceServers: RTCIceServer[];
     /** Whether the server offers the WebSocket media relay, the last-resort path for a participant neither a direct
      * connection nor the TURN server can reach - `VideoMeetingJoinResult.relayEnabled`. Off when absent. */
@@ -219,6 +223,7 @@ export default function CallView({
     selfUid,
     selfName,
     meetingTitle,
+    liveKey,
     iceServers,
     relayEnabled,
     hostUid,
@@ -301,10 +306,12 @@ export default function CallView({
 
     useEffect(() => {
         let cancelled = false;
+        const cipher = liveKey ? new MeetingCipher(liveKey, channel, { uid: selfUid, peer: peerId }) : undefined;
         const client = new SignalingClient({
             meetingUid: channel,
             peerId,
             token,
+            cipher,
             // The server closed the socket for good: being removed reads as the host's doing (the cooperative `kicked`
             // usually got here first), anything else - the meeting ended, the grant is gone - as a connection error.
             onClosed: (reason) => (reason === SIGNALING_EVICTED_REASON ? onLeave("The host removed you from this call.") : setConnectError(reason)),
@@ -316,7 +323,7 @@ export default function CallView({
             iceServers,
             channel: client,
             createPeerConnection: createBrowserPeerConnection,
-            relay: relayEnabled ? createRelay(channel, peerId) : undefined,
+            relay: relayEnabled ? createRelay(channel, peerId, cipher) : undefined,
             localAudioTrack: media.audioTrack,
             localVideoTrack: media.videoTrack,
             localState: { audioOn: media.micOn, videoOn: media.cameraOn },
@@ -1036,8 +1043,8 @@ function RemoteAudio({ stream, onBlocked }: { stream: MediaStream; onBlocked: ()
 
 /** The WebSocket media relay for this call, or `undefined` when this browser cannot run it (no WebCodecs) - the
  * mesh then never falls back to it, and says so by marking an unreachable participant `"failed"`. */
-function createRelay(meetingUid: string, peerId: string): RelayTransportLike | undefined {
-    const relay = createRelayTransport({ meetingUid, peerId });
+function createRelay(meetingUid: string, peerId: string, cipher?: MeetingCipher): RelayTransportLike | undefined {
+    const relay = createRelayTransport({ meetingUid, peerId, cipher });
     return relay.supported ? relay : undefined;
 }
 

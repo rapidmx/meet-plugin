@@ -130,6 +130,7 @@ vi.mock("../../../apps/meet/_meetApi.js", () => ({
 }));
 
 import CallView, { accountUidOf, computeMainUid, newPeerId } from "../../../apps/meet/_CallView.js";
+import { MeetingCipher } from "../../../apps/shared/crypto/MeetingCipher.js";
 import { CollabSession } from "../../../apps/shared/collab/CollabSession.js";
 
 /** This tab's own id on the channel - `CallView` appends a random suffix to the uid it is given (stubbed below). */
@@ -781,6 +782,16 @@ describe("CallView - media paths", () => {
         expect(await screen.findByTestId("transport-badge")).toHaveTextContent("Server relay");
         expect(relay.receiveFrom).toHaveBeenCalledWith("zzz", expect.any(Function));
         expect(relay.setSending).toHaveBeenLastCalledWith(true);
+    });
+
+    it("seals a protected meeting's signaling and relayed media with one cipher of its live key", async () => {
+        relayMock.supported = true;
+        relayMock.created.length = 0;
+        const liveKey = { type: "secret" } as unknown as CryptoKey;
+        await connected({ relayEnabled: true, liveKey });
+        const cipher = (FakeSignalingClient.instances.at(-1)!.opts as any).cipher;
+        expect(cipher).toBeInstanceOf(MeetingCipher);
+        expect(relayMock.create).toHaveBeenCalledWith({ meetingUid: "meeting-1", peerId: SELF, cipher });
     });
 
     it("marks the participant as unreachable, rather than dropping them, in a browser that cannot run the relay", async () => {

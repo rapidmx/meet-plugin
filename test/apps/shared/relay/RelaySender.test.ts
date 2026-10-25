@@ -2,9 +2,9 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { decodeFragment, KIND_AUDIO, KIND_VIDEO, MAX_FRAME_BYTES } from "../../../../apps/shared/relay/frames.js";
-import { FramePublisher, RelaySender } from "../../../../apps/shared/relay/RelaySender.js";
+import { FramePublisher, MAX_FRAMES_SEALING, RelaySender } from "../../../../apps/shared/relay/RelaySender.js";
 import { createFakeRelayEnv, fakeChunk, track } from "./relayFakes.js";
 
 describe("FramePublisher", () => {
@@ -198,5 +198,55 @@ describe("RelaySender", () => {
         // A snapshot: later sends don't change what was already returned.
         fake.audioEncoders[0].emit(fakeChunk([1], "key", 20_000));
         expect(diagnostics.audio.framesSent).toBe(1);
+    });
+});
+
+describe("FramePublisher in a protected meeting", () => {
+    it("seals every frame before fragmenting it, marks it sealed, and keeps the order", async () => {
+        const sent: Uint8Array[] = [];
+        let slow = true;
+        const cipher = {
+            encryptFrame: async (_kind: number, frame: Uint8Array) => {
+                if (slow) {
+                    slow = false;
+                    await new Promise((resolve) => setTimeout(resolve, 10));
+                }
+                return Uint8Array.of(0xaa, ...frame);
+            },
+            decryptFrame: async () => undefined,
+        };
+        const publisher = new FramePublisher((m) => (sent.push(m), true), undefined, cipher);
+        expect(publisher.publish(KIND_AUDIO, true, Uint8Array.of(1), 0)).toBe(true);
+        expect(publisher.publish(KIND_AUDIO, true, Uint8Array.of(2), 20)).toBe(true);
+        await vi.waitFor(() => expect(sent).toHaveLength(2));
+        const fragments = sent.map((m) => decodeFragment(m)!);
+        expect(fragments.map((f) => [f.seq, f.encrypted, Array.from(f.data)])).toEqual([
+            [0, true, [0xaa, 1]],
+            [1, true, [0xaa, 2]],
+        ]);
+        expect(publisher.stats[KIND_AUDIO].framesSent).toBe(2);
+    });
+
+    it("drops a frame when too many wait to be sealed, and counts one that fails to seal", async () => {
+        let fail = false;
+        const pending: (() => void)[] = [];
+        const cipher = {
+            encryptFrame: (_kind: number, frame: Uint8Array) =>
+                new Promise<Uint8Array>((resolve, reject) => pending.push(() => (fail ? reject(new Error("no key")) : resolve(frame)))),
+            decryptFrame: async () => undefined,
+        };
+        const publisher = new FramePublisher(() => true, undefined, cipher);
+        for (let i = 0; i < MAX_FRAMES_SEALING; i++) {
+            expect(publisher.publish(KIND_VIDEO, false, Uint8Array.of(i), i)).toBe(true);
+        }
+        expect(publisher.publish(KIND_VIDEO, false, Uint8Array.of(99), 99)).toBe(false);
+        expect(publisher.stats[KIND_VIDEO].framesDropped).toBe(1);
+        fail = true;
+        while (publisher.stats[KIND_VIDEO].framesDropped < 1 + MAX_FRAMES_SEALING) {
+            await vi.waitFor(() => expect(pending.length).toBeGreaterThan(0));
+            pending.shift()!();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        expect(publisher.publish(KIND_VIDEO, false, Uint8Array.of(1), 1)).toBe(true);
     });
 });

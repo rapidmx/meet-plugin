@@ -11,6 +11,8 @@ import type { CallViewProps } from "../../../apps/meet/_CallView.js";
 import MeetJoinPage from "../../../apps/meet/[token].js";
 
 const { calls, hookOptions } = vi.hoisted(() => ({ calls: [] as unknown[], hookOptions: [] as unknown[] }));
+const meetingKey = vi.hoisted(() => ({ takeMeetingKey: vi.fn((): Uint8Array | undefined => undefined), openProtectedMeeting: vi.fn() }));
+vi.mock("../../../apps/meet/_meetingKey.js", () => meetingKey);
 
 // The real hook, with what the page hands it recorded.
 vi.mock("../../../apps/shared/media/useLocalMedia.js", async () => {
@@ -514,3 +516,77 @@ describe("MeetJoinPage - waiting room", () => {
         });
     });
 });
+
+describe("MeetJoinPage for a protected meeting", () => {
+    const LIVE_KEY = { live: true } as unknown as CryptoKey;
+    const protectedJoin = { ...joinResponse, meeting: { ...joinResponse.meeting, title: "Meeting", protected: true, sealedFields: { title: "c2VhbGVk" }, meetingKeyCertificate: "Y2VydA==" } };
+
+    afterEach(() => {
+        meetingKey.takeMeetingKey.mockReset().mockReturnValue(undefined);
+        meetingKey.openProtectedMeeting.mockReset();
+    });
+
+    it("refuses to join without the key its link carries after #", async () => {
+        installMediaDevices(fakeMediaDevices({ userMediaStream: () => fakeMediaStream([fakeTrack("audio"), fakeTrack("video")]) }));
+        mockJoin(protectedJoin);
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        expect(await screen.findByText(/This link is missing its key/)).toBeInTheDocument();
+        expect(meetingKey.openProtectedMeeting).not.toHaveBeenCalled();
+    });
+
+    it("refuses a key that doesn't open the meeting", async () => {
+        installMediaDevices(fakeMediaDevices({ userMediaStream: () => fakeMediaStream([fakeTrack("audio"), fakeTrack("video")]) }));
+        meetingKey.takeMeetingKey.mockReturnValue(Uint8Array.of(1));
+        meetingKey.openProtectedMeeting.mockResolvedValue(undefined);
+        mockJoin(protectedJoin);
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        expect(await screen.findByText(/This link's key doesn't open this meeting/)).toBeInTheDocument();
+    });
+
+    it("shows the real title, says the meeting is end-to-end encrypted, and hands the call its live key", async () => {
+        installMediaDevices(fakeMediaDevices({ userMediaStream: () => fakeMediaStream([fakeTrack("audio"), fakeTrack("video")]) }));
+        meetingKey.takeMeetingKey.mockReturnValue(Uint8Array.of(1));
+        meetingKey.openProtectedMeeting.mockResolvedValue({ title: "Board meeting", liveKey: LIVE_KEY });
+        mockJoin(protectedJoin);
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        expect(await screen.findByText("Board meeting")).toBeInTheDocument();
+        expect(screen.getByText(/end-to-end encrypted/)).toBeInTheDocument();
+        fireEvent.change(screen.getByLabelText("Your name"), { target: { value: "Guest" } });
+        await waitFor(() => expect(screen.getByText("Join meeting")).toBeEnabled());
+        fireEvent.click(screen.getByText("Join meeting"));
+        expect(await screen.findByText("Meeting: Board meeting")).toBeInTheDocument();
+        expect((calls[calls.length - 1] as CallViewProps).liveKey).toBe(LIVE_KEY);
+    });
+
+    it("names the real title on the password prompt too", async () => {
+        meetingKey.takeMeetingKey.mockReturnValue(Uint8Array.of(1));
+        meetingKey.openProtectedMeeting.mockResolvedValue({ title: "Board meeting", liveKey: LIVE_KEY });
+        mockJoin({ ...passwordRequiredResponse, meeting: { ...protectedJoin.meeting, hasPassword: true } });
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        expect(await screen.findByText("Board meeting")).toBeInTheDocument();
+        expect(screen.getByText(/requires a password/)).toBeInTheDocument();
+    });
+
+    it("drops what the key opened once the page has gone", async () => {
+        let resolve: (value: unknown) => void = () => undefined;
+        meetingKey.takeMeetingKey.mockReturnValue(Uint8Array.of(1));
+        meetingKey.openProtectedMeeting.mockReturnValue(new Promise((r) => (resolve = r)));
+        mockJoin(protectedJoin);
+        const { unmount } = render(<MeetJoinPage params={{ token: "tok1" }} />);
+        await waitFor(() => expect(meetingKey.openProtectedMeeting).toHaveBeenCalled());
+        unmount();
+        await act(async () => resolve({ title: "Board meeting", liveKey: LIVE_KEY }));
+        expect(screen.queryByText("Board meeting")).toBeNull();
+    });
+
+    it("says a meeting whose key was discarded has ended", async () => {
+        mockFetch((url) => {
+            if (url === "/api/system/branding") return jsonResponse(200, { companyName: "", title: "" });
+            if (url === "/api/mail/video-meetings/join/tok1") return jsonResponse(410, { message: "This meeting has ended." });
+            throw new Error(`unexpected ${url}`);
+        });
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        expect(await screen.findByText("This meeting has ended.")).toBeInTheDocument();
+    });
+});
+

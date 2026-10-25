@@ -141,6 +141,44 @@ export interface VideoMeeting extends BaseEntity {
 
     /** Informational only in Phase 1 - see `startTime`. */
     endTime?: Date;
+
+    /** The meeting is protected end to end (`specs/meeting_privacy.md`): its title and invitees' names are sealed, and its signaling and
+     * relayed media are encrypted with a key the server never holds. Set at creation, never changed. */
+    keyProtected?: boolean | null;
+
+    /** A protected meeting: its per-meeting key's self-signed certificate (base64 DER) - what participant-readable data is sealed to.
+     * Every invitee's link carries the key itself after `#`. Never the private key. Cleared at `keyExpiresAt`. */
+    meetingKeyCertificate?: string | null;
+
+    /** SHA-256 of `meetingKeyCertificate`, lowercase hex. */
+    meetingKeyFingerprint?: string | null;
+
+    /** When a protected meeting's key is discarded (`MeetingKeyExpiryJob`): its scheduled end plus a grace period, the end of a series'
+     * last occurrence, or a day after creation for a meeting without an end. Joining answers 410 from then on. */
+    keyExpiresAt?: Date | null;
+
+    /** When `MeetingKeyExpiryJob` discarded the key, its wraps and the guest-readable sealed copies. */
+    keyDiscardedAt?: Date | null;
+
+    /** A protected meeting's key sealed to the organizer's zero-access certificate (`specs/meeting_privacy.md` §4.2), so any of the
+     * organizer's devices can reopen it to invite again. Returned only to whoever may read that mailbox. */
+    keyWraps?: MeetingKeyWrap[] | null;
+
+    /** A protected meeting's sealed fields (`title`): CMS of the field's JSON value to the meeting key and the organizer's zero-access
+     * certificate. `title` then holds the placeholder `"Meeting"`. */
+    sealedFields?: Record<string, string> | null;
+}
+
+/** One sealed copy of a protected meeting's key for the organizer (`VideoMeeting.keyWraps`). */
+export interface MeetingKeyWrap {
+    /** The organizer's mailbox: the wrap is returned to whoever may read it. */
+    mailboxUid: string;
+    /** The fingerprint of the zero-access certificate it is sealed to. */
+    recipientFingerprint: string;
+    /** Always `"meeting-key"`: the PKCS#8 of the meeting private key. */
+    kind: "meeting-key";
+    /** Base64 CMS `EnvelopedData`. */
+    cms: string;
 }
 
 /**
@@ -169,6 +207,9 @@ export interface VideoMeetingInvitee extends BaseEntity {
     email: string;
 
     displayName?: string;
+
+    /** A protected meeting: the invitee's sealed name (`displayName`), `displayName` itself then empty. */
+    sealedFields?: Record<string, string> | null;
 
     /** The unguessable token embedded in this invitee's join link, minted server-side (32 random bytes) and
      * immutable thereafter. Like `Booking.manageToken`, this has no expiry and no GC job of its own - see

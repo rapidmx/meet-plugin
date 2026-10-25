@@ -56,10 +56,16 @@ export class RelayReceiver {
     private readonly videoCounter = new ReceiveCounter();
     private readonly audio: AudioPlayer;
     private readonly video: VideoPlayer | undefined;
+    /** Opens one frame at a time, so a protected meeting's frames reach the decoders in the order they arrived. */
+    private opening: Promise<void> = Promise.resolve();
+    private closed = false;
 
+    /** `open`: a protected meeting's - every frame must be sealed, and is opened before it is decoded (`specs/meeting_privacy.md`
+     * §5.2). Without it, a sealed frame can't be decoded and is dropped. */
     constructor(
         env: RelayEnv,
         playbackContext: AudioContextLike,
+        private readonly open?: (kind: number, payload: Uint8Array) => Promise<Uint8Array | undefined>,
     ) {
         const destination = playbackContext.createMediaStreamDestination();
         this.audio = new AudioPlayer(env, playbackContext, destination);
@@ -86,6 +92,23 @@ export class RelayReceiver {
         if (!frame) {
             return;
         }
+        if (frame.encrypted !== !!this.open) {
+            return;
+        }
+        const open = this.open;
+        if (!open) {
+            this.play(frame, counter);
+            return;
+        }
+        this.opening = this.opening.then(async () => {
+            const data = await open(frame.kind, frame.data);
+            if (data && !this.closed) {
+                this.play({ ...frame, data, encrypted: false }, counter);
+            }
+        });
+    }
+
+    private play(frame: Frame, counter: ReceiveCounter): void {
         counter.frame(frame);
         if (frame.kind === KIND_AUDIO) {
             this.audio.push(frame);
@@ -104,6 +127,7 @@ export class RelayReceiver {
 
     /** Releases the decoders and ends the stream's tracks. */
     close(): void {
+        this.closed = true;
         this.audio.close();
         this.video?.close();
         for (const track of this.stream.getTracks()) {

@@ -23,6 +23,8 @@ import { effectsSuite } from "../effectsSuite.js";
 import { relaySuite } from "../relaySuite.js";
 import { signalingSuite } from "../signalingSuite.js";
 import { personalRoomSuite } from "../personalRoomSuite.js";
+import { meetingProtectionSuite } from "../meetingProtectionSuite.js";
+import { MeetingKeyExpiryJobSQL } from "../../../src/jobs/sql/MeetingKeyExpiryJobSQL.js";
 import { videoMeetingSecuritySuite } from "../videoMeetingSecuritySuite.js";
 
 const redis = vi.hoisted(() => ({ createClient: vi.fn() }));
@@ -976,6 +978,24 @@ describe("Route:VideoMeetingSQL Tests", () => {
             await authed(ownerToken).put(`${baseUrl}/${uid}`).send({ status: "cancelled" });
         },
     };
+
+    meetingProtectionSuite({
+        app: () => server.getApplication(),
+        baseUrl,
+        ownerToken: () => ownerToken,
+        strangerToken: () => strangerToken,
+        mailboxUid: () => mailbox.uid,
+        findMeeting: async (uid: string) => await meetingRepo.findOne({ where: { uid } }),
+        findInvitees: async () => await inviteeRepo.find(),
+        findLinks: async () => await findLinks(),
+        setKeyExpiresAt: async (uid: string, at: Date) => {
+            await meetingRepo.update({ uid }, { keyExpiresAt: at });
+        },
+        runExpiry: async () => {
+            const job: any = await objectFactory.newInstance(MeetingKeyExpiryJobSQL, { name: "expiry-test" });
+            await job.run();
+        },
+    });
 
     personalRoomSuite({
         app: () => server.getApplication(),

@@ -642,3 +642,19 @@ describe("diagnostics", () => {
         transport.close();
     });
 });
+
+describe("createRelayTransport in a protected meeting", () => {
+    it("opens each relayed frame with the cipher, as from the peer the server stamped it with", async () => {
+        const fake = createFakeRelayEnv();
+        const cipher = { encryptFrame: vi.fn(), decryptFrame: vi.fn(async () => Uint8Array.of(1, 2)) };
+        const transport = createRelayTransport({ meetingUid: "m1", peerId: "me~1", url: RELAY_URL, env: fake.env, cipher });
+        transport.receiveFrom("peer-a~x", () => undefined);
+        const socket = connect(fake);
+        const sealed = fragmentFrame(KIND_AUDIO, true, 0, 100, Uint8Array.of(9, 9, 9), undefined, true)[0];
+        const id = new TextEncoder().encode("peer-a~x");
+        socket.message(Uint8Array.of(id.length, ...id, ...sealed).buffer);
+        await vi.waitFor(() => expect(cipher.decryptFrame).toHaveBeenCalledWith(KIND_AUDIO, "peer-a~x", Uint8Array.of(9, 9, 9)));
+        transport.close();
+    });
+});
+

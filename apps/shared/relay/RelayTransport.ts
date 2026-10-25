@@ -23,7 +23,7 @@ import { resumeAudioContext } from "./audioResume.js";
 import { RelayClient } from "./RelayClient.js";
 import { detectRelayEnv, type AudioContextLike, type RelayEnv } from "./relayEnv.js";
 import { RelayReceiver } from "./RelayReceiver.js";
-import { RelaySender } from "./RelaySender.js";
+import { type FrameCipher, RelaySender } from "./RelaySender.js";
 
 export interface RelayTransport {
     /** false when this browser lacks WebSocket, AudioEncoder/AudioDecoder/VideoEncoder/VideoDecoder, VideoFrame,
@@ -55,6 +55,8 @@ export interface RelayTransportOptions {
     url?: string;
     /** Overrides every browser API the relay uses (default: `detectRelayEnv()`), so a test can drive it with fakes. */
     env?: RelayEnv;
+    /** A protected meeting's cipher (`MeetingCipher`): every frame sent is sealed, and only sealed frames are played. */
+    cipher?: FrameCipher;
 }
 
 /** The relay WebSocket's URL for a meeting: this deployment's origin (the API origin when the UI is served from a
@@ -99,6 +101,7 @@ class WebSocketRelayTransport implements RelayTransport {
         private readonly env: RelayEnv,
         url: string,
         peerId: string,
+        private readonly cipher?: FrameCipher,
     ) {
         this.client = new RelayClient({
             url,
@@ -113,6 +116,7 @@ class WebSocketRelayTransport implements RelayTransport {
             send: (message) => this.client.sendMedia(message),
             canSend: () => this.client.ready,
             maxMessageBytes: () => this.client.maxMessageBytes,
+            cipher,
         });
     }
 
@@ -120,7 +124,7 @@ class WebSocketRelayTransport implements RelayTransport {
         if (this.closed || this.receivers.has(peerId)) {
             return;
         }
-        const receiver = this.createReceiver();
+        const receiver = this.createReceiver(peerId);
         if (!receiver) {
             return;
         }
@@ -179,14 +183,15 @@ class WebSocketRelayTransport implements RelayTransport {
 
     /** A receiver on the shared playback context, or `undefined` if this browser will not build one (the peer then
      * simply has no relayed media). */
-    private createReceiver(): RelayReceiver | undefined {
+    private createReceiver(peerId: string): RelayReceiver | undefined {
         try {
             if (!this.playback) {
                 this.playback = this.env.createAudioContext(PLAYBACK_SAMPLE_RATE);
                 // Nothing the user just did created this context, so it may start suspended - see `resumeAudioContext`.
                 this.stopResume = resumeAudioContext(this.playback, this.env.document);
             }
-            return new RelayReceiver(this.env, this.playback);
+            const cipher = this.cipher;
+            return new RelayReceiver(this.env, this.playback, cipher && ((kind, payload) => cipher.decryptFrame(kind, peerId, payload)));
         } catch {
             return undefined;
         }
@@ -204,5 +209,5 @@ export function createRelayTransport(options: RelayTransportOptions): RelayTrans
     if (!env || !url) {
         return UNSUPPORTED_TRANSPORT;
     }
-    return new WebSocketRelayTransport(env, url, options.peerId);
+    return new WebSocketRelayTransport(env, url, options.peerId, options.cipher);
 }

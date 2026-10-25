@@ -42,6 +42,14 @@ export interface PublicVideoMeeting {
     /** Whether this meeting currently requires the host to admit each participant before they join - see
      * `requestAdmission()`. Absent reads as `false`. */
     waitingRoomEnabled?: boolean;
+    /** The meeting is protected end to end (`specs/meeting_privacy.md`): `title` is a placeholder, the real one is in `sealedFields`, and
+     * the call needs the key the link carries after `#k=` (`_meetingKey.ts`). */
+    protected?: true;
+    sealedFields?: Record<string, string>;
+    /** The meeting key's certificate (base64 DER). */
+    meetingKeyCertificate?: string;
+    /** When the key is discarded and joining ends (ISO 8601). */
+    keyExpiresAt?: string;
 }
 
 /**
