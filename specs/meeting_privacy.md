@@ -57,6 +57,9 @@ so a key wrapped to a participant's own zero-access key couldn't be opened in th
   - The organizer's client supplies it on each save that sends an invitation (§6.1). It is never part of a stored
     `CalendarEventAttendeeLink` URL, a `Booking` row or any log line.
   - `MeetingSchedulingJob` never sends an invitation for a keyed meeting, because only a save carries the fragments.
+  - A keyed link goes to no copy this server would store readable: an address on another server, or a mailbox here whose mail is
+    zero-access. A mailbox here without zero-access, or any other address on a domain this server serves (a list, an unknown
+    address), is skipped with a warning, like a guest with no key (restapi `MeetingInviteSender`, `host.mayCarryMeetingKey`).
 
 ### 4.2 The organizer's wrap
 
