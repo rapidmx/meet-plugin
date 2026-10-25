@@ -7,6 +7,7 @@ import {
     isValidRelayPeer,
     parseRelayEnabled,
     RELAY_BURST_BYTES,
+    RELAY_EVICTED_REASON,
     RELAY_HELLO_TIMEOUT_MS,
     RELAY_LARGE_PAYLOAD_BYTES,
     RELAY_MAX_PAYLOAD_BYTES,
@@ -616,6 +617,61 @@ describe("RelayHub", () => {
         });
     });
 
+    describe("evict", () => {
+        it("Closes every socket of the uid in the room with 1008, registered or not, and leaves everyone else alone.", () => {
+            const a1 = connect(hub, "room", "alice", "alice~1");
+            const a2 = connect(hub, "room", "alice", null);
+            const b = connect(hub, "room", "bob");
+            const elsewhere = connect(hub, "other", "alice");
+            want(b, ["alice~1"]);
+
+            hub.evict("room", "alice");
+
+            expect(a1.sock.closed).toEqual({ code: 1008, reason: RELAY_EVICTED_REASON });
+            expect(a2.sock.closed).toEqual({ code: 1008, reason: RELAY_EVICTED_REASON });
+            expect(b.sock.closed).toBeUndefined();
+            expect(elsewhere.sock.closed).toBeUndefined();
+            expect(hub.socketCount("room")).toBe(1);
+
+            // What the evicted socket still sends goes nowhere, and nothing reaches it any more.
+            binary(a1.conn, Buffer.from([1]));
+            expect(b.sock.frames).toEqual([]);
+            const c = connect(hub, "room", "carol");
+            binary(c.conn, Buffer.from([2]));
+            expect(a1.sock.frames).toEqual([]);
+        });
+
+        it("Is a no-op for a room this hub holds no socket in.", () => {
+            expect(() => hub.evict("nowhere", "alice")).not.toThrow();
+            expect(hub.roomCount).toBe(0);
+        });
+
+        it("Never forwards an eviction as media, even to a socket that wants its sender.", () => {
+            const a = connect(hub, "room", "alice");
+            const b = connect(hub, "room", "bob");
+            want(b, ["~evict", "alice"]);
+            hub.evict("room", "alice");
+            expect(a.sock.closed).toEqual({ code: 1008, reason: RELAY_EVICTED_REASON });
+            expect(b.sock.frames).toEqual([]);
+            expect(hub.stats.framesForwarded).toBe(0);
+        });
+
+        it("Evicts a uid's sockets on another hub sharing the bus, even from a hub holding no socket in the room.", () => {
+            const bus = new InProcessRelayBus();
+            const replica1 = new RelayHub({ bus });
+            const replica2 = new RelayHub({ bus });
+            const a = connect(replica1, "room", "alice");
+            const b = connect(replica1, "room", "bob");
+
+            replica2.evict("room", "alice");
+
+            expect(a.sock.closed).toEqual({ code: 1008, reason: RELAY_EVICTED_REASON });
+            expect(b.sock.closed).toBeUndefined();
+            expect(replica1.socketCount("room")).toBe(1);
+            expect(replica2.roomCount).toBe(0);
+        });
+    });
+
     describe("the bus seam", () => {
         class RecordingBus implements RelayBus {
             public listeners = new Map<string, RelayBusListener>();
@@ -672,6 +728,15 @@ describe("RelayHub", () => {
             // A frame that was already in flight over an asynchronous bus is ignored, not delivered to a new room.
             expect(() => listener("remote-peer", frame)).not.toThrow();
             expect(b.sock.frames).toEqual([frame]);
+        });
+
+        it("Publishes an eviction on the bus, and evicts locally even when the bus delivers nothing back.", () => {
+            const bus = new RecordingBus();
+            hub = new RelayHub({ bus });
+            const a = connect(hub, "room", "alice");
+            hub.evict("room", "alice");
+            expect(bus.published).toEqual([{ room: "room", sender: "~evict", frame: Buffer.from("alice", "utf8") }]);
+            expect(a.sock.closed).toEqual({ code: 1008, reason: RELAY_EVICTED_REASON });
         });
 
         it("Subscribes once per room, however many sockets join it.", () => {

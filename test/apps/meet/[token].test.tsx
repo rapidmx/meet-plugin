@@ -13,6 +13,8 @@ import MeetJoinPage from "../../../apps/meet/[token].js";
 const { calls, hookOptions } = vi.hoisted(() => ({ calls: [] as unknown[], hookOptions: [] as unknown[] }));
 const meetingKey = vi.hoisted(() => ({ takeMeetingKey: vi.fn((): Uint8Array | undefined => undefined), openProtectedMeeting: vi.fn() }));
 vi.mock("../../../apps/meet/_meetingKey.js", () => meetingKey);
+const sealWaitingName = vi.hoisted(() => vi.fn(async (_key: CryptoKey, meetingUid: string, name: string) => `sealed(${meetingUid}:${name})`));
+vi.mock("../../../apps/shared/crypto/MeetingCipher.js", () => ({ sealWaitingName }));
 
 // The real hook, with what the page hands it recorded.
 vi.mock("../../../apps/shared/media/useLocalMedia.js", async () => {
@@ -567,6 +569,30 @@ describe("MeetJoinPage for a protected meeting", () => {
         fireEvent.click(screen.getByText("Join meeting"));
         expect(await screen.findByText("Meeting: Board meeting")).toBeInTheDocument();
         expect((calls[calls.length - 1] as CallViewProps).liveKey).toBe(LIVE_KEY);
+    });
+
+    it("asks to join a protected meeting's waiting room with the name sealed with its key, never readable", async () => {
+        meetingKey.takeMeetingKey.mockReturnValue(Uint8Array.of(1));
+        meetingKey.openProtectedMeeting.mockResolvedValue({ title: "Board meeting", liveKey: LIVE_KEY });
+        let sent: unknown;
+        mockFetch((url, init) => {
+            if (url === "/api/system/branding") return jsonResponse(200, { companyName: "", title: "" });
+            if (url === "/api/mail/video-meetings/join/tok1") return jsonResponse(200, { ...admissionRequiredResponse, meeting: { ...protectedJoin.meeting, waitingRoomEnabled: true } });
+            if (url === "/api/mail/video-meetings/join/tok1/verify") {
+                sent = JSON.parse(init?.body as string);
+                return jsonResponse(200, { ...admissionRequiredResponse, authenticated: false, selfUid: "guest:1", token: "guest-token" });
+            }
+            if (url === "/api/mail/video-meetings/join/tok1/status") return jsonResponse(200, admissionRequiredResponse);
+            throw new Error(`unexpected ${url}`);
+        });
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        await screen.findByText("The host must let you in before you can join.");
+        fireEvent.change(screen.getByLabelText("Your name"), { target: { value: " Grace " } });
+        fireEvent.click(screen.getByRole("button", { name: "Ask to join" }));
+
+        expect(await screen.findByText("Waiting for the host to let you in…")).toBeInTheDocument();
+        expect(sealWaitingName).toHaveBeenCalledWith(LIVE_KEY, "m1", "Grace");
+        expect(sent).toEqual({ sealedName: "sealed(m1:Grace)" });
     });
 
     it("names the real title on the password prompt too", async () => {

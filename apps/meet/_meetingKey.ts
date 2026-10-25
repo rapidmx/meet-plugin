@@ -11,7 +11,11 @@
 import { fromBase64 } from "@rapidmx/web-client/lib/crypto/encoding.js";
 import { importMeetingKey, readMeetingKeyFragment } from "@rapidmx/web-client/lib/crypto/meetingKeys.js";
 import { decryptEnvelopedDataWithKeys } from "@rapidmx/web-client/lib/crypto/smime.js";
-import type { PublicVideoMeeting } from "./_meetApi.js";
+import { openWaitingName } from "../shared/crypto/MeetingCipher.js";
+import type { PublicVideoMeeting, WaitingParticipant } from "./_meetApi.js";
+
+/** What the host is shown for someone waiting whose sealed name won't open with the meeting's key. */
+export const UNREADABLE_WAITING_NAME = "Someone";
 
 /** A protected meeting, opened with its link key. */
 export interface OpenedMeeting {
@@ -47,4 +51,18 @@ export async function openProtectedMeeting(meeting: PublicVideoMeeting, pkcs8: U
     } catch {
         return undefined;
     }
+}
+
+/** `list` (a meeting's waiting room) with every `sealedName` opened into `name` with `liveKey`, the meeting's - `UNREADABLE_WAITING_NAME`
+ * for one that won't open, or for any sealed name without a key. A readable `name` is left as it is. Never rejects. */
+export async function openWaitingNames(list: WaitingParticipant[], liveKey: CryptoKey | undefined, meetingUid: string): Promise<WaitingParticipant[]> {
+    return await Promise.all(
+        list.map(async (participant) => {
+            if (participant.sealedName === undefined) {
+                return participant;
+            }
+            const name = liveKey ? await openWaitingName(liveKey, meetingUid, participant.sealedName) : undefined;
+            return { ...participant, name: name ?? UNREADABLE_WAITING_NAME };
+        }),
+    );
 }

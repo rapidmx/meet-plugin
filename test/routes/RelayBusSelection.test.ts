@@ -185,6 +185,38 @@ describe("BaseVideoMeetingRoute relay bus", () => {
         replica2.destroyRelayBus();
     });
 
+    it("Evicts a participant's relay socket connected to another replica.", async () => {
+        const replica1 = await route({ url: "redis://events:6379" });
+        const replica2 = await route({ url: "redis://events:6379" });
+
+        const connect = async (r: any, uid: string, wanted: string[]): Promise<any> => {
+            const sock: any = new EventEmitter();
+            sock.send = vi.fn();
+            sock.close = vi.fn();
+            await r.relay("meeting-1", { path: "/relay/meeting-1" }, sock, { uid });
+            sock.emit("message", JSON.stringify({ op: "hello", v: 1, peer: uid }), false);
+            sock.emit("message", JSON.stringify({ op: "want", peers: wanted }), false);
+            return sock;
+        };
+        const alice = await connect(replica1, "alice", ["bob"]);
+        const bob = await connect(replica2, "bob", ["alice"]);
+
+        replica1.relayHub.evict("meeting-1", "bob");
+        await server.settle();
+        expect(bob.close).toHaveBeenCalledWith(1008, "Removed from the meeting.");
+        expect(alice.close).not.toHaveBeenCalled();
+        expect(replica2.relayHub.socketCount("meeting-1")).toBe(0);
+
+        // Nothing alice sends reaches bob any more.
+        alice.emit("message", Buffer.from([1]), true);
+        await server.settle();
+        expect(bob.send.mock.calls.filter((c: any[]) => typeof c[0] !== "string")).toHaveLength(0);
+
+        alice.emit("close");
+        replica1.destroyRelayBus();
+        replica2.destroyRelayBus();
+    });
+
     it("Carries signaling to, and evicts, a participant connected to another replica.", async () => {
         const replica1 = await route({ url: "redis://events:6379" });
         const replica2 = await route({ url: "redis://events:6379" });
@@ -215,6 +247,9 @@ describe("BaseVideoMeetingRoute relay bus", () => {
         await server.settle();
         expect(bob.close).toHaveBeenCalledWith(1008, "Removed from the meeting.");
         expect(alice.close).not.toHaveBeenCalled();
+        // Alice's replica tells her, once, that bob was removed.
+        const removed = alice.send.mock.calls.map((c: any[]) => JSON.parse(c[0])).filter((m: any) => m.op === "removed");
+        expect(removed).toEqual([{ op: "removed", uid: "bob" }]);
 
         alice.emit("close");
         bob.emit("close");

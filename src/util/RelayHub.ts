@@ -61,6 +61,14 @@ export const RELAY_MAX_PEER_LENGTH = 128;
 /** The most peers one `want` message may name; further valid entries are ignored. */
 export const RELAY_MAX_WANT_PEERS = 32;
 
+/** The reason a relay socket is closed with (1008) when its uid is removed from the meeting - see `RelayHub.evict()`.
+ * The same words as the signaling channel's `SIGNALING_EVICTED_REASON`. */
+export const RELAY_EVICTED_REASON = "Removed from the meeting.";
+
+/** The bus sender an eviction is published under (its frame is the evicted uid's UTF-8 bytes) - never a valid peer id
+ * of any socket, which starts with its uid, so `deliver()` can tell it from media and never forwards it. */
+const RELAY_EVICT_SENDER = "~evict";
+
 /** The minimal socket surface the hub needs - satisfied by the framework's uWS/Bun/`ws` sockets and by a trivial
  * fake in a test. */
 export interface RelaySocket {
@@ -430,7 +438,8 @@ class Connection implements RelayConnection {
  * budget for more than `RELAY_OVER_BUDGET_CLOSE_MS` (see `RELAY_OVER_BUDGET_GRACE_MS`) is closed with 1008 "Too
  * much data.". A receiver whose `send()` reports the message as dropped (uWS backpressure) simply misses that
  * frame - counted in `stats`, never queued or retried. Sockets and rooms are released when their socket closes; an
- * empty room is deleted.
+ * empty room is deleted. `evict()` closes every socket of one uid in a room with 1008 "Removed from the meeting.", on
+ * every replica the bus reaches - the host removing someone stops their media at once, not at their next reconnect.
  *
  * ## Replicas
  *
@@ -521,6 +530,23 @@ export class RelayHub {
         return conn;
     }
 
+    /** Closes every socket `uid` holds in room `roomId` (`RELAY_EVICTED_REASON`), on this replica and - through the
+     * bus - every other, so a removed participant whose client ignores its removal can neither send nor receive
+     * another frame. */
+    public evict(roomId: string, uid: string): void {
+        this.bus.publish(roomId, RELAY_EVICT_SENDER, Buffer.from(uid, "utf8"));
+        // A replica with no socket in the room has no bus subscription to hear that on - including this one, possibly.
+        this.evictLocal(roomId, uid);
+    }
+
+    private evictLocal(roomId: string, uid: string): void {
+        for (const conn of [...(this.rooms.get(roomId)?.conns ?? [])]) {
+            if (conn.uid === uid) {
+                conn.evict(RELAY_EVICTED_REASON);
+            }
+        }
+    }
+
     /** Forgets `conn`, and its room once that is empty. */
     private remove(conn: Connection): void {
         const room: Room = conn.room;
@@ -535,8 +561,13 @@ export class RelayHub {
     }
 
     /** Hands `frame` from `sender` to every other socket of room `roomId` that wants it. A bus that delivers
-     * asynchronously (across replicas) may deliver a frame for a room that has just emptied; that is ignored. */
+     * asynchronously (across replicas) may deliver a frame for a room that has just emptied; that is ignored. An
+     * eviction (`RELAY_EVICT_SENDER`) closes its uid's sockets here instead of being forwarded. */
     private deliver(roomId: string, sender: string, frame: Buffer): void {
+        if (sender === RELAY_EVICT_SENDER) {
+            this.evictLocal(roomId, frame.toString("utf8"));
+            return;
+        }
         for (const conn of this.rooms.get(roomId)?.peers.values() ?? []) {
             if (conn.peer !== sender && conn.wanted.has(sender)) {
                 conn.forward(frame);

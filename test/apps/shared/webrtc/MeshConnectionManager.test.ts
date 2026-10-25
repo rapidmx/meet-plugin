@@ -23,11 +23,20 @@ import { type FakeRTCPeerConnection, fakeMediaStream, fakeRTCPeerConnection, fak
 
 /** A directly-controllable fake channel for single-manager tests: `emit()` injects an incoming message, `sent`
  * records everything the manager under test published. */
-function manualChannel(): SignalingChannel & { emit: (message: SignalMessage) => void; sent: SignalMessage[] } {
+function manualChannel(): SignalingChannel & { emit: (message: SignalMessage) => void; remove: (uid: string) => void; sent: SignalMessage[] } {
     const handlers = new Set<(message: SignalMessage) => void>();
+    const removedHandlers = new Set<(uid: string) => void>();
     const sent: SignalMessage[] = [];
     return {
         sent,
+        /** The server's own `removed` notice (`SignalingChannel.onRemoved`). */
+        onRemoved: (handler) => {
+            removedHandlers.add(handler);
+            return () => removedHandlers.delete(handler);
+        },
+        remove: (uid) => {
+            for (const handler of [...removedHandlers]) handler(uid);
+        },
         // `peer` defaults to `from`, so it is only kept where a test gave the manager a distinct peer id.
         send: (message) => sent.push(message.peer === message.from ? { ...message, peer: undefined } : message),
         onMessage: (handler) => {
@@ -1405,6 +1414,78 @@ describe("MeshConnectionManager - host moderation (mute-request, kicked)", () =>
         hostless.channel.emit(signal("mute-request", "z", { to: "a~tab" }));
         hostless.channel.emit(signal("talking-stick", "z", { active: true, holder: "z~tab" }));
         expect(hostless.events).toEqual([]);
+    });
+});
+
+describe("MeshConnectionManager - removal by the server", () => {
+    it("drops every peer of a removed account, closing its connections, and leaves everyone else", async () => {
+        const { manager, channel, created, events } = setup({ peerId: "a~tab" });
+        manager.start();
+        channel.emit({ ...hello("z", "Zed"), peer: "z~laptop" });
+        channel.emit({ ...hello("z", "Zed"), peer: "z~phone" });
+        channel.emit({ ...hello("zed", "Other"), peer: "zed~1" });
+        await flush();
+        expect(manager.participants.map((p) => p.uid)).toEqual(["z~laptop", "z~phone", "zed~1"]);
+
+        channel.remove("z");
+
+        expect(manager.participants.map((p) => p.uid)).toEqual(["zed~1"]);
+        expect(created[0].close).toHaveBeenCalledTimes(1);
+        expect(created[1].close).toHaveBeenCalledTimes(1);
+        expect(created[2].close).not.toHaveBeenCalled();
+        expect(events).toContainEqual({ type: "participant-left", uid: "z~laptop" });
+        expect(events).toContainEqual({ type: "participant-left", uid: "z~phone" });
+    });
+
+    it("stops receiving a removed peer's relay stream and stops sending once no pair uses the relay", async () => {
+        const relay = fakeRelay();
+        const { manager, channel } = await setupWithPeer(relay);
+        channel.emit(signal("relay-fallback", "z"));
+        await flush();
+        expect(relay.receiveFrom).toHaveBeenCalledWith("z", expect.any(Function));
+        relay.setSending.mockClear();
+
+        channel.remove("z");
+
+        expect(relay.stopReceivingFrom).toHaveBeenCalledWith("z");
+        expect(relay.setSending).toHaveBeenLastCalledWith(false);
+        expect(manager.participants).toEqual([]);
+    });
+
+    it("forgets ICE candidates held for a removed peer, so a later offer from that id starts clean", async () => {
+        const { manager, channel, created } = setup();
+        manager.start();
+        channel.emit(signal("ice-candidate", "z~1", { candidate: { candidate: "held" } }));
+        channel.remove("z");
+        channel.emit(offer("z~1", "a"));
+        await flush();
+        expect(created[0].addIceCandidate).not.toHaveBeenCalled();
+    });
+
+    it("ignores a notice naming its own account, and a peer's signal that only claims to be one", async () => {
+        const { manager, channel } = setup({ selfUid: "a", peerId: "a~tab", hostUid: "z" });
+        manager.start();
+        channel.emit({ ...hello("a", "Me elsewhere"), peer: "a~phone" });
+        channel.emit(hello("b", "Bea"));
+        await flush();
+
+        channel.remove("a");
+        expect(manager.participants.map((p) => p.uid)).toEqual(["a~phone", "b"]);
+
+        // Even the host cannot remove someone by signaling it: only the server's notice counts.
+        channel.emit(signal("removed" as SignalMessage["kind"], "z", { uid: "b" } as Partial<SignalMessage>));
+        expect(manager.participants.map((p) => p.uid)).toEqual(["a~phone", "b"]);
+    });
+
+    it("stops listening for removals once stopped", async () => {
+        const { manager, channel, events } = setup();
+        manager.start();
+        channel.emit(hello("z", "Zed"));
+        await flush();
+        manager.stop();
+        events.length = 0;
+        channel.remove("z");
+        expect(events).toEqual([]);
     });
 });
 

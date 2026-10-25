@@ -136,6 +136,11 @@ export interface SignalingChannel {
      * rather than relying on the transport to (its tests' fake echoes everything to everyone). Returns the function
      * that stops listening. */
     onMessage(handler: (message: SignalMessage) => void): () => void;
+    /** Calls `handler` with the account uid of every participant the server says the host removed from the meeting
+     * (`SignalingHub.evict()`'s `removed` notice). The server sends it outside any `signal`, so no participant can
+     * forge one. Optional: a channel with no server behind it (a test's fake) has none. Returns the function that
+     * stops listening. */
+    onRemoved?(handler: (uid: string) => void): () => void;
 }
 
 /** One kind's RTP stream stats, as of one sample - cumulative counters (`bytesSent`/`bytesReceived`), not a rate,

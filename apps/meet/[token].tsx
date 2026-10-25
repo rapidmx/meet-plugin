@@ -37,6 +37,7 @@ import useBranding from "@rapidmx/web-client/lib/branding/useBranding.js";
 import { Branding } from "@rapidmx/web-client/lib/branding/brandingApi.js";
 import { ApiRequestError } from "@rapidmx/web-client/lib/util/api.js";
 import { openProtectedMeeting, takeMeetingKey, type OpenedMeeting } from "./_meetingKey.js";
+import { sealWaitingName } from "../shared/crypto/MeetingCipher.js";
 import Button from "@rapidmx/web-client/lib/components/buttons/Button.js";
 import Alert from "@rapidmx/web-client/lib/components/feedback/Alert.js";
 import FormField from "@rapidmx/web-client/lib/components/forms/FormField.js";
@@ -182,11 +183,13 @@ function MeetJoinContent({ token, branding, linkKey }: { token: string; branding
         e.preventDefault();
         setAdmissionError(null);
         try {
+            // A protected meeting's server never reads who is waiting: the name goes sealed with the meeting's key, for the host to open.
+            const typed = admissionName.trim();
             const result = await requestAdmission(token, {
-                name: admissionName.trim(),
+                ...(opened && admissionMeeting ? { sealedName: await sealWaitingName(opened.liveKey, admissionMeeting.uid, typed) } : { name: typed }),
                 ...(admissionMeeting?.hasPassword && { password: admissionPassword }),
             });
-            setName(admissionName.trim());
+            setName(typed);
             setPendingGuestToken(result.token);
             setPhase("waiting");
         } catch (err) {

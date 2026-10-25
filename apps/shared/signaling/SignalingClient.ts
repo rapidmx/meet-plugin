@@ -13,6 +13,9 @@
  * with `to` to that peer only - so unlike the shared `/push` channel this replaced, nobody receives offers, answers or
  * ICE candidates meant for someone else, and the client never sees its own messages echoed back.
  * - A message the server delivers arrives as `{"op":"signal","data":...}` and is handed to every `onMessage()` listener.
+ * - `{"op":"removed","uid":<account uid>}` is the server's own notice that the host removed that participant; it is
+ * handed to every `onRemoved()` listener. It is never sealed - the server sends it, and knows who it removed - and no
+ * participant can send one, since everything a participant sends arrives wrapped in a `signal`.
  * - A `ping` every `SIGNALING_KEEPALIVE_MS` keeps proxies from closing an idle socket.
  *
  * ## Authentication
@@ -119,6 +122,7 @@ export class SignalingClient implements SignalingChannel {
     private maxBytes: number = SIGNALING_DEFAULT_MAX_MESSAGE_BYTES;
     private readonly queue: string[] = [];
     private readonly listeners = new Set<(message: SignalMessage) => void>();
+    private readonly removedListeners = new Set<(uid: string) => void>();
     private pendingConnect: { resolve: () => void; reject: (err: Error) => void } | undefined;
     /** Seals, then opens, one message at a time, so neither direction is reordered by encryption. */
     private sealing: Promise<void> = Promise.resolve();
@@ -170,6 +174,7 @@ export class SignalingClient implements SignalingChannel {
         }
         this.clearAuthCookie();
         this.listeners.clear();
+        this.removedListeners.clear();
         this.queue.length = 0;
         this.pendingConnect?.reject(new Error("Closed before the signaling channel connected."));
         this.pendingConnect = undefined;
@@ -178,6 +183,11 @@ export class SignalingClient implements SignalingChannel {
     onMessage(handler: (message: SignalMessage) => void): () => void {
         this.listeners.add(handler);
         return () => this.listeners.delete(handler);
+    }
+
+    onRemoved(handler: (uid: string) => void): () => void {
+        this.removedListeners.add(handler);
+        return () => this.removedListeners.delete(handler);
     }
 
     /** Sends `message` now, or once the socket is ready again - see this module's doc comment. A no-op once closed. */
@@ -251,7 +261,7 @@ export class SignalingClient implements SignalingChannel {
         if (typeof raw !== "string") {
             return;
         }
-        let frame: { op?: unknown; data?: unknown; maxMessageBytes?: unknown };
+        let frame: { op?: unknown; data?: unknown; maxMessageBytes?: unknown; uid?: unknown };
         try {
             const parsed: unknown = JSON.parse(raw);
             if (!parsed || typeof parsed !== "object") {
@@ -263,6 +273,10 @@ export class SignalingClient implements SignalingChannel {
         }
         if (frame.op === "ready") {
             this.handleReady(frame.maxMessageBytes);
+        } else if (frame.op === "removed") {
+            if (typeof frame.uid === "string" && frame.uid) {
+                this.deliverRemoved(frame.uid);
+            }
         } else if (frame.op === "signal" && frame.data && typeof frame.data === "object") {
             const cipher = this.options.cipher;
             const data = frame.data as Record<string, unknown>;
@@ -287,6 +301,17 @@ export class SignalingClient implements SignalingChannel {
         for (const listener of [...this.listeners]) {
             try {
                 listener(message);
+            } catch (err) {
+                (globalThis as { reportError?: (error: unknown) => void }).reportError?.(err);
+            }
+        }
+    }
+
+    /** Hands a `removed` notice's `uid` to every `onRemoved()` listener, a throwing one reported as `deliver()` does. */
+    private deliverRemoved(uid: string): void {
+        for (const listener of [...this.removedListeners]) {
+            try {
+                listener(uid);
             } catch (err) {
                 (globalThis as { reportError?: (error: unknown) => void }).reportError?.(err);
             }

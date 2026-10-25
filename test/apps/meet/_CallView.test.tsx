@@ -1439,6 +1439,16 @@ describe("CallView - host waiting room", () => {
         await waitFor(() => expect(screen.queryByText("Grace")).toBeNull());
     });
 
+    it("shows a protected meeting's sealed name it can't open with the meeting's key as unreadable, still admittable", async () => {
+        listWaitingParticipantsMock.mockResolvedValue([{ uid: "guest:abc", sealedName: "c2VhbGVk", requestedAt: "2026-01-01T00:00:00.000Z" }]);
+        await connected({ selfUid: "local-me", hostUid: "local-me", initialWaitingRoomEnabled: true });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+
+        expect(await screen.findByText("Someone")).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Admit Someone" }));
+        expect(admitParticipantMock).toHaveBeenCalledWith("meeting-1", "guest:abc");
+    });
+
     it("lets the host deny a pending request", async () => {
         listWaitingParticipantsMock.mockResolvedValue([{ uid: "guest:abc", name: "Grace", requestedAt: "2026-01-01T00:00:00.000Z" }]);
         await connected({ selfUid: "local-me", hostUid: "local-me", initialWaitingRoomEnabled: true });

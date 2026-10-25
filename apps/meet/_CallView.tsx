@@ -123,6 +123,7 @@ import DiagnosticsPanel from "./_DiagnosticsPanel.js";
 import DiagnosticsWindow from "./_DiagnosticsWindow.js";
 import ParticipantTile from "./_ParticipantTile.js";
 import ParticipantsDrawer from "./_ParticipantsDrawer.js";
+import { openWaitingNames } from "./_meetingKey.js";
 import SettingsModal from "./_SettingsModal.js";
 import Whiteboard from "./_Whiteboard.js";
 
@@ -705,11 +706,14 @@ export default function CallView({
         }
         let cancelled = false;
         const poll = () => {
-            listWaitingParticipants(channel).then((list) => {
-                if (!cancelled) {
-                    setWaitingParticipants(list);
-                }
-            }, () => undefined);
+            // A protected meeting's names arrive sealed: opened here with the meeting's key, which the server never holds.
+            listWaitingParticipants(channel)
+                .then((list) => openWaitingNames(list, liveKey, channel))
+                .then((list) => {
+                    if (!cancelled) {
+                        setWaitingParticipants(list);
+                    }
+                }, () => undefined);
         };
         poll();
         const interval = setInterval(poll, DEFAULT_WAITING_POLL_MS);
@@ -717,7 +721,7 @@ export default function CallView({
             cancelled = true;
             clearInterval(interval);
         };
-    }, [isHost, drawerOpen, channel]);
+    }, [isHost, drawerOpen, channel, liveKey]);
     const otherUids = participants.map((p) => p.uid);
     // A pin or an active-speaker pick can name someone who has just left, until the state catches up.
     const stillHere = (uid: string | undefined) => (uid && otherUids.includes(uid) ? uid : undefined);

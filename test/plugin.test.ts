@@ -90,6 +90,7 @@ describe("plugin entry points", () => {
                 "isValidRelayPeer",
                 "parseRelayEnabled",
                 "RELAY_BURST_BYTES",
+                "RELAY_EVICTED_REASON",
                 "RELAY_HELLO_TIMEOUT_MS",
                 "RELAY_LARGE_PAYLOAD_BYTES",
                 "RELAY_MAX_PAYLOAD_BYTES",

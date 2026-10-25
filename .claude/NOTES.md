@@ -1642,3 +1642,34 @@ Fixed (findings by review id):
   message; `deliver()` isolates each listener and hands its error to `reportError()` where the page has one.
 
 Spec `specs/meeting_privacy.md` §5.1, §5.2, §6.1 and §8 updated to match.
+
+## 2026-10-25: Second review fixes
+
+Fixed (findings by review id):
+
+- **#136 Kick left the relay and P2P media up.** `RelayHub.evict(roomId, uid)` closes the uid's relay sockets with 1008
+  `RELAY_EVICTED_REASON` ("Removed from the meeting.") on every replica, published on the bus under the private sender `~evict`
+  (never a valid peer id; `deliver()` intercepts it and never forwards it, even to a socket that `want`s it). `kick()` now calls it
+  next to `SignalingHub.evict()`. `SignalingHub` then sends every socket left in the room `{"op":"removed","uid"}` - from the bus
+  delivery only, so once per replica; the direct call in `evict()` closes local sockets without notifying (the bus delivery does).
+  `SignalingClient` hands that op to `onRemoved()` listeners (new optional `SignalingChannel.onRemoved`); a peer can't forge it since
+  everything a peer sends arrives wrapped in `signal`. `MeshConnectionManager` runs `handleBye()` for every peer id of that account
+  (`uid` or `uid~...`), dropping its `RTCPeerConnection` and relay stream, and forgets held ICE candidates; a notice naming its own
+  account is ignored. Not done: no rekey of a protected meeting on removal (the kicked participant still holds the live key, so
+  anything they captured before stays readable to them, and a kicked guest who reloads the link is a fresh guest - the existing "kick
+  is not a ban" limit).
+- **#137 Frame nonce collisions.** Relay frame nonces are now `senderSalt[8] || counter u32` (was 4 + 8): the live key is shared by
+  every session for up to five years, so a 32-bit salt made a GCM nonce collision likely around 100k relay sessions. `encryptFrame()`
+  throws past `MAX_FRAME_COUNTER` (2^32 - 1; `RelaySender` counts it as a dropped frame). The AAD binding of 0178804 is unchanged
+  (`rapidmx-frame-v2|`); no compatibility with the old layout (pre-release). Spec §5.2 updated.
+- **#138 Waiting-room cap filled by resolved requests.** `registerPendingAdmission()` counts only `status === "pending"` records toward
+  `MAX_PENDING_ADMISSIONS`, so a host's deny or admit frees the place (the record stays for the requester's poll). New per-network cap
+  `MAX_PENDING_ADMISSIONS_PER_SOURCE` (20 waiting requests per meeting): `verifyPassword()` takes `@Request`, and
+  `admissionSource()` reads the client address the way the rate limiter does (`NetUtils.getClientIP` with the framework's
+  `trusted_proxies`), widens IPv6 to its /64 and stores only a truncated SHA-256 of it as `PendingAdmission.source`. 20, not 5, so an
+  office behind one address can still fill a waiting room; someone holding the link now needs 5 networks to fill it.
+- **#140 Protected waiting-room names in plaintext on Redis.** For a protected meeting `POST /join/:token/verify` takes only
+  `sealedName` (base64, at most 2048 characters; 400 for a readable `name`). `PendingAdmission` carries exactly one of `name` and
+  `sealedName`; `GET /:id/waiting` returns whichever it has. The meet page seals with `sealWaitingName()` (AES-GCM with the live key,
+  random IV, AAD `rapidmx-waiting-name-v1|<meetingUid>`), and `_CallView` opens the host's list with `openWaitingNames()`
+  (`_meetingKey.ts`); one that won't open shows as "Someone" (`UNREADABLE_WAITING_NAME`). Spec §6.1 updated.

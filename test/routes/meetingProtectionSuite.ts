@@ -24,6 +24,8 @@ export interface MeetingProtectionSuiteContext {
     runExpiry: (batchSize?: number) => Promise<void>;
     /** `authorizeMeetingSocket()` of the route: why a signaling or relay socket of `user` would be refused, or `undefined`. */
     authorizeSocket: (meetingUid: string, user: any) => Promise<string | undefined>;
+    /** The route's waiting-room store (`AdmissionStore`). */
+    admissions: () => any;
 }
 
 const sealed = (text: string) => Buffer.from(`sealed:${text}`).toString("base64");
@@ -112,6 +114,35 @@ export function meetingProtectionSuite(ctx: MeetingProtectionSuiteContext): void
         ])("Refuses a protected meeting with %s (400)", async (_name, overrides) => {
             const res = await as(ctx.ownerToken()).post(ctx.baseUrl).send(body(overrides()));
             expect(res.status, JSON.stringify(res.body)).toBe(400);
+        });
+
+        it("Takes a protected meeting's waiting-room name only sealed, stores and lists it only sealed", async () => {
+            const created = await create({ waitingRoomEnabled: true });
+            const token = await tokenOf("guest@elsewhere.example");
+            const verify = (payload: any) => request(ctx.app()).post(`${ctx.baseUrl}/join/${token}/verify`).send(payload);
+
+            for (const payload of [
+                { name: "Grace" },
+                { name: "Grace", sealedName: sealed("Grace") },
+                { sealedName: "not base64!" },
+                { sealedName: "A".repeat(2052) },
+                {},
+            ]) {
+                const refused = await verify(payload);
+                expect(refused.status, JSON.stringify(payload)).toBe(400);
+            }
+
+            const filed = await verify({ sealedName: sealed("Grace") });
+            expect(filed.status, JSON.stringify(filed.body)).toBe(200);
+            expect(filed.body.requiresAdmission).toBe(true);
+            const stored = await ctx.admissions().get(created.meeting.uid, filed.body.selfUid);
+            expect(stored).toMatchObject({ sealedName: sealed("Grace"), status: "pending" });
+            expect(stored.name).toBeUndefined();
+            expect(JSON.stringify([...(await ctx.admissions().list(created.meeting.uid)).values()])).not.toContain("Grace");
+
+            const waiting = await as(ctx.ownerToken()).get(`${ctx.baseUrl}/${created.meeting.uid}/waiting`);
+            expect(waiting.status).toBe(200);
+            expect(waiting.body).toEqual([{ uid: filed.body.selfUid, sealedName: sealed("Grace"), requestedAt: expect.any(String) }]);
         });
 
         it("Gives a guest the sealed fields and certificate, and the organizer's wrap only to whoever may read the organizer's mailbox", async () => {

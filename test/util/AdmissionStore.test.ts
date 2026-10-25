@@ -109,12 +109,18 @@ describe("RedisAdmissionStore", () => {
         server.hashes.get(key)!.set("guest:status", JSON.stringify({ name: "x", requestedAt: START, status: "maybe" }));
         server.hashes.get(key)!.set("guest:name", JSON.stringify({ name: 7, requestedAt: START, status: "pending" }));
         server.hashes.get(key)!.set("guest:time", JSON.stringify({ name: "x", requestedAt: "now", status: "pending" }));
+        // Exactly one of a readable and a sealed name, and a source only as a string.
+        server.hashes.get(key)!.set("guest:both", JSON.stringify({ name: "x", sealedName: "eA==", requestedAt: START + 10, status: "pending" }));
+        server.hashes.get(key)!.set("guest:neither", JSON.stringify({ requestedAt: START + 10, status: "pending" }));
+        server.hashes.get(key)!.set("guest:source", JSON.stringify({ name: "x", requestedAt: START + 10, status: "pending", source: 7 }));
+        await store.set("m1", "guest:sealed", { sealedName: "c2VhbGVk", requestedAt: START + 10, status: "pending", source: "network" });
         now = START + ADMISSION_TTL_MS;
 
         expect(await store.get("m1", "guest:old")).toBeUndefined();
         expect(await store.get("m1", "guest:junk")).toBeUndefined();
-        expect([...(await store.list("m1")).keys()]).toEqual(["guest:live"]);
-        expect([...server.hashes.get(key)!.keys()]).toEqual(["guest:live"]);
+        expect(await store.get("m1", "guest:sealed")).toEqual({ sealedName: "c2VhbGVk", requestedAt: START + 10, status: "pending", source: "network" });
+        expect([...(await store.list("m1")).keys()].sort()).toEqual(["guest:live", "guest:sealed"]);
+        expect([...server.hashes.get(key)!.keys()].sort()).toEqual(["guest:live", "guest:sealed"]);
         expect(await store.list("m-empty")).toEqual(new Map());
         store.close();
     });

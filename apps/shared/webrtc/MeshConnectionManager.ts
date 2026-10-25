@@ -72,6 +72,12 @@
  * manager takes no action of its own beyond that - it doesn't mute a track or tear itself down, since a kicked
  * participant's actual departure is `stop()`, which the caller decides to call.
  *
+ * What is enforced is everyone else's side: when the server removes a participant (the host's `kickParticipant()`),
+ * it tells every other socket so (`SignalingChannel.onRemoved`), and this manager drops every peer of that account at
+ * once, exactly as if each had said `bye` - its `RTCPeerConnection` closed, its relay stream stopped. A removed client
+ * that ignores `kicked` and never says `bye` would otherwise keep its direct connections, which need no signaling once
+ * up. The notice comes only from the server, never as a `SignalMessage`, so no participant can remove another.
+ *
  * ## Talking stick (`talking-stick`)
  *
  * One exclusive "floor" - at most one participant may be unmuted at a time, host-assigned - but unlike presenter,
@@ -234,6 +240,7 @@ export class MeshConnectionManager {
     private readonly localTracks: Record<MediaKind, MediaStreamTrack | null>;
     private localState: ParticipantState;
     private unsubscribe: (() => void) | undefined;
+    private unsubscribeRemoved: (() => void) | undefined;
     private started = false;
     private stopped = false;
     private currentPresenterUid: string | undefined;
@@ -278,6 +285,7 @@ export class MeshConnectionManager {
         }
         this.started = true;
         this.unsubscribe = this.options.channel.onMessage((message) => this.handleMessage(message));
+        this.unsubscribeRemoved = this.options.channel.onRemoved?.((uid) => this.handleRemoved(uid));
         this.sendHello();
     }
 
@@ -295,6 +303,8 @@ export class MeshConnectionManager {
         }
         this.unsubscribe?.();
         this.unsubscribe = undefined;
+        this.unsubscribeRemoved?.();
+        this.unsubscribeRemoved = undefined;
         for (const peer of this.peers.values()) {
             this.clearTimers(peer);
             this.stopDiagnosticsPolling(peer);
@@ -560,6 +570,22 @@ export class MeshConnectionManager {
         if (this.currentPresenterUid === uid) {
             this.currentPresenterUid = undefined;
             this.emit({ type: "presenter-changed", uid: undefined });
+        }
+    }
+
+    /** The server removed account `uid` from the meeting - see this module's doc comment on host moderation. Drops
+     * every peer of that account (`uid` itself or `<uid>~...`), and any ICE candidates held for one. A notice naming this
+     * participant's own account is ignored: the server has closed its own socket, and `stop()` is the caller's to call. */
+    private handleRemoved(uid: string): void {
+        if (uid === this.options.selfUid) {
+            return;
+        }
+        const ofAccount = (peerId: string): boolean => peerId === uid || peerId.startsWith(`${uid}~`);
+        for (const peerId of [...this.orphanCandidates.keys()].filter(ofAccount)) {
+            this.orphanCandidates.delete(peerId);
+        }
+        for (const peerId of [...this.peers.keys()].filter(ofAccount)) {
+            this.handleBye(peerId);
         }
     }
 

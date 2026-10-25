@@ -101,7 +101,10 @@ The hub only ever reads `to`, and stamps `from` and `peer`. A protected meeting'
   - `aad = "rapidmx-frame-v2|" || kind u8 || keyFrame u8 (0/1) || seq u16 || timestampMs u32 || UTF-8 sender peer id`, big-endian, each
     field reduced to its wire width (seq modulo 2^16, timestamp modulo 2^32) so both ends bind what the receiver reads off the fragment
     header.
-  - `nonce = senderSalt[4] || counter[8]`. `senderSalt` is random per sender session and `counter` increments per frame.
+  - `nonce = senderSalt[8] || counter[4]` (big-endian). `senderSalt` is random per sender session and `counter` increments per frame,
+    from 1. Every participant of every session over the key's whole life seals under the one live key, so the salt is 64 bits: a
+    collision between two sessions' salts would reuse GCM nonces, leaking the XOR of their frames and the key's authentication subkey.
+    A sender that has sealed 2^32 - 1 frames in one session seals no more.
 - **Header binding.** The receiver opens a reassembled frame under the kind, key-frame flag, seq and timestamp its fragments carried, and
   the sender peer the server stamped. A relay or peer that rewrites any of them makes the frame fail to open, and it is dropped. The
   fragment numbering (`fragIndex`, `fragCount`) is not bound: it only splits the sealed bytes, so reordering or re-splitting them changes
@@ -123,6 +126,7 @@ The hub only ever reads `to`, and stamps `from` and `peer`. A protected meeting'
 | `VideoMeetingInvitee.displayName` | `null` | Real value in the invitee's `sealedFields.displayName` |
 | `VideoMeetingInvitee.email` | Readable | The server mails the invitation to it |
 | Times, visibility, status, password hash, waiting room | Readable | The server enforces them |
+| Waiting-room request name | `sealedName` only | AES-256-GCM with the live key (random IV, AAD `"rapidmx-waiting-name-v1\|" \|\| meetingUid`), base64 |
 
 - **Creating or updating** a protected meeting takes the certificate, the sealed fields and the wraps from the client. The server
   rejects a protected write that carries a readable title or name.
@@ -131,6 +135,10 @@ The hub only ever reads `to`, and stamps `from` and `peer`. A protected meeting'
   changed series keeps its meeting. A booking's minted meeting is moved the same way through `extendSingleInviteeMeetingKey()` when the
   booking is rescheduled.
 - **The guest projection** (`GET /join/:token`) returns the sealed fields and `protected: true`.
+- **The waiting room.** A guest asking to be let in (`POST /join/:token/verify`) sends the name they typed sealed with the live key, as
+  `sealedName`; the server refuses a readable `name` (400). It keeps the request in the events Redis for up to an hour with only that
+  sealed value, and lists it to the host as `sealedName` (`GET /:id/waiting`), whose call page opens it with the key it already holds.
+  A name that won't open shows as "Someone".
 - **Fragments at send time.** Every invitee link of a protected meeting is `keyed`. An invitation-sending calendar save carries the
   fragment per attendee in `invitationContent.meetingLinkSecrets: { [attendeeAddress]: "<fragment>" }`, and `MeetingInviteSender` appends
   each to that attendee's URL while composing. The fragments are never stored.

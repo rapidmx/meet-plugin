@@ -7,7 +7,15 @@ import { describe, expect, it } from "vitest";
 import { deriveLiveKey } from "@rapidmx/web-client/lib/crypto/meetingKeys.js";
 
 const randomSecret = () => crypto.getRandomValues(new Uint8Array(32));
-import { FRAME_REPLAY_WINDOW, type FrameHeader, MAX_SIGNAL_AGE_MS, MeetingCipher } from "../../../../apps/shared/crypto/MeetingCipher.js";
+import {
+    FRAME_REPLAY_WINDOW,
+    type FrameHeader,
+    MAX_FRAME_COUNTER,
+    MAX_SIGNAL_AGE_MS,
+    MeetingCipher,
+    openWaitingName,
+    sealWaitingName,
+} from "../../../../apps/shared/crypto/MeetingCipher.js";
 import type { SignalMessage } from "../../../../apps/shared/webrtc/types.js";
 
 const MEETING = "meeting-1";
@@ -130,6 +138,51 @@ describe("MeetingCipher", () => {
             expect(wire.length).toBeLessThanOrEqual(limit);
             expect(wire.length).toBeGreaterThan(limit * 0.9);
         }
+    });
+
+    it("nonces a session's frames with one 8-byte random salt and a 4-byte counter from 1, a fresh salt per session", async () => {
+        const { alice, secret } = await pair();
+        const frame = new TextEncoder().encode("picture");
+        const first = await alice.encryptFrame(hdr(2), frame);
+        const second = await alice.encryptFrame(hdr(1), frame);
+        const view = (sealed: Uint8Array) => new DataView(sealed.buffer, sealed.byteOffset, 12);
+        expect(Buffer.from(first.subarray(0, 8))).toEqual(Buffer.from(second.subarray(0, 8)));
+        expect(view(first).getUint32(8)).toBe(1);
+        expect(view(second).getUint32(8)).toBe(2);
+
+        // Another session under the same key - another participant, or the same one's next tab - draws its own salt.
+        const again = new MeetingCipher(await deriveLiveKey(secret, MEETING), MEETING, ALICE);
+        const other = await again.encryptFrame(hdr(2), frame);
+        expect(view(other).getUint32(8)).toBe(1);
+        expect(Buffer.from(other.subarray(0, 8))).not.toEqual(Buffer.from(first.subarray(0, 8)));
+    });
+
+    it("refuses to seal past the counter's last value rather than reuse a nonce, and still opens the last one sealed", async () => {
+        const { alice, bob } = await pair();
+        const frame = new TextEncoder().encode("picture");
+        (alice as any).frameCounter = MAX_FRAME_COUNTER - 1;
+        const last = await alice.encryptFrame(hdr(2), frame);
+        expect(new DataView(last.buffer, last.byteOffset, 12).getUint32(8)).toBe(MAX_FRAME_COUNTER);
+        expect(await bob.decryptFrame(hdr(2), ALICE.peer, last)).toEqual(frame);
+        await expect(alice.encryptFrame(hdr(2), frame)).rejects.toThrow(/as many relay frames/);
+        await expect(alice.encryptFrame(hdr(2), frame)).rejects.toThrow(/as many relay frames/);
+    });
+
+    it("seals a waiting-room name with the live key, bound to its meeting, opening only with that key and meeting", async () => {
+        const secret = randomSecret();
+        const key = await deriveLiveKey(secret, MEETING);
+        const sealed = await sealWaitingName(key, MEETING, "Grace Hopper");
+        expect(sealed).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
+        expect(Buffer.from(sealed, "base64").toString("latin1")).not.toContain("Grace");
+        expect(await openWaitingName(key, MEETING, sealed)).toBe("Grace Hopper");
+        // Another meeting, another key, or tampered bytes don't open.
+        expect(await openWaitingName(key, "meeting-2", sealed)).toBeUndefined();
+        expect(await openWaitingName(await deriveLiveKey(randomSecret(), MEETING), MEETING, sealed)).toBeUndefined();
+        const bytes = Buffer.from(sealed, "base64");
+        bytes[bytes.length - 1] ^= 1;
+        expect(await openWaitingName(key, MEETING, bytes.toString("base64"))).toBeUndefined();
+        // A fresh IV each time.
+        expect(await sealWaitingName(key, MEETING, "Grace Hopper")).not.toBe(sealed);
     });
 
     it("drops a replayed relay frame, one too far behind its sender's newest, and one under another salt for the same peer", async () => {

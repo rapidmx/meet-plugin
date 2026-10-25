@@ -13,13 +13,21 @@ import {
     DocDecorators,
     HttpRequest,
     ModelUtils,
+    NetUtils,
     ObjectFactory,
     RepoUtils,
     RouteDecorators,
     type AccessControlList,
 } from "@rapidrest/service-core";
 import { CalendarEventAttendeeLink, Mailbox } from "@rapidmx/restapi";
-import { type AdmissionStore, InMemoryAdmissionStore, MAX_PENDING_ADMISSIONS, RedisAdmissionStore } from "../util/AdmissionStore.js";
+import {
+    type AdmissionStore,
+    InMemoryAdmissionStore,
+    MAX_PENDING_ADMISSIONS,
+    MAX_PENDING_ADMISSIONS_PER_SOURCE,
+    type PendingAdmission,
+    RedisAdmissionStore,
+} from "../util/AdmissionStore.js";
 import { parseEffectsAssetsUrl } from "../util/EffectsUtils.js";
 import { buildIceServers, IceServerConfig } from "../util/IceServerUtils.js";
 import { hashPassword, verifyPassword as verifyPasswordHash } from "../util/PasswordUtils.js";
@@ -81,6 +89,9 @@ const SIGNALING_WS_OPTIONS = WS_ROUTE_OPTIONS_SUPPORTED ? { maxPayloadLength: SI
  * its own free-text fields with. */
 const MAX_TITLE_LENGTH = 200;
 const MAX_DISPLAY_NAME_LENGTH = 200;
+/** A protected meeting's sealed waiting-room name (`verifyPassword()`'s `sealedName`): a name of `MAX_DISPLAY_NAME_LENGTH`
+ * characters sealed and base64-encoded, with room to spare - far below the general `isSealedValue()` bound. */
+const MAX_SEALED_NAME_LENGTH = 2048;
 const MAX_EMAIL_LENGTH = 254;
 /** A generous ceiling, not a real policy - `hashPassword()`'s cost is already what actually limits how useful a
  * very long guess is to an attacker. The lower bound (1) just rejects an accidentally-empty string; this feature
@@ -262,6 +273,9 @@ export interface VideoMeetingJoinResult {
      * (`mail:videoconf:effects:assets_url`). Omitted when unset, in which case clients use the public CDNs. */
     effectsAssetsUrl?: string;
 }
+
+/** What an admission request files besides its status and time: the requester's name, readable or sealed, and their network. */
+type AdmissionRequester = Pick<PendingAdmission, "name" | "sealedName" | "source">;
 
 /**
  * Returned by `join()` in place of a `VideoMeetingJoinResult` when the meeting requires a password
@@ -493,6 +507,11 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
 
     @Config("trusted_roles", ["admin"])
     private trustedRoles: string[] = ["admin"];
+
+    /** The reverse proxies whose forwarding headers name the real client - the framework's own `trusted_proxies`, which its rate
+     * limiter reads too. `admissionSource()` uses it to tell waiting-room requests from different networks apart. */
+    @Config("trusted_proxies", [])
+    private trustedProxies: string[] | string = [];
 
     /** The `auth` config every other JWT in this deployment is signed/verified with - used by `mintGuestToken()` to
      * mint a guest's own, short-lived token with the exact same signature the framework's `JWTStrategy` verifies. */
@@ -1175,8 +1194,10 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
 
     @Summary("Removes a participant from a video meeting.")
     @Description(
-        "Revokes 'uid's grant on the meeting (revokeChannelGrant()) and closes every signaling socket they hold in it " +
-            "(on every replica the bus reaches), so they can no longer signal, chat, draw or relay media, even if their " +
+        "Revokes 'uid's grant on the meeting (revokeChannelGrant()) and closes every signaling and media relay socket " +
+            "they hold in it (on every replica the bus reaches), then tells every other participant's signaling socket " +
+            "'uid' was removed, so each drops its connections to them, direct WebRTC ones included. They can then no " +
+            "longer signal, chat, draw, send or receive media, even if their " +
             "client ignores the cooperative 'kicked' signal the host's own UI also sends over the mesh (see " +
             "SignalMessage's doc comment for why that signal alone isn't enforcement). A no-op if 'uid' holds no " +
             "grant (already removed, or never joined). Requires UPDATE on the meeting's owning mailbox. " +
@@ -1191,23 +1212,31 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     public async kick(@Param("id") id: string, @Param("uid") uid: string, @AuthUser user?: JWTUser): Promise<void> {
         const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.UPDATE);
         await this.revokeChannelGrant(meeting.uid, uid);
+        this.relayHub?.evict(meeting.uid, uid);
         this.signalingHub?.evict(meeting.uid, uid);
     }
 
     @Summary("Lists a video meeting's pending admission requests.")
     @Description(
         "Returns everyone currently waiting to be admitted (VideoMeeting.waitingRoomEnabled), oldest first - " +
-            "never anyone already admitted or denied, since the admission store drops a request once it reaches a " +
-            "final answer and the requester has polled it. Requires READ on the meeting's owning mailbox.",
+            "never anyone already admitted or denied. Each carries the 'name' they gave, or for a protected meeting " +
+            "'sealedName', which only a client holding the meeting's key opens. Requires READ on the meeting's owning mailbox.",
     )
     @Get("/:id/waiting")
-    public async listWaiting(@Param("id") id: string, @AuthUser user?: JWTUser): Promise<{ uid: string; name: string; requestedAt: string }[]> {
+    public async listWaiting(
+        @Param("id") id: string,
+        @AuthUser user?: JWTUser,
+    ): Promise<{ uid: string; name?: string; sealedName?: string; requestedAt: string }[]> {
         const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.READ);
         const pending = await this.admissions.list(meeting.uid);
         return [...pending.entries()]
             .filter(([, request]) => request.status === "pending")
             .sort(([, a], [, b]) => a.requestedAt - b.requestedAt)
-            .map(([uid, request]) => ({ uid, name: request.name, requestedAt: new Date(request.requestedAt).toISOString() }));
+            .map(([uid, request]) => ({
+                uid,
+                ...(request.sealedName !== undefined ? { sealedName: request.sealedName } : { name: request.name }),
+                requestedAt: new Date(request.requestedAt).toISOString(),
+            }));
     }
 
     @Summary("Admits a pending admission request.")
@@ -1359,7 +1388,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
 
     /**
      * Removes `uid`'s `ACLRecord` from `meetingUid`'s own `AccessControlList`, if it has one - the mirror image of
-     * `ensureChannelGrant()`, used to enforce a kick (see `kick()`, which also closes `uid`'s open signaling sockets):
+     * `ensureChannelGrant()`, used to enforce a kick (see `kick()`, which also closes `uid`'s open signaling and relay sockets):
      * once removed, `uid` can no longer open the meeting's signaling (`signal()`) or relay (`relay()`) socket, so even
      * a client that ignores the cooperative `"kicked"` signal (`SignalMessage`'s doc comment) cannot keep participating. A no-op when `uid` holds no grant (already kicked,
      * or never joined) or the meeting has no ACL, rather than an error - the caller wants "not able to rejoin",
@@ -1530,26 +1559,57 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         meeting: VM,
         publicMeeting: PublicVideoMeeting,
         user: JWTUser | undefined,
-        name: string,
+        requester: AdmissionRequester,
     ): Promise<VideoMeetingAdmissionRequiredResult> {
         const isRealCaller: boolean = !!user && !user.uid.startsWith(GUEST_UID_PREFIX);
         if (isRealCaller) {
-            await this.registerPendingAdmission(meeting.uid, user!.uid, name);
+            await this.registerPendingAdmission(meeting.uid, user!.uid, requester);
             return { meeting: publicMeeting, requiresAdmission: true, authenticated: true, selfUid: user!.uid };
         }
         const { guestUid, token, expiresAt } = this.mintGuestToken();
-        await this.registerPendingAdmission(meeting.uid, guestUid, name);
+        await this.registerPendingAdmission(meeting.uid, guestUid, requester);
         return { meeting: publicMeeting, requiresAdmission: true, authenticated: false, selfUid: guestUid, token, expiresAt: expiresAt.toISOString() };
     }
 
     /** Records (or overwrites, for a re-request under the same identity) one pending admission - 429 when the meeting already holds
-     * `MAX_PENDING_ADMISSIONS` requests of other identities. */
-    private async registerPendingAdmission(meetingUid: string, uid: string, name: string): Promise<void> {
-        const pending = await this.admissions.list(meetingUid);
-        if (!pending.has(uid) && pending.size >= MAX_PENDING_ADMISSIONS) {
-            throw new ApiError(ApiErrors.INVALID_REQUEST, 429, "Too many people are waiting to join this meeting. Try again later.");
+     * `MAX_PENDING_ADMISSIONS` requests of other identities still waiting for an answer, or `MAX_PENDING_ADMISSIONS_PER_SOURCE` of them
+     * from the requester's network. A request the host admitted or denied no longer counts, though the requester can still poll it. */
+    private async registerPendingAdmission(meetingUid: string, uid: string, requester: AdmissionRequester): Promise<void> {
+        const filed = await this.admissions.list(meetingUid);
+        if (!filed.has(uid)) {
+            const waiting: PendingAdmission[] = [...filed.values()].filter((request) => request.status === "pending");
+            if (waiting.length >= MAX_PENDING_ADMISSIONS) {
+                throw new ApiError(ApiErrors.INVALID_REQUEST, 429, "Too many people are waiting to join this meeting. Try again later.");
+            }
+            if (requester.source && waiting.filter((request) => request.source === requester.source).length >= MAX_PENDING_ADMISSIONS_PER_SOURCE) {
+                throw new ApiError(ApiErrors.INVALID_REQUEST, 429, "Too many people from your network are waiting to join this meeting. Try again later.");
+            }
         }
-        await this.admissions.set(meetingUid, uid, { name, requestedAt: Date.now(), status: "pending" });
+        await this.admissions.set(meetingUid, uid, { ...requester, requestedAt: Date.now(), status: "pending" });
+    }
+
+    /**
+     * The network `req` came from, as `PendingAdmission.source`: a digest of the client's address (`trusted_proxies`-aware, as the
+     * framework's rate limiter reads it), widened to its /64 for IPv6, where one subscriber normally holds a whole /64. Only the
+     * digest is kept, never the address. `undefined` when the request has no address.
+     */
+    private admissionSource(req: HttpRequest | undefined): string | undefined {
+        const address: string | undefined = req ? NetUtils.getClientIP(req, this.trustedProxies) : undefined;
+        if (!address) {
+            return undefined;
+        }
+        let network: string = address;
+        if (address.includes(":")) {
+            const [head, tail] = address.split("::");
+            const left: string[] = head ? head.split(":") : [];
+            const right: string[] = tail ? tail.split(":") : [];
+            const groups: string[] = tail === undefined ? left : [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right];
+            network = `${groups
+                .slice(0, 4)
+                .map((group) => parseInt(group, 16).toString(16))
+                .join(":")}::/64`;
+        }
+        return crypto.createHash("sha256").update(network).digest("base64url").slice(0, 22);
     }
 
     @Summary("Joins a video meeting.")
@@ -1596,7 +1656,8 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             "{ meeting, requiresAdmission: true, selfUid, token? } - poll GET /join/:token/status, authenticated " +
             "as that identity, to learn whether the host has responded. Otherwise completes the join exactly as " +
             "GET /join/:token would for a meeting with neither requirement - the same grant, the same response " +
-            "shape. Calling this via the organizer's own slug bypasses both checks unconditionally, matching GET " +
+            "shape. A protected meeting's waiting room takes the name only sealed with the meeting's key, as 'sealedName' " +
+            "(400 for a readable 'name'). Calling this via the organizer's own slug bypasses both checks unconditionally, matching GET " +
             "/join/:token's own posture. Rate-limited, like GET /join/:token, since this is the one endpoint a " +
             "brute-force password guesser would actually hit repeatedly.",
     )
@@ -1604,7 +1665,8 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     @Post("/join/:token/verify")
     public async verifyPassword(
         @Param("token") token: string,
-        body: { password?: string; name?: string } | undefined,
+        body: { password?: string; name?: string; sealedName?: string } | undefined,
+        @Request req: HttpRequest,
         @AuthUser user?: JWTUser,
     ): Promise<VideoMeetingJoinResult | VideoMeetingAdmissionRequiredResult> {
         const { meeting, resolvedVia } = await this.requireMeetingByToken(token);
@@ -1617,13 +1679,21 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         }
         const publicMeeting: PublicVideoMeeting = await this.buildPublicMeeting(meeting, user);
         if (!bypassed && meeting.waitingRoomEnabled) {
+            const source: string | undefined = this.admissionSource(req);
+            if (meeting.keyProtected) {
+                // Sealed like the invitee names (`specs/meeting_privacy.md` §6.1): the server never reads who is waiting.
+                if (body?.name !== undefined || !isSealedValue(body?.sealedName) || body.sealedName.length > MAX_SEALED_NAME_LENGTH) {
+                    throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "A protected meeting's waiting room takes the name only sealed: send 'sealedName', not 'name'.");
+                }
+                return this.requestAdmission(meeting, publicMeeting, user, { sealedName: body.sealedName, source });
+            }
             if (typeof body?.name !== "string" || !body.name.trim()) {
                 throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "'name' is required to request admission.");
             }
             if (body.name.trim().length > MAX_DISPLAY_NAME_LENGTH) {
                 throw new ApiError(ApiErrors.INVALID_REQUEST, 400, `'name' must be at most ${MAX_DISPLAY_NAME_LENGTH} characters.`);
             }
-            return this.requestAdmission(meeting, publicMeeting, user, body.name.trim());
+            return this.requestAdmission(meeting, publicMeeting, user, { name: body.name.trim(), source });
         }
         return this.completeJoin(meeting, publicMeeting, user);
     }

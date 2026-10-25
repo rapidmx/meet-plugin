@@ -24,7 +24,7 @@ import { relaySuite } from "../relaySuite.js";
 import { signalingSuite } from "../signalingSuite.js";
 import { personalRoomSuite } from "../personalRoomSuite.js";
 import { meetingProtectionSuite } from "../meetingProtectionSuite.js";
-import { MAX_PENDING_ADMISSIONS } from "../../../src/util/AdmissionStore.js";
+import { MAX_PENDING_ADMISSIONS, MAX_PENDING_ADMISSIONS_PER_SOURCE } from "../../../src/util/AdmissionStore.js";
 import { MeetingKeyExpiryJobSQL } from "../../../src/jobs/sql/MeetingKeyExpiryJobSQL.js";
 import { videoMeetingSecuritySuite } from "../videoMeetingSecuritySuite.js";
 
@@ -797,6 +797,76 @@ describe("Route:VideoMeetingSQL Tests", () => {
             expect((await verify({ name: "Asking again" }, strangerToken)).status).toBe(200);
         });
 
+        it("Counts only requests still waiting toward MAX_PENDING_ADMISSIONS, so denying (or admitting) a flood lets new requests in.", async () => {
+            const meeting = await createWaiting();
+            const verify = (body: any) => request(server.getApplication()).post(`${baseUrl}/join/${meeting.publicSlug}/verify`).send(body);
+            const route: any = objectFactory.getInstance("routes.VideoMeetingRoute");
+            for (let i = 0; i < MAX_PENDING_ADMISSIONS; i++) {
+                await route.admissions.set(meeting.uid, `guest:flood-${i}`, { name: "Flood", requestedAt: Date.now(), status: "pending" });
+            }
+            expect((await verify({ name: "Real guest" })).status).toBe(429);
+
+            // Each one the host denies or admits frees its place, though it is still on file for its requester to poll.
+            const denied = await authed(ownerToken).post(`${baseUrl}/${meeting.uid}/deny/${encodeURIComponent("guest:flood-0")}`);
+            expect(denied.status).toBe(204);
+            expect((await verify({ name: "Real guest" })).status).toBe(200);
+            expect((await verify({ name: "Second guest" })).status).toBe(429);
+            const admitted = await authed(ownerToken).post(`${baseUrl}/${meeting.uid}/admit/${encodeURIComponent("guest:flood-1")}`);
+            expect(admitted.status).toBe(204);
+            expect((await verify({ name: "Second guest" })).status).toBe(200);
+
+            // Once the host has denied the whole flood, only the real guests are waiting.
+            for (let i = 2; i < MAX_PENDING_ADMISSIONS; i++) {
+                await route.admissions.set(meeting.uid, `guest:flood-${i}`, { name: "Flood", requestedAt: Date.now(), status: "denied" });
+            }
+            const waiting = await authed(ownerToken).get(`${baseUrl}/${meeting.uid}/waiting`);
+            expect(waiting.body.map((w: any) => w.name)).toEqual(["Real guest", "Second guest"]);
+            // The resolved ones can still learn their answer.
+            expect((await route.admissions.get(meeting.uid, "guest:flood-0")).status).toBe("denied");
+        });
+
+        it("Refuses more than MAX_PENDING_ADMISSIONS_PER_SOURCE waiting requests from one network, but not from another.", async () => {
+            const meeting = await createWaiting();
+            const route: any = objectFactory.getInstance("routes.VideoMeetingRoute");
+            const trusted = route.trustedProxies;
+            // The test server's own loopback stands in for a reverse proxy naming each client.
+            route.trustedProxies = ["127.0.0.1", "::1"];
+            try {
+                const verify = (from: string, name = "Guest") =>
+                    request(server.getApplication()).post(`${baseUrl}/join/${meeting.publicSlug}/verify`).set("X-Forwarded-For", from).send({ name });
+                for (let i = 0; i < MAX_PENDING_ADMISSIONS_PER_SOURCE; i++) {
+                    expect((await verify("203.0.113.7")).status).toBe(200);
+                }
+                const refused = await verify("203.0.113.7");
+                expect(refused.status).toBe(429);
+                expect(refused.body.message).toBe("Too many people from your network are waiting to join this meeting. Try again later.");
+                expect((await verify("203.0.113.8")).status).toBe(200);
+
+                // An IPv6 client is one network per /64.
+                for (let i = 0; i < MAX_PENDING_ADMISSIONS_PER_SOURCE; i++) {
+                    expect((await verify(`2001:db8:1:2::${(i + 1).toString(16)}`)).status).toBe(200);
+                }
+                expect((await verify("2001:db8:1:2:ffff:ffff:ffff:1")).status).toBe(429);
+                expect((await verify("2001:db8:1:3::1")).status).toBe(200);
+
+                // Only a digest of the network is kept, never the address.
+                const stored = [...(await route.admissions.list(meeting.uid)).values()];
+                expect(new Set(stored.map((r: any) => r.source)).size).toBe(4);
+                expect(JSON.stringify(stored)).not.toContain("203.0.113");
+                expect(JSON.stringify(stored)).not.toContain("2001:db8");
+            } finally {
+                route.trustedProxies = trusted;
+            }
+        });
+
+        it("Files a request with no source when the caller's address is unknown.", async () => {
+            const meeting = await createWaiting();
+            const route: any = objectFactory.getInstance("routes.VideoMeetingRoute");
+            const result = await route.verifyPassword(meeting.publicSlug, { name: "No address" }, undefined, undefined);
+            expect(result.requiresAdmission).toBe(true);
+            expect((await route.admissions.get(meeting.uid, result.selfUid)).source).toBeUndefined();
+        });
+
         it("Files a guest's admission request, returning a usable guest token to poll with, still gated.", async () => {
             const meeting = await createWaiting();
             const result = await request(server.getApplication()).post(`${baseUrl}/join/${meeting.publicSlug}/verify`).send({ name: "Grace" });
@@ -1020,6 +1090,7 @@ describe("Route:VideoMeetingSQL Tests", () => {
         },
         authorizeSocket: async (meetingUid: string, user: any) =>
             await objectFactory.getInstance("routes.VideoMeetingRoute").authorizeMeetingSocket(meetingUid, user),
+        admissions: () => objectFactory.getInstance("routes.VideoMeetingRoute").admissions,
     });
 
     personalRoomSuite({

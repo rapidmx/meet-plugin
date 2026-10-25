@@ -15,8 +15,13 @@ import { attachRedisErrorHandler, importRedis } from "@rapidrest/service-core";
 /** How long an admission request is kept after it was filed (or filed again). */
 export const ADMISSION_TTL_MS = 60 * 60 * 1000;
 
-/** The most admission requests one meeting holds at a time - `BaseVideoMeetingRoute` refuses more. */
+/** The most requests still waiting for the host's answer one meeting holds at a time - `BaseVideoMeetingRoute` refuses more. One
+ * the host admitted or denied no longer counts, so the host can always clear a flood by denying it. */
 export const MAX_PENDING_ADMISSIONS = 100;
+
+/** The most of those waiting requests that may come from one network (`PendingAdmission.source`), so someone holding the link can't
+ * fill the whole waiting room from one address. High enough for an office joining from behind one address. */
+export const MAX_PENDING_ADMISSIONS_PER_SOURCE = 20;
 
 /** The prefix of the Redis hash a meeting's requests are kept in: `videoconf:admissions:<meetingUid>`. */
 export const REDIS_ADMISSIONS_KEY_PREFIX = "videoconf:admissions:";
@@ -24,13 +29,19 @@ export const REDIS_ADMISSIONS_KEY_PREFIX = "videoconf:admissions:";
 /** How often `InMemoryAdmissionStore` drops every expired request, at most. */
 const SWEEP_INTERVAL_MS = 60 * 1000;
 
-/** One admission request, filed under the requester's uid. */
+/** One admission request, filed under the requester's uid. It carries exactly one of `name` and `sealedName`. */
 export interface PendingAdmission {
-    /** The name the requester gave. */
-    name: string;
+    /** The name the requester gave - never for a protected meeting, whose waiting room takes it only sealed. */
+    name?: string;
+    /** A protected meeting's requester name, sealed by the meet page with the meeting's live key (`specs/meeting_privacy.md` §6.1),
+     * which the server never holds. */
+    sealedName?: string;
     /** When it was filed, in epoch milliseconds. */
     requestedAt: number;
     status: "pending" | "admitted" | "denied";
+    /** An opaque digest of the network the request came from (`BaseVideoMeetingRoute.admissionSource()`), for
+     * `MAX_PENDING_ADMISSIONS_PER_SOURCE` - never the address itself. Absent when the request's address was unknown. */
+    source?: string;
 }
 
 /** The admission requests of every meeting - see this module's doc comment. Expired requests are never returned. */
@@ -216,7 +227,8 @@ export class RedisAdmissionStore implements AdmissionStore {
         }
         if (
             !request ||
-            typeof request.name !== "string" ||
+            (typeof request.name !== "string") === (typeof request.sealedName !== "string") ||
+            (request.source !== undefined && typeof request.source !== "string") ||
             typeof request.requestedAt !== "number" ||
             !["pending", "admitted", "denied"].includes(request.status) ||
             !isLive(request, (this.options.now ?? Date.now)())

@@ -491,6 +491,32 @@ describe("SignalingHub", () => {
             expect(hub.roomCount).toBe(0);
         });
 
+        it("Tells every registered socket left in the room, once, that the uid was removed - never as a signal.", () => {
+            const a = connect(hub, "room", "alice", "alice~1");
+            const b = connect(hub, "room", "bob");
+            const c = connect(hub, "room", "carol", null);
+            const elsewhere = connect(hub, "other", "dave");
+
+            hub.evict("room", "alice");
+
+            const removed = (p: Peer): any[] => p.sock.sent.filter((d) => typeof d === "string").map((d) => JSON.parse(d)).filter((m) => m.op === "removed");
+            expect(removed(b)).toEqual([{ op: "removed", uid: "alice" }]);
+            expect(b.sock.signals).toEqual([]);
+            // Not the removed socket itself, one that has not said hello, nor another room.
+            expect(removed(a)).toEqual([]);
+            expect(removed(c)).toEqual([]);
+            expect(removed(elsewhere)).toEqual([]);
+        });
+
+        it("Ignores an eviction frame on the bus that names no uid.", () => {
+            const bus = new RecordingBus();
+            hub = new SignalingHub({ bus });
+            const a = connect(hub, "room", "alice");
+            bus.listeners.get("signal:room")!("~evict", Buffer.from(JSON.stringify({ t: "evict" }), "utf8"));
+            expect(a.sock.closed).toBeUndefined();
+            expect(a.sock.sent.filter((d) => typeof d === "string" && JSON.parse(d).op === "removed")).toEqual([]);
+        });
+
         it("Publishes the eviction on the bus, and evicts locally even when the bus delivers nothing back.", () => {
             const bus = new RecordingBus();
             hub = new SignalingHub({ bus });
@@ -535,6 +561,8 @@ describe("SignalingHub", () => {
 
             expect(a.sock.closed).toEqual({ code: 1008, reason: SIGNALING_EVICTED_REASON });
             expect(b.sock.closed).toBeUndefined();
+            // The replica holding the room tells its own sockets, once.
+            expect(b.sock.sent.filter((d) => typeof d === "string" && JSON.parse(d).op === "removed")).toEqual([JSON.stringify({ op: "removed", uid: "alice" })]);
             expect(replica1.socketCount("room")).toBe(1);
             expect(replica2.roomCount).toBe(0);
         });

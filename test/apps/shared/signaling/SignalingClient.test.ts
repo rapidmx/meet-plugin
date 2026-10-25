@@ -481,6 +481,67 @@ describe("SignalingClient incoming frames", () => {
         client.close();
     });
 
+    it("hands the server's removed notice to every onRemoved listener, never to onMessage, and stops after unsubscribing", async () => {
+        const { client, sockets } = await connected();
+        const message = vi.fn();
+        const a: string[] = [];
+        const b: string[] = [];
+        client.onMessage(message);
+        const unsubscribeA = client.onRemoved((uid) => a.push(uid));
+        client.onRemoved((uid) => b.push(uid));
+        sockets[0].message({ op: "removed", uid: "bob" });
+        expect(a).toEqual(["bob"]);
+        expect(b).toEqual(["bob"]);
+        expect(message).not.toHaveBeenCalled();
+
+        unsubscribeA();
+        sockets[0].message({ op: "removed", uid: "carol" });
+        expect(a).toEqual(["bob"]);
+        expect(b).toEqual(["bob", "carol"]);
+        client.close();
+    });
+
+    it("ignores a removed notice without a uid, and one a participant sent inside a signal", async () => {
+        const { client, sockets } = await connected();
+        const removed = vi.fn();
+        client.onRemoved(removed);
+        sockets[0].message({ op: "removed" });
+        sockets[0].message({ op: "removed", uid: "" });
+        sockets[0].message({ op: "removed", uid: 42 });
+        sockets[0].message({ op: "signal", data: { op: "removed", uid: "bob" } });
+        expect(removed).not.toHaveBeenCalled();
+        client.close();
+    });
+
+    it("reports a removed listener that throws, and still calls the rest", async () => {
+        const { client, sockets } = await connected();
+        const reportError = vi.fn();
+        vi.stubGlobal("reportError", reportError);
+        try {
+            const second = vi.fn();
+            client.onRemoved(() => {
+                throw new Error("boom");
+            });
+            client.onRemoved(second);
+            sockets[0].message({ op: "removed", uid: "bob" });
+            expect(second).toHaveBeenCalledWith("bob");
+            expect(reportError).toHaveBeenCalledWith(expect.objectContaining({ message: "boom" }));
+        } finally {
+            vi.unstubAllGlobals();
+        }
+        client.close();
+    });
+
+    it("drops its removed listeners on close", async () => {
+        const { client, sockets } = await connected();
+        const removed = vi.fn();
+        client.onRemoved(removed);
+        const onmessage = sockets[0].onmessage;
+        client.close();
+        onmessage?.({ data: JSON.stringify({ op: "removed", uid: "bob" }) });
+        expect(removed).not.toHaveBeenCalled();
+    });
+
     it("drops its listeners on close", async () => {
         const { client, sockets } = await connected();
         const listener = vi.fn();

@@ -124,6 +124,55 @@ export function signalingSuite(ctx: RelaySuiteContext): void {
             expect(await connect(uid, guest.token).closed()).toEqual({ code: 1008, reason: "Not permitted." });
         });
 
+        it("Closes a kicked participant's relay socket too, and tells everyone left that they were removed.", async () => {
+            const { uid, publicSlug } = await ctx.createPublicMeeting();
+            const guest = await joinAsGuest(publicSlug);
+            const relayUrl = (token: string): string => `ws://localhost:${ctx.wsPort()}${ctx.baseUrl}/relay/${uid}?auth_token=${token}`;
+            const relayHello = async (token: string, peer: string): Promise<RelayClient> => {
+                const client = new RelayClient(relayUrl(token));
+                clients.push(client);
+                await client.opened;
+                client.sendText({ op: "hello", v: 1, peer });
+                await client.readyMessage();
+                return client;
+            };
+            const owner = await hello(uid, ctx.ownerToken(), ctx.ownerUid());
+            const guestSignal = await hello(uid, guest.token, `${guest.uid}~tab`);
+            await owner.readyMessage();
+            await guestSignal.readyMessage();
+            const ownerRelay = await relayHello(ctx.ownerToken(), ctx.ownerUid());
+            const guestRelay = await relayHello(guest.token, `${guest.uid}~tab`);
+            // A client that ignores its removal keeps wanting the owner's media.
+            guestRelay.sendText({ op: "want", peers: [ctx.ownerUid()] });
+            ownerRelay.sendText({ op: "want", peers: [`${guest.uid}~tab`] });
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            ownerRelay.sendBinary(new Uint8Array([1]));
+            await guestRelay.binaryMessage(0);
+
+            const kicked = await request(ctx.app())
+                .post(`${ctx.baseUrl}/${uid}/kick/${encodeURIComponent(guest.uid)}`)
+                .set("Authorization", "jwt " + ctx.ownerToken());
+            expect(kicked.status).toBe(204);
+
+            expect(await guestRelay.closed()).toEqual({ code: 1008, reason: "Removed from the meeting." });
+            expect(await guestSignal.closed()).toEqual({ code: 1008, reason: "Removed from the meeting." });
+            const removed = await owner.waitFor("the removed notice", () =>
+                owner.messages.filter((m): m is string => typeof m === "string").map((m) => JSON.parse(m)).find((m) => m.op === "removed"),
+            );
+            expect(removed).toEqual({ op: "removed", uid: guest.uid });
+            // Told once, and never as a `signal` a participant could have sent.
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            expect(owner.messages.filter((m) => typeof m === "string" && JSON.parse(m).op === "removed")).toHaveLength(1);
+            expect(signalsOf(owner)).toEqual([]);
+            expect(owner.closeInfo).toBeUndefined();
+            expect(ownerRelay.closeInfo).toBeUndefined();
+            expect(ctx.route().relayHub.socketCount(uid)).toBe(1);
+            // The revoked grant keeps a new relay socket out as well.
+            const again = new RelayClient(relayUrl(guest.token));
+            clients.push(again);
+            expect(await again.closed()).toEqual({ code: 1008, reason: "Not permitted." });
+        });
+
         it("Releases the room when its last socket closes.", async () => {
             const { uid } = await ctx.createPublicMeeting();
             const hub = ctx.route().signalingHub;

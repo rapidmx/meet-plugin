@@ -141,11 +141,12 @@ export function setMeetingPassword(meetingUid: string, password: string | null):
 }
 
 /** Files an admission request for a meeting `joinMeeting()` reported `requiresAdmission` for - `password` only
- * when `meeting.hasPassword` is also set (both are checked together on this one call, never in two steps). On
+ * when `meeting.hasPassword` is also set (both are checked together on this one call, never in two steps). A protected
+ * meeting takes the name only as `sealedName` (`sealWaitingName()`), never `name`. On
  * success returns `VideoMeetingAdmissionRequiredResult` with a `selfUid` (and, for a guest, `token`) to poll with
  * via `pollAdmission()` - nothing is granted yet. Rejects with `ApiRequestError` (status `403`) for a wrong
  * password, or `400` if `meeting.hasPassword` and no password was given. */
-export function requestAdmission(token: string, body: { name: string; password?: string }): Promise<VideoMeetingAdmissionRequiredResult> {
+export function requestAdmission(token: string, body: { name?: string; sealedName?: string; password?: string }): Promise<VideoMeetingAdmissionRequiredResult> {
     return apiFetch(`/mail/video-meetings/join/${encodeURIComponent(token)}/verify`, {
         method: "POST",
         body: JSON.stringify(body),
@@ -165,10 +166,12 @@ export function pollAdmission(token: string, guestToken?: string): Promise<Video
     });
 }
 
-/** One pending admission request, as `listWaitingParticipants()` returns it. */
+/** One pending admission request, as `listWaitingParticipants()` returns it: with the `name` the requester gave, or for a protected
+ * meeting only `sealedName`, which `openWaitingNames()` (`_meetingKey.ts`) turns into `name` with the meeting's live key. */
 export interface WaitingParticipant {
     uid: string;
-    name: string;
+    name?: string;
+    sealedName?: string;
     requestedAt: string;
 }
 
@@ -201,8 +204,9 @@ export function setWaitingRoomEnabled(meetingUid: string, waitingRoomEnabled: bo
 
 /** Removes a participant from the meeting - host only, enforced server-side with the caller's own authenticated
  * session (the same mailbox-ACL check every other owner-side video-meeting route uses), not by anything the
- * client claims. Revokes `uid`'s grant on the meeting and closes every signaling socket they hold in it, so they can
- * no longer signal or relay media even if their client ignores the cooperative "kicked" signal a host's UI sends alongside this
+ * client claims. Revokes `uid`'s grant on the meeting, closes every signaling and relay socket they hold in it and
+ * tells every other participant to drop them (`SignalingChannel.onRemoved`), so they can no longer signal, send or
+ * receive media even if their client ignores the cooperative "kicked" signal a host's UI sends alongside this
  * (`MeshConnectionManager.sendKick()`). `uid` is the participant's real account uid (`MeshParticipant.uid` minus
  * its tab-scoped suffix - see `_CallView.tsx`'s `accountUidOf()`), not their tab-scoped peer id. */
 export function kickParticipant(meetingUid: string, uid: string): Promise<void> {

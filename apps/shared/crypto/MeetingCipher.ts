@@ -13,13 +13,17 @@
  * (`t`, so what the server kept from an earlier session or occurrence can't be passed off as live), and anything sent in the clear.
  * - **Relay frames** (version 2): each encoded audio packet or video picture is sealed before it is fragmented, bound to its sender
  * and to every header field a receiver acts on (kind, key-frame flag, seq, timestamp - `FrameHeader`), so a relay or peer rewriting
- * one makes the frame fail to open. A receiver drops a frame whose nonce it already accepted from that sender, or one too far behind
- * the newest (`FRAME_REPLAY_WINDOW`).
+ * one makes the frame fail to open. Its nonce is a 64-bit random salt per sending session and a 32-bit counter (`encryptFrame()`), so
+ * the many sessions that share the one long-lived live key don't collide. A receiver drops a frame whose nonce it already accepted
+ * from that sender, or one too far behind the newest (`FRAME_REPLAY_WINDOW`).
+ *
+ * - **Waiting-room names**: the name a guest gives to wait for the host (`sealWaitingName()`), which the server keeps and lists to
+ * the host only sealed (`specs/meeting_privacy.md` §6.1).
  *
  * Authenticating the signaling is also what makes direct peer-to-peer media end to end: the server can no longer swap the DTLS
  * fingerprints in the SDP it relays.
  */
-import { fromBase64Url, toBase64Url } from "@rapidmx/web-client/lib/crypto/encoding.js";
+import { fromBase64, fromBase64Url, toBase64, toBase64Url } from "@rapidmx/web-client/lib/crypto/encoding.js";
 import type { SignalMessage } from "../webrtc/types.js";
 
 /** What `SignalingClient` seals and opens with (`MeetingCipher` in a protected meeting). */
@@ -46,11 +50,19 @@ export interface FrameHeader {
 
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
-const SALT_BYTES = 4;
+/** A frame nonce's random per-session part. Every participant of every session over the key's whole life (up to years of a recurring
+ * series) seals under the one live key, so this is wide enough that no two sessions plausibly draw the same salt: with 4 bytes, a
+ * collision - and with it GCM nonce reuse, which leaks the authentication key - was likely within about 100k relay sessions. */
+const SALT_BYTES = 8;
+/** The most frames one session seals: the counter is the nonce's last 4 bytes. */
+export const MAX_FRAME_COUNTER = 0xffffffff;
 /** What a frame's AAD starts with; the version changes whenever what it binds does. */
 const FRAME_AAD_TAG = new TextEncoder().encode("rapidmx-frame-v2|");
 /** kind u8, key-frame u8, seq u16, timestamp u32 - see `frameAad()`. */
 const FRAME_AAD_HEADER_BYTES = 8;
+
+/** What a sealed waiting-room name's AAD starts with, before the meeting uid. */
+const WAITING_NAME_AAD_TAG = "rapidmx-waiting-name-v1|";
 
 /** How far from this tab's clock a signal's sealing time (`t`) may be: room for a message held while the socket reconnects, and for
  * the difference between two participants' clocks. */
@@ -83,6 +95,31 @@ function concat(...parts: Uint8Array[]): Uint8Array {
     return out;
 }
 
+/** `name`, the name a guest gives to wait in protected meeting `meetingUid`'s waiting room, sealed with its live key (AES-256-GCM
+ * under a random IV, bound to the meeting): base64 of `iv || ciphertext`, what `POST /join/:token/verify` takes as `sealedName`. */
+export async function sealWaitingName(liveKey: CryptoKey, meetingUid: string, name: string): Promise<string> {
+    const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
+    const additionalData = new TextEncoder().encode(WAITING_NAME_AAD_TAG + meetingUid);
+    const sealed = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: additionalData as BufferSource }, liveKey, new TextEncoder().encode(name));
+    return toBase64(concat(iv, new Uint8Array(sealed)));
+}
+
+/** A name `sealWaitingName()` sealed for `meetingUid`, opened - `undefined` when it doesn't open (another key or meeting, or
+ * tampered). Never rejects. */
+export async function openWaitingName(liveKey: CryptoKey, meetingUid: string, sealedName: string): Promise<string | undefined> {
+    try {
+        const bytes = fromBase64(sealedName);
+        const plain = await crypto.subtle.decrypt(
+            { name: "AES-GCM", iv: bytes.subarray(0, IV_BYTES) as BufferSource, additionalData: new TextEncoder().encode(WAITING_NAME_AAD_TAG + meetingUid) as BufferSource },
+            liveKey,
+            bytes.subarray(IV_BYTES) as BufferSource,
+        );
+        return new TextDecoder().decode(plain);
+    } catch {
+        return undefined;
+    }
+}
+
 export class MeetingCipher implements SignalCipher {
     private sent = 0;
     /** The highest `n` accepted per peer. */
@@ -90,7 +127,7 @@ export class MeetingCipher implements SignalCipher {
     private readonly signalAad: Uint8Array;
     /** This sender's frame nonces: a random salt for this session (drawn with the first frame), then a counter. */
     private frameSalt?: Uint8Array;
-    private frameCounter = 0n;
+    private frameCounter = 0;
     /** The frames accepted per sender peer - see `acceptFrameNonce()`. */
     private readonly framesAccepted = new Map<string, FrameReplayState>();
 
@@ -154,12 +191,16 @@ export class MeetingCipher implements SignalCipher {
         return sealedBytes - IV_BYTES - TAG_BYTES - SIGNAL_INNER_OVERHEAD_BYTES;
     }
 
-    /** `frame` (one encoded packet or picture) sealed to send through the relay under `header`: nonce, then ciphertext. */
+    /** `frame` (one encoded packet or picture) sealed to send through the relay under `header`: nonce (`salt[8] || counter u32`), then
+     * ciphertext. Throws, sealing nothing, once the session has sealed `MAX_FRAME_COUNTER` frames, rather than reuse a nonce. */
     public async encryptFrame(header: FrameHeader, frame: Uint8Array): Promise<Uint8Array> {
+        if (this.frameCounter >= MAX_FRAME_COUNTER) {
+            throw new Error("This session has sealed as many relay frames as its nonces allow.");
+        }
         const nonce = new Uint8Array(IV_BYTES);
         this.frameSalt ??= crypto.getRandomValues(new Uint8Array(SALT_BYTES));
         nonce.set(this.frameSalt, 0);
-        new DataView(nonce.buffer).setBigUint64(SALT_BYTES, ++this.frameCounter);
+        new DataView(nonce.buffer).setUint32(SALT_BYTES, ++this.frameCounter);
         const sealed = await crypto.subtle.encrypt(
             { name: "AES-GCM", iv: nonce, additionalData: this.frameAad(header, this.self.peer) as BufferSource },
             this.liveKey,
@@ -196,7 +237,7 @@ export class MeetingCipher implements SignalCipher {
      */
     private acceptFrameNonce(senderPeer: string, nonce: Uint8Array): boolean {
         const salt = Array.from(nonce.subarray(0, SALT_BYTES), (byte) => byte.toString(16).padStart(2, "0")).join("");
-        const counter = new DataView(nonce.buffer, nonce.byteOffset, nonce.byteLength).getBigUint64(SALT_BYTES);
+        const counter = BigInt(new DataView(nonce.buffer, nonce.byteOffset, nonce.byteLength).getUint32(SALT_BYTES));
         const state = this.framesAccepted.get(senderPeer);
         if (!state) {
             this.framesAccepted.set(senderPeer, { salt, highest: counter, seen: 1n });

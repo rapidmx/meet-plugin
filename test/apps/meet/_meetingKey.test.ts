@@ -8,7 +8,8 @@ import { describe, expect, it, vi } from "vitest";
 import { toBase64 } from "@rapidmx/web-client/lib/crypto/encoding.js";
 import { generateMeetingKey, meetingKeyFragment } from "@rapidmx/web-client/lib/crypto/meetingKeys.js";
 import { encryptForRecipients } from "@rapidmx/web-client/lib/crypto/smime.js";
-import { openProtectedMeeting, takeMeetingKey } from "../../../apps/meet/_meetingKey.js";
+import { openProtectedMeeting, openWaitingNames, takeMeetingKey, UNREADABLE_WAITING_NAME } from "../../../apps/meet/_meetingKey.js";
+import { sealWaitingName } from "../../../apps/shared/crypto/MeetingCipher.js";
 
 async function protectedMeeting(title: unknown) {
     const key = await generateMeetingKey(new Date(Date.now() + 3_600_000));
@@ -41,5 +42,23 @@ describe("_meetingKey", () => {
         expect(await openProtectedMeeting((await protectedMeeting(7)).meeting, key.pkcs8)).toBeUndefined();
         const numeric = await protectedMeeting(7);
         expect(await openProtectedMeeting(numeric.meeting, numeric.key.pkcs8)).toBeUndefined();
+    });
+
+    it("opens a protected waiting room's sealed names with the live key, leaves readable ones, and shows one that won't open as unreadable", async () => {
+        const { key, meeting } = await protectedMeeting("Board meeting");
+        const { liveKey } = (await openProtectedMeeting(meeting, key.pkcs8))!;
+        const other = (await openProtectedMeeting(meeting, key.pkcs8))!.liveKey;
+        const list = [
+            { uid: "guest:a", sealedName: await sealWaitingName(liveKey, "m1", "Grace"), requestedAt: "t1" },
+            { uid: "guest:b", name: "Readable", requestedAt: "t2" },
+            { uid: "guest:c", sealedName: await sealWaitingName(liveKey, "another-meeting", "Mallory"), requestedAt: "t3" },
+        ];
+        expect(await openWaitingNames(list, other, "m1")).toEqual([
+            { ...list[0], name: "Grace" },
+            list[1],
+            { ...list[2], name: UNREADABLE_WAITING_NAME },
+        ]);
+        // Without the key nothing sealed is readable.
+        expect((await openWaitingNames(list, undefined, "m1")).map((p) => p.name)).toEqual([UNREADABLE_WAITING_NAME, "Readable", UNREADABLE_WAITING_NAME]);
     });
 });

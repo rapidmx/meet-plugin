@@ -34,6 +34,7 @@
 import React, { useEffect } from "react";
 import type { MeshParticipant } from "../shared/webrtc/types.js";
 import type { WaitingParticipant } from "./_meetApi.js";
+import { UNREADABLE_WAITING_NAME } from "./_meetingKey.js";
 import { TRANSPORT_BADGES } from "./_ParticipantTile.js";
 import { BatonIcon, MicOffIcon, RemoveIcon } from "./_icons.js";
 
@@ -92,22 +93,22 @@ function WaitingSection({
                 <p className="text-white/70">Nobody is waiting right now.</p>
             ) : (
                 <ul>
-                    {waitingParticipants.map((p) => (
-                        <li key={p.uid} className="flex items-center gap-2 py-1">
-                            <span className="flex-1 min-w-0 truncate">{p.name}</span>
+                    {waitingParticipants.map(({ uid, name = UNREADABLE_WAITING_NAME }) => (
+                        <li key={uid} className="flex items-center gap-2 py-1">
+                            <span className="flex-1 min-w-0 truncate">{name}</span>
                             <button
                                 type="button"
                                 className="px-2 py-0.5 rounded text-xs whitespace-nowrap bg-[#a8c7fa] text-[#062e6f] hover:bg-[#8ab4f8] focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
-                                aria-label={`Admit ${p.name}`}
-                                onClick={() => onAdmit(p.uid)}
+                                aria-label={`Admit ${name}`}
+                                onClick={() => onAdmit(uid)}
                             >
                                 Admit
                             </button>
                             <button
                                 type="button"
                                 className="px-2 py-0.5 rounded text-xs whitespace-nowrap bg-white/10 hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
-                                aria-label={`Deny ${p.name}`}
-                                onClick={() => onDeny(p.uid)}
+                                aria-label={`Deny ${name}`}
+                                onClick={() => onDeny(uid)}
                             >
                                 Deny
                             </button>

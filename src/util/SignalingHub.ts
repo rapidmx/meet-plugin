@@ -285,7 +285,10 @@ export interface SignalingHubOptions {
  * / "Too many connections."). Each socket's messages are metered by two token buckets (messages and bytes); an
  * over-budget message is dropped, and a socket kept over budget for `SIGNALING_OVER_BUDGET_CLOSE_MS` is closed with
  * "Too much data.". `evict()` closes every socket of one uid in a room, on every replica the bus reaches - the host
- * removing someone takes them off the signaling channel at once, not at their next reconnect.
+ * removing someone takes them off the signaling channel at once, not at their next reconnect - and then tells every
+ * other socket of the room `{"op":"removed","uid":"<uid>"}`, once per replica. That notice comes from the server
+ * itself, never wrapped in a `signal`, so no participant can send one: a client drops every connection it holds to a
+ * peer of that uid on it, including a direct WebRTC one a removed client that ignores its own removal would keep up.
  *
  * ## Replicas
  *
@@ -358,13 +361,22 @@ export class SignalingHub {
         // eviction published as "" never left this replica). No socket's peer id can start with "~".
         this.bus.publish(signalingBusRoom(roomId), SIGNALING_EVICT_SENDER, Buffer.from(JSON.stringify(frame), "utf8"));
         // A replica with no socket in the room has no bus subscription to hear that on - including this one, possibly.
-        this.evictLocal(signalingBusRoom(roomId), uid);
+        // The rest of the room is told by the bus frame's delivery alone, so each replica tells its sockets once.
+        this.evictLocal(signalingBusRoom(roomId), uid, false);
     }
 
-    private evictLocal(busRoom: string, uid: string): void {
-        for (const conn of [...(this.rooms.get(busRoom)?.conns ?? [])]) {
+    /** Closes `uid`'s sockets in `busRoom` and, with `notify`, tells every socket left in it that `uid` was removed. */
+    private evictLocal(busRoom: string, uid: string, notify: boolean): void {
+        const room: Room | undefined = this.rooms.get(busRoom);
+        for (const conn of [...(room?.conns ?? [])]) {
             if (conn.uid === uid) {
                 conn.evict(SIGNALING_EVICTED_REASON);
+            }
+        }
+        if (notify && room && this.rooms.get(busRoom) === room) {
+            const text: string = JSON.stringify({ op: "removed", uid });
+            for (const conn of room.peers.values()) {
+                conn.send(text);
             }
         }
     }
@@ -393,7 +405,9 @@ export class SignalingHub {
             return;
         }
         if (frame?.t === "evict") {
-            this.evictLocal(busRoom, frame.uid);
+            if (typeof frame.uid === "string") {
+                this.evictLocal(busRoom, frame.uid, true);
+            }
             return;
         }
         if (frame?.t !== "m") {
