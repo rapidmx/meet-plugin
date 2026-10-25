@@ -7,6 +7,7 @@
 // the route is constructed and initialized by hand, `authorizeRelay()` is stubbed, and the sockets are fakes.
 import { EventEmitter } from "events";
 import { BaseVideoMeetingRoute } from "../../src/routes/BaseVideoMeetingRoute.js";
+import { InMemoryAdmissionStore, RedisAdmissionStore } from "../../src/util/AdmissionStore.js";
 import { RedisRelayBus } from "../../src/util/RedisRelayBus.js";
 import { InProcessRelayBus, RelayHub } from "../../src/util/RelayHub.js";
 import { SignalingHub } from "../../src/util/SignalingHub.js";
@@ -94,8 +95,20 @@ describe("BaseVideoMeetingRoute relay bus", () => {
         const r = await route({ url: "redis://events:6379" });
         expect(busOf(r)).toBeInstanceOf(RedisRelayBus);
         expect(redis.createClient).toHaveBeenCalledWith(expect.objectContaining({ url: "redis://events:6379" }));
-        expect(server.clients).toHaveLength(2);
+        // The relay's publisher and subscriber, and the waiting room's admission store.
+        expect(server.clients).toHaveLength(3);
+        expect(r.admissions).toBeInstanceOf(RedisAdmissionStore);
         expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it("Keeps the waiting room's requests in the process without Redis, and on Redis every replica shares with it.", async () => {
+        expect((await route(null)).admissions).toBeInstanceOf(InMemoryAdmissionStore);
+        const replica1 = await route({ url: "redis://events:6379" });
+        const replica2 = await route({ url: "redis://events:6379" });
+        await replica1.admissions.set("meeting-1", "guest:a", { name: "Ada", requestedAt: Date.now(), status: "pending" });
+        expect(await replica2.admissions.get("meeting-1", "guest:a")).toMatchObject({ name: "Ada", status: "pending" });
+        replica1.destroyRelayBus();
+        replica2.destroyRelayBus();
     });
 
     it("Falls back to the in-process bus, with a single warning, when the events datastore is not configured.", async () => {
@@ -130,7 +143,7 @@ describe("BaseVideoMeetingRoute relay bus", () => {
     it("Disconnects the Redis bus when destroyed, and is fine to destroy without one.", async () => {
         const r = await route({ url: "redis://events:6379" });
         r.destroyRelayBus();
-        expect(server.clients.map((c) => c.destroyed)).toEqual([true, true]);
+        expect(server.clients.map((c) => c.destroyed)).toEqual([true, true, true]);
         r.destroyRelayBus();
         (await route(null)).destroyRelayBus();
     });

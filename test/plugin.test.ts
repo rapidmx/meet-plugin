@@ -78,6 +78,7 @@ describe("plugin entry points", () => {
                 "buildBaseUrl",
                 "buildIceServers",
                 "createSingleInviteeVideoMeeting",
+                "extendSingleInviteeMeetingKey",
                 "DEFAULT_STUN_SERVERS",
                 "DEFAULT_TURN_CREDENTIAL_TTL_SECONDS",
                 "parseTurnUrls",
@@ -119,6 +120,9 @@ describe("plugin entry points", () => {
                 "isSealedValue",
                 "PROTECTED_MEETING_TITLE",
                 "validateProtection",
+                "validateKeyExpiry",
+                "isMeetingKeyGone",
+                "discardMeetingKey",
             ].sort(),
         );
     });

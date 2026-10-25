@@ -124,6 +124,9 @@ export type CollabEvent = { type: "chat"; entry: ChatEntry; history?: boolean; r
 export interface CollabChannel extends SignalingChannel {
     /** The server's per-message limit, in bytes - `SignalingClient.maxMessageBytes`. */
     readonly maxMessageBytes?: number;
+    /** The most a message's own JSON may take once sealed, in a protected meeting - `SignalingClient.maxPlainMessageBytes`. A catch-up
+     * part sized to `maxMessageBytes` alone would grow past the limit when sealed, and the server would drop it. */
+    readonly maxPlainMessageBytes?: number;
 }
 
 export interface CollabSessionOptions {
@@ -564,7 +567,8 @@ export class CollabSession {
             return;
         }
         this.syncAnswered.set(peer, this.now());
-        const budget = (this.options.channel.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES) - SYNC_ENVELOPE_BYTES;
+        const channel = this.options.channel;
+        const budget = (channel.maxPlainMessageBytes ?? channel.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES) - SYNC_ENVELOPE_BYTES;
         const encoder = new TextEncoder();
         const parts: { chat: ChatHistoryEntry[]; ops: WhiteboardOp[] }[] = [];
         let current: { chat: ChatHistoryEntry[]; ops: WhiteboardOp[] } = { chat: [], ops: [] };

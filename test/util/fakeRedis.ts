@@ -99,6 +99,39 @@ export class FakeRedisClient extends EventEmitter {
         }
     }
 
+    /** The hash commands `RedisAdmissionStore` uses, on hashes every client of this fake server shares. */
+    public async hGetAll(key: string): Promise<Record<string, string>> {
+        this.server.guard(this, "hash", true);
+        return Object.fromEntries(this.server.hashes.get(key) ?? []);
+    }
+
+    public async hGet(key: string, field: string): Promise<string | null> {
+        this.server.guard(this, "hash", true);
+        return this.server.hashes.get(key)?.get(field) ?? null;
+    }
+
+    public async hSet(key: string, field: string, value: string): Promise<number> {
+        this.server.guard(this, "hash", true);
+        let hash = this.server.hashes.get(key);
+        if (!hash) {
+            hash = new Map();
+            this.server.hashes.set(key, hash);
+        }
+        hash.set(field, value);
+        return 1;
+    }
+
+    public async hDel(key: string, field: string): Promise<number> {
+        this.server.guard(this, "hash", true);
+        return this.server.hashes.get(key)?.delete(field) ? 1 : 0;
+    }
+
+    public async pExpire(key: string, milliseconds: number): Promise<number> {
+        this.server.guard(this, "hash", true);
+        this.server.expiries.set(key, milliseconds);
+        return 1;
+    }
+
     public destroy(): void {
         if (this.server.failDestroy) {
             throw new Error("destroy failed");
@@ -116,7 +149,10 @@ export class FakeRedisServer {
     /** Whether a client is ready as soon as it connects. */
     public autoReady = true;
     /** When set, every command of that kind rejects. */
-    public fail: { publish?: boolean; subscribe?: boolean; unsubscribe?: boolean; pubSubNumSub?: boolean } = {};
+    public fail: { publish?: boolean; subscribe?: boolean; unsubscribe?: boolean; pubSubNumSub?: boolean; hash?: boolean } = {};
+    /** The hashes written with `hSet`, by key, and the last `pExpire` of each key. */
+    public readonly hashes: Map<string, Map<string, string>> = new Map();
+    public readonly expiries: Map<string, number> = new Map();
     public failConnect = false;
     public failDestroy = false;
     /** Makes `createClient()` throw on its n-th call from now (1-based), like node-redis does for an unusable URL. */
@@ -133,7 +169,7 @@ export class FakeRedisServer {
     }
 
     /** Applies the connection and failure rules to a command before it does anything. */
-    public guard(client: FakeRedisClient, kind: "publish" | "subscribe" | "unsubscribe" | "pubSubNumSub", offlineQueueMatters: boolean): void {
+    public guard(client: FakeRedisClient, kind: "publish" | "subscribe" | "unsubscribe" | "pubSubNumSub" | "hash", offlineQueueMatters: boolean): void {
         if (!client.isOpen) {
             throw new Error("The client is closed");
         }

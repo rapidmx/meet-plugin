@@ -1589,3 +1589,49 @@ step if it isn't).
   - Key material comes from web-client `lib/crypto/meetingKeys.ts`.
 - SQL gotcha: `string | null` and `Date | null` class props break TypeORM type reflection (it reads them as `Object`). Declare the class props `?: string`/`?: Date`.
 - Not done: "expire when the last participant leaves" for meetings without an end time (24h only, set client-side).
+
+## 2026-10-24: Review fixes (cross-repo adversarial review)
+
+Fixed (findings by review id):
+
+- **#1 Downgrade by the server (hardening; the verdict refuted it as an attack).** `[token].tsx` treats a link carrying `#k=` as
+  protected whatever `/join` says: a projection without a certificate or sealed title shows the "key doesn't open this meeting" error and
+  is never joined in the clear.
+- **#2 Catch-up parts in protected meetings.** `MeetingCipher.plaintextBudget()` / `SignalingClient.maxPlainMessageBytes` give the
+  plaintext that still fits once sealed and base64'd (about 3/4 of the limit minus ~1 KiB of wrapper). `CollabSession.sendSync()` sizes
+  parts from it, so the hub no longer silently drops every full part.
+- **#3 Relay key frames after a sealed send fails.** `FramePublisher` remembers a sealed frame the socket refused (or that failed to seal)
+  and reports the next delta frame of that kind as dropped (`publish()` returns false), so `VideoSender` forces a key frame. A key frame
+  is let through. Audio frames are all "key", so audio is unaffected.
+- **#4 Relay frame replay.** `decryptFrame()` pins each sender peer's salt and keeps a 128-counter sliding window
+  (`FRAME_REPLAY_WINDOW`), committed only after GCM succeeds. Header fields (seq, timestamp, key flag) are still outside the AAD (left:
+  rewriting them only disorders a stream, which dropping frames already allows); spec §5.2 says so.
+- **#5 Signaling freshness.** The sealed plaintext carries `t` (sender clock); `open()` drops a message more than `MAX_SIGNAL_AGE_MS`
+  (5 min) from the receiver's clock. Unreleased protocol, so no compatibility shim. Tradeoff: a device clock off by more than 5 minutes
+  can't take part in a protected meeting's signaling, and messages queued through a reconnect longer than that are dropped.
+- **#6 Moderation from anyone.** `MeshConnectionManager` takes `hostUid` and honors `mute-request`/`kicked`/`talking-stick` only when the
+  hub-stamped `from` is the host account (any of its tabs); none at all without a `hostUid`. `_CallView` passes it. This supersedes the
+  "cooperative, nothing on the wire identifies the host" known limit of 2026-09-30.
+- **#7 Expiry job starvation.** `MeetingKeyExpiryJob` sorts by `keyExpiresAt, uid` ascending and stops at the first unexpired meeting
+  (`batchSize`, default 200, settable for tests).
+- **#8 Moving a protected meeting's key expiry.** `PUT /:id` takes `keyExpiresAt` (ISO string): protected only (400 otherwise), future and
+  at most five years ahead (`validateKeyExpiry()`, shared with create; 400), 410 once the key has expired or been discarded, UPDATE on the
+  mailbox like the rest of `update()`. The web-client side (EventEditor sending it when the event or series end moves) is not done here.
+  Not done either: re-minting the meeting key's certificate, whose notAfter stays at the original expiry (nothing checks it today).
+- **#9 Waiting room across replicas.** Pending admissions moved behind `util/AdmissionStore.ts`: `RedisAdmissionStore` (one hash per
+  meeting on `datastores:events`, `disableOfflineQueue`, hash expiry refreshed on write) when `initRelayBus()` gets a Redis bus, else
+  `InMemoryAdmissionStore`. Each request lives `ADMISSION_TTL_MS` (1 h); the in-memory store sweeps at most once a minute. At most
+  `MAX_PENDING_ADMISSIONS` (100) requests per meeting (429 for a new identity beyond that), and `name` is capped at 200 characters (400).
+  `test/util/fakeRedis.ts` gained the hash commands.
+- **#11 Expiry deleting another meeting's links.** Key discarding moved to `discardMeetingKey()` (`util/MeetingProtectionUtils.ts`): it
+  deletes only links of the meeting's mailbox and event whose url ends in one of its own invitees' join tokens, before rotating them.
+- **#12 Key outliving cancellation / sockets after expiry.** Cancelling a protected meeting runs `discardMeetingKey()` at once.
+  `authorizeMeetingSocket()` refuses signaling and relay sockets once the key is gone (`isMeetingKeyGone()`, also used by join).
+  Left: the job still doesn't strip the per-meeting ACL grants; the socket check makes them inert for a protected meeting.
+- **#20 (meet-plugin half).** New integration function `extendSingleInviteeMeetingKey(objectFactory, meetingClass, inviteeClass,
+  mailboxUid, joinUrl, keyExpiresAt)`: finds the minted meeting by the join token at the end of `joinUrl` (ignoring `#`/`?`), and moves
+  its `keyExpiresAt` when it belongs to the mailbox, is protected, not cancelled and its key still held. Returns whether it did.
+- **#10 One failing listener stopping protected signaling.** `SignalingClient`'s sealing and opening chains catch, so one failure drops one
+  message; `deliver()` isolates each listener and hands its error to `reportError()` where the page has one.
+
+Spec `specs/meeting_privacy.md` §5.1, §5.2, §6.1 and §8 updated to match.

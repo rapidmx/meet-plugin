@@ -947,33 +947,42 @@ describe("CallView - participants drawer", () => {
 describe("CallView - host moderation signals", () => {
     it("mutes the microphone on a received mute request", async () => {
         const media = fakeLocalMedia({ micOn: true });
-        const { client } = await connected({ media });
+        const { client } = await connected({ media, hostUid: "zzz" });
         client.emit({ type: "video-meeting-signal", kind: "mute-request", from: "zzz", to: SELF });
         expect(media.toggleMic).toHaveBeenCalledTimes(1);
     });
 
     it("never unmutes via a mute request - it is already muted", async () => {
         const media = fakeLocalMedia({ micOn: false });
-        const { client } = await connected({ media });
+        const { client } = await connected({ media, hostUid: "zzz" });
         client.emit({ type: "video-meeting-signal", kind: "mute-request", from: "zzz", to: SELF });
         expect(media.toggleMic).not.toHaveBeenCalled();
     });
 
     it("ignores a mute request addressed to a different tab", async () => {
         const media = fakeLocalMedia({ micOn: true });
-        const { client } = await connected({ media });
+        const { client } = await connected({ media, hostUid: "zzz" });
         client.emit({ type: "video-meeting-signal", kind: "mute-request", from: "zzz", to: "someone-else" });
         expect(media.toggleMic).not.toHaveBeenCalled();
     });
 
     it("leaves with a distinct reason when kicked", async () => {
-        const { client, onLeave } = await connected();
+        const { client, onLeave } = await connected({ hostUid: "zzz" });
         client.emit({ type: "video-meeting-signal", kind: "kicked", from: "zzz", to: SELF });
         expect(onLeave).toHaveBeenCalledWith("The host removed you from this call.");
     });
 
+    it("ignores a kick or a mute request from anyone but the host", async () => {
+        const media = fakeLocalMedia({ micOn: true });
+        const { client, onLeave } = await connected({ media, hostUid: "zzz" });
+        client.emit({ type: "video-meeting-signal", kind: "mute-request", from: "guest:g", peer: "guest:g~1", to: SELF });
+        client.emit({ type: "video-meeting-signal", kind: "kicked", from: "guest:g", peer: "guest:g~1", to: SELF });
+        expect(media.toggleMic).not.toHaveBeenCalled();
+        expect(onLeave).not.toHaveBeenCalled();
+    });
+
     it("ignores a kick addressed to a different tab", async () => {
-        const { client, onLeave } = await connected();
+        const { client, onLeave } = await connected({ hostUid: "zzz" });
         client.emit({ type: "video-meeting-signal", kind: "kicked", from: "zzz", to: "someone-else" });
         expect(onLeave).not.toHaveBeenCalled();
     });

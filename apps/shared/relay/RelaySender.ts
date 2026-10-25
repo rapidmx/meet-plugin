@@ -37,6 +37,8 @@ export class FramePublisher {
      * announces a limit), so it is read for every frame rather than fixed at construction. */
     private sealing = 0;
     private chain: Promise<void> = Promise.resolve();
+    /** Per kind, whether a sealed frame failed to go out after `publish()` had already answered for it - see `publish()`. */
+    private readonly sealedSendFailed: Record<FrameKind, boolean> = { [KIND_AUDIO]: false, [KIND_VIDEO]: false };
 
     /** `cipher`: a protected meeting's - every frame is sealed before it is fragmented, in order. */
     constructor(
@@ -46,7 +48,10 @@ export class FramePublisher {
     ) {}
 
     /** Fragments and sends one frame, stopping at the first fragment the socket refuses (the rest could not be
-     * used without it). Returns whether the whole frame went out - or, sealing it first, whether it was queued. */
+     * used without it). Returns whether the whole frame went out - or, sealing it first, whether it was queued. A sealed frame
+     * the socket then refuses can't be reported by the call that queued it, so the next frame of that kind, unless it is a key
+     * frame, is dropped and reported instead: the receiver lost one already and waits for a key frame anyway, and the video sender
+     * asks for one. */
     publish: PublishFrame = (kind, keyFrame, data, timestampMs) => {
         const seq = this.seqs[kind];
         this.seqs[kind] = (seq + 1) % SEQ_MODULUS;
@@ -58,12 +63,22 @@ export class FramePublisher {
             this.stats[kind].framesDropped += 1;
             return false;
         }
+        if (this.sealedSendFailed[kind]) {
+            this.sealedSendFailed[kind] = false;
+            if (!keyFrame) {
+                this.stats[kind].framesDropped += 1;
+                return false;
+            }
+        }
         this.sealing += 1;
         this.chain = this.chain.then(async () => {
             try {
-                this.sendFrame(kind, keyFrame, seq, timestampMs, await cipher.encryptFrame(kind, data), true);
+                if (!this.sendFrame(kind, keyFrame, seq, timestampMs, await cipher.encryptFrame(kind, data), true)) {
+                    this.sealedSendFailed[kind] = true;
+                }
             } catch {
                 this.stats[kind].framesDropped += 1;
+                this.sealedSendFailed[kind] = true;
             } finally {
                 this.sealing -= 1;
             }

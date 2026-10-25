@@ -51,9 +51,9 @@ export type TransportMode = "auto" | "p2p" | "relay" | "websocket";
  * `MeshConnectionManager` does not depend on how its transport routes.)
  *
  * `mute-request`/`kicked`/`talking-stick` are host moderation signals (see `MeshConnectionManager`'s doc comment) -
- * purely cooperative, like every other message here: the recipient's own client decides whether to honor one, and
- * nothing on the wire distinguishes a genuine host's message from any other participant's, since this client
- * protocol has no host identity of its own to check against server-side. `kicked` is paired with the sender also
+ * honored only when the hub-stamped `from` (the sender's authenticated account, which a protected meeting's sealed
+ * sender is also checked against) is the meeting's host, `PublicVideoMeeting.hostUid`; any other participant's is
+ * ignored. Honoring one is still up to the recipient's own client - cooperative. `kicked` is paired with the sender also
  * revoking the recipient's server-side channel grant (`BaseVideoMeetingRoute.revokeChannelGrant()`), which is
  * enforced and does not depend on the recipient's client cooperating; `talking-stick` has no server-side
  * counterpart at all (see this module's doc comment on why it is purely an in-call runtime signal).

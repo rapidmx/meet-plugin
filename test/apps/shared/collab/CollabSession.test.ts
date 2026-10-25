@@ -47,7 +47,7 @@ interface Wired {
  * the sender put there), never delivers a message back to its sender, delivers one with `to` only to that peer, and
  * hands each recipient its own copy, as JSON over a socket would. `wire` records every message sent.
  */
-function network(maxMessageBytes?: number) {
+function network(maxMessageBytes?: number, maxPlainMessageBytes?: number) {
     const sockets = new Map<string, Set<(message: SignalMessage) => void>>();
     const wire: Wired[] = [];
     const deliver = (peer: string, message: SignalMessage) => {
@@ -63,6 +63,7 @@ function network(maxMessageBytes?: number) {
             sockets.set(peer, handlers);
             return {
                 maxMessageBytes,
+                maxPlainMessageBytes,
                 send(message) {
                     const stamped: SignalMessage = { ...message, from: uid, peer };
                     const json = JSON.stringify(stamped);
@@ -589,6 +590,25 @@ describe("CollabSession - catching up", () => {
         vi.advanceTimersByTime(SYNC_TIMEOUT_MS * 2);
         expect(second.net.sentBy(second.carol.peer, "collab-sync-request")).toEqual([]);
         expect(second.carol.session.board.size).toBe(0);
+    });
+
+    it("sizes a protected meeting's catch-up parts to what fits once sealed, not to the server's limit itself", () => {
+        const maxPlainMessageBytes = 6 * 1024;
+        const net = network(64 * 1024, maxPlainMessageBytes);
+        const [alice] = room(net, "Alice");
+        for (let i = 0; i < 60; i++) {
+            alice.session.sendChat(`message ${i}: ${"lorem ipsum ".repeat(15)}`);
+        }
+        const carol = join(net, "Carol");
+        alice.hello();
+        vi.advanceTimersByTime(SYNC_PACE_MS * 100);
+
+        const parts = syncParts(net, carol.peer);
+        expect(parts.length).toBeGreaterThan(1);
+        for (const part of parts) {
+            expect(part.bytes).toBeLessThanOrEqual(maxPlainMessageBytes);
+        }
+        expect(carol.session.chat).toHaveLength(60);
     });
 
     it("splits a big catch-up into parts under the server's message limit, paced SYNC_PACE_MS apart, and rebuilds it exactly", () => {

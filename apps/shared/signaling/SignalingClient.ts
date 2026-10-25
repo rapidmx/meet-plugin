@@ -131,6 +131,12 @@ export class SignalingClient implements SignalingChannel {
         return this.maxBytes;
     }
 
+    /** The most a message's own JSON may take (UTF-8 bytes) for what goes on the wire to stay within `maxMessageBytes`: smaller in a
+     * protected meeting, where sealing and base64 add about a third. */
+    get maxPlainMessageBytes(): number {
+        return this.options.cipher?.plaintextBudget?.(this.maxBytes) ?? this.maxBytes;
+    }
+
     /** Opens the socket and resolves once the server is ready; rejects when the server refuses it, or there is no way
      * to open one at all (no `WebSocket`, no origin). Calling it on a closed client rejects at once. */
     connect(): Promise<void> {
@@ -181,12 +187,15 @@ export class SignalingClient implements SignalingChannel {
         }
         const cipher = this.options.cipher;
         if (cipher) {
-            this.sealing = this.sealing.then(async () => {
-                const data = await cipher.seal(message);
-                if (!this.closed) {
-                    this.enqueue(JSON.stringify({ op: "signal", data }));
-                }
-            });
+            // A message that fails to seal is dropped alone: the chain itself never stays rejected.
+            this.sealing = this.sealing
+                .then(async () => {
+                    const data = await cipher.seal(message);
+                    if (!this.closed) {
+                        this.enqueue(JSON.stringify({ op: "signal", data }));
+                    }
+                })
+                .catch(() => undefined);
             return;
         }
         this.enqueue(JSON.stringify({ op: "signal", data: message }));
@@ -261,18 +270,26 @@ export class SignalingClient implements SignalingChannel {
                 this.deliver(data as unknown as SignalMessage);
                 return;
             }
-            this.opening = this.opening.then(async () => {
-                const message = await cipher.open(data);
-                if (message && !this.closed) {
-                    this.deliver(message);
-                }
-            });
+            this.opening = this.opening
+                .then(async () => {
+                    const message = await cipher.open(data);
+                    if (message && !this.closed) {
+                        this.deliver(message);
+                    }
+                })
+                .catch(() => undefined);
         }
     }
 
+    /** Hands `message` to every listener. One that throws neither keeps the others from it nor stops what arrives next: its error goes
+     * to the page's error reporting (`reportError()`) instead. */
     private deliver(message: SignalMessage): void {
         for (const listener of [...this.listeners]) {
-            listener(message);
+            try {
+                listener(message);
+            } catch (err) {
+                (globalThis as { reportError?: (error: unknown) => void }).reportError?.(err);
+            }
         }
     }
 

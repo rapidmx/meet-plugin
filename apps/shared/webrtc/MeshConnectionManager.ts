@@ -64,19 +64,20 @@
  *
  * ## Host moderation (`mute-request`, `kicked`)
  *
- * `sendMuteRequest()`/`sendKick()` send a point-to-point signal to one peer; the manager itself does not decide who
- * may send one - a "host" identity exists only in `_CallView.tsx`, which shows the controls that call these
- * methods to nobody but the host (see `types.ts`'s `SignalMessage` doc comment for why this is cooperative, not
- * enforced, at the signaling layer). Receiving one emits `mute-requested`/`kicked` for the caller to act on; this
+ * `sendMuteRequest()`/`sendKick()` send a point-to-point signal to one peer; `_CallView.tsx` shows the controls that
+ * call these methods to nobody but the host. A received one is honored only when its server-stamped sender account
+ * (`SignalMessage.from` as the hub stamped it) is the meeting's host (`hostUid`) - anyone else's, a guest's included,
+ * is ignored, and without a `hostUid` every one is (see `types.ts`'s `SignalMessage` doc comment on what remains
+ * cooperative). Receiving one from the host emits `mute-requested`/`kicked` for the caller to act on; this
  * manager takes no action of its own beyond that - it doesn't mute a track or tear itself down, since a kicked
  * participant's actual departure is `stop()`, which the caller decides to call.
  *
  * ## Talking stick (`talking-stick`)
  *
  * One exclusive "floor" - at most one participant may be unmuted at a time, host-assigned - but unlike presenter,
- * there is no claim race to resolve: only the host's own client ever calls `setTalkingStick()` (same trust level as
- * `sendMuteRequest()`/`sendKick()` - nothing here checks that), so the manager carries no state of its own and
- * simply relays the latest message it sees as `talking-stick-changed`, applying it to itself too via an immediate
+ * there is no claim race to resolve: only the host's own client ever calls `setTalkingStick()`, and like
+ * `mute-request`/`kicked` a received one counts only from the host's account, so the manager carries no state of its own and
+ * simply relays the latest such message it sees as `talking-stick-changed`, applying it to itself too via an immediate
  * local emit (the same "optimistic, no round trip" shape `claimPresenter()`/`releasePresenter()` use). A holder who
  * leaves the call is not specially reassigned - every other participant's existing `participant-left` handling
  * already drops them from the roster, and "the stick's holder is no longer in the call" is simply "nobody is holder
@@ -221,6 +222,9 @@ export interface MeshConnectionManagerOptions {
     diagnosticsPollMs?: number;
     /** Defaults to `"auto"` - see this module's doc comment on `setTransportMode()`. */
     transportMode?: TransportMode;
+    /** The meeting host's account uid (`PublicVideoMeeting.hostUid`): only a `mute-request`, `kicked` or `talking-stick` the hub
+     * stamped as sent by this account is acted on. Unset, none is. */
+    hostUid?: string;
 }
 
 export class MeshConnectionManager {
@@ -419,6 +423,8 @@ export class MeshConnectionManager {
         if (raw.peer !== undefined && raw.peer !== raw.from && !raw.peer.startsWith(`${raw.from}~`)) {
             return;
         }
+        // The account the hub stamped, before `from` becomes the peer id: only the host's moderation counts.
+        const fromHost = !!this.options.hostUid && raw.from === this.options.hostUid;
         const message: SignalMessage = { ...raw, from: raw.peer ?? raw.from };
         if (message.from === this.selfId) {
             return;
@@ -458,13 +464,19 @@ export class MeshConnectionManager {
                 this.handleRelayFallback(message.from);
                 return;
             case "mute-request":
-                this.emit({ type: "mute-requested" });
+                if (fromHost) {
+                    this.emit({ type: "mute-requested" });
+                }
                 return;
             case "kicked":
-                this.emit({ type: "kicked" });
+                if (fromHost) {
+                    this.emit({ type: "kicked" });
+                }
                 return;
             case "talking-stick":
-                this.emit({ type: "talking-stick-changed", active: message.active === true, holder: typeof message.holder === "string" ? message.holder : undefined });
+                if (fromHost) {
+                    this.emit({ type: "talking-stick-changed", active: message.active === true, holder: typeof message.holder === "string" ? message.holder : undefined });
+                }
                 return;
             case "restart-connection":
                 this.restartPeer(message.from);

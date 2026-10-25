@@ -129,9 +129,9 @@ export interface VideoMeeting extends BaseEntity {
 
     /** When `true`, nobody but the organizer (`organizerSlug`) joins directly - every other caller's `join()` files
      * a pending admission instead of granting anything, until the host admits or denies them
-     * (`BaseVideoMeetingRoute`'s `admit()`/`deny()`). Pending admissions are kept in memory only, per server
-     * instance (not a new persisted entity) - the same accepted tradeoff this plugin's in-process relay state
-     * already has: a restart drops anyone currently waiting, who simply requests again. `undefined`/`false`
+     * (`BaseVideoMeetingRoute`'s `admit()`/`deny()`). Pending admissions are not a persisted entity: they live on the
+     * `events` Redis every replica shares when the deployment has one, else in the process (`util/AdmissionStore.ts`),
+     * and each expires an hour after it was filed. `undefined`/`false`
      * changes nothing (the ordinary immediate-join behavior). */
     waitingRoomEnabled?: boolean;
 

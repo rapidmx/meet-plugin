@@ -75,10 +75,15 @@ The hub only ever reads `to`, and stamps `from` and `peer`. A protected meeting'
 { "to": "<peerId>"?, "e": "<base64url(iv[12] || ciphertext || tag[16])>" }
 ```
 
-- **The plaintext** is the JSON `{ "from": uid, "peer": peerId, "n": counter, "data": <the version 1 data> }`.
+- **The plaintext** is the JSON `{ "from": uid, "peer": peerId, "n": counter, "t": <sender's clock, epoch ms>, "data": <the version 1 data> }`.
 - **The AAD** is `"rapidmx-signal-v2|" + meetingUid`.
 - **Receiving.** A receiver drops a message when it fails to decrypt, or when its inner `from`/`peer` differ from the stamped ones. It
   also drops one whose `n` is not above the last `n` it accepted from that peer. `n` starts at 1 per socket and resets with a new peer id.
+- **Freshness.** A receiver also drops a message whose `t` is more than 5 minutes from its own clock. A receiver that has never heard
+  from a peer id accepts any `n`, so without this the server could replay what it kept from an earlier session or occurrence of the
+  series, under the same key, to someone who joins later. The window allows for a message held while the socket reconnects and for the
+  difference between participants' clocks.
+- **Moderation.** `mute-request`, `kicked` and `talking-stick` count only when their stamped `from` is the meeting's host account.
 - **What it covers.** Offers, answers, ICE candidates, presence, display names, moderation requests, chat, whiteboard, cursors and
   reactions all travel inside `e`.
 - **Why it matters.** Because the SDP is authenticated, the server can no longer swap DTLS fingerprints. Direct peer-to-peer media is
@@ -90,6 +95,9 @@ The hub only ever reads `to`, and stamps `from` and `peer`. A protected meeting'
 - **Encryption.** Each encoded audio packet or video picture is encrypted before it is fragmented (`apps/shared/relay/frames.ts`):
   - `frame' = nonce[12] || AES-256-GCM(live key, nonce, frame, aad = kind byte || UTF-8 sender peer id)`.
   - `nonce = senderSalt[4] || counter[8]`. `senderSalt` is random per sender session and `counter` increments per frame.
+- **Replay.** A receiver pins each sender peer's salt to the first frame that opens, and accepts a counter above the highest it has
+  accepted from that peer, or one of the 128 below it once. Anything else is a replay and is dropped. The fragment header (seq, timestamp,
+  key-frame flag) is still outside the AAD: rewriting it can only disorder a stream, which the server can do by dropping frames anyway.
 - **The flag.** Flag bit 1 (`FLAG_ENCRYPTED`) marks an encrypted frame. A protected meeting drops frames without it.
 - **Requirement.** Encryption is required: a browser that can't run WebCrypto AES-GCM over the frames can't join a protected meeting.
 
@@ -108,6 +116,10 @@ The hub only ever reads `to`, and stamps `from` and `peer`. A protected meeting'
 
 - **Creating or updating** a protected meeting takes the certificate, the sealed fields and the wraps from the client. The server
   rejects a protected write that carries a readable title or name.
+- **Moving the expiry.** `PUT /:id` takes `keyExpiresAt` for a protected meeting whose key is still held (in the future, at most five
+  years ahead; 400 otherwise, 400 for an unprotected meeting, 410 once the key has expired or been discarded), so a moved event or a
+  changed series keeps its meeting. A booking's minted meeting is moved the same way through `extendSingleInviteeMeetingKey()` when the
+  booking is rescheduled.
 - **The guest projection** (`GET /join/:token`) returns the sealed fields and `protected: true`.
 - **Fragments at send time.** Every invitee link of a protected meeting is `keyed`. An invitation-sending calendar save carries the
   fragment per attendee in `invitationContent.meetingLinkSecrets: { [attendeeAddress]: "<fragment>" }`, and `MeetingInviteSender` appends
@@ -149,10 +161,11 @@ server refuses an unprotected booking of such a host ("This booking page is out 
   - A meeting with no end time expires when its last participant leaves, or 24 hours after creation, whichever comes first.
   - A booking uses its slot's end plus the grace.
 - **What goes.** At `expiresAt`, `MeetingKeyExpiryJob` deletes the certificate, the organizer's wrap, the sealed title and names, and
-  the keyed attendee links, replaces the invitees' join tokens, and marks the meeting `keyDiscardedAt`. For a booking, the job removes the
+  the keyed attendee links of the meeting's own invitees (another meeting on the same event keeps its links), replaces the invitees' join
+  tokens, and marks the meeting `keyDiscardedAt`. Cancelling a protected meeting does the same at once. For a booking, the job removes the
   sealed fields addressed to the meeting key and keeps the host's zero-access copy.
 - **After expiry.**
-  - Joining answers `410` ("This meeting has ended.").
+  - Joining answers `410` ("This meeting has ended."), and the meeting's signaling and relay sockets are refused.
   - The guest page tells guests beforehand that access ends with the meeting.
   - A copy a guest saved while the meeting ran is outside the server's reach.
 

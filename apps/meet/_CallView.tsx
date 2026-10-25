@@ -143,9 +143,10 @@ export interface CallViewProps {
      * connection nor the TURN server can reach - `VideoMeetingJoinResult.relayEnabled`. Off when absent. */
     relayEnabled?: boolean;
     /** The meeting's host account uid (`PublicVideoMeeting.hostUid`) - this client's only source of a "host"
-     * identity, purely for deciding which controls to show (see `BaseVideoMeetingRoute`'s class doc comment on why
-     * this is a client-side-only check, not a server-enforced one for every moderation action). Absent when the
-     * server couldn't resolve one, in which case nobody sees host controls. */
+     * identity: it decides which controls to show (see `BaseVideoMeetingRoute`'s class doc comment on why
+     * this is a client-side-only check, not a server-enforced one for every moderation action), and whose mute, removal
+     * and talking-stick signals this tab honors (`MeshConnectionManagerOptions.hostUid`). Absent when the server
+     * couldn't resolve one, in which case nobody sees host controls and no moderation signal is honored. */
     hostUid?: string;
     /** `PublicVideoMeeting.forceMuteOnJoin` as of this call's own `join()` - the starting value for the host's
      * toggle in the settings modal, which this view then owns and keeps current itself (see
@@ -327,6 +328,7 @@ export default function CallView({
             localAudioTrack: media.audioTrack,
             localVideoTrack: media.videoTrack,
             localState: { audioOn: media.micOn, videoOn: media.cameraOn },
+            hostUid,
         });
         managerRef.current = manager;
         const collab = new CollabSession({ channel: client, selfUid, peerId, selfName });

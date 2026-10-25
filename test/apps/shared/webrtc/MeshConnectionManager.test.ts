@@ -1370,7 +1370,7 @@ describe("MeshConnectionManager - host moderation (mute-request, kicked)", () =>
     });
 
     it("emits mute-requested on receiving one addressed to this peer, and ignores one addressed elsewhere", () => {
-        const { manager, channel, events } = setup({ peerId: "a~tab" });
+        const { manager, channel, events } = setup({ peerId: "a~tab", hostUid: "z" });
         manager.start();
         channel.emit(signal("mute-request", "z", { to: "someone-else" }));
         expect(events).not.toContainEqual({ type: "mute-requested" });
@@ -1380,13 +1380,31 @@ describe("MeshConnectionManager - host moderation (mute-request, kicked)", () =>
     });
 
     it("emits kicked on receiving one addressed to this peer, and ignores one addressed elsewhere", () => {
-        const { manager, channel, events } = setup({ peerId: "a~tab" });
+        const { manager, channel, events } = setup({ peerId: "a~tab", hostUid: "z" });
         manager.start();
         channel.emit(signal("kicked", "z", { to: "someone-else" }));
         expect(events).not.toContainEqual({ type: "kicked" });
 
         channel.emit(signal("kicked", "z", { to: "a~tab" }));
         expect(events).toContainEqual({ type: "kicked" });
+    });
+
+    it("honors moderation only from the host's account - from any tab of it - and never from a guest or with no host known", () => {
+        const { manager, channel, events } = setup({ peerId: "a~tab", hostUid: "z" });
+        manager.start();
+        for (const kind of ["mute-request", "kicked", "talking-stick"] as const) {
+            channel.emit(signal(kind, "guest:g", { peer: "guest:g~1", to: "a~tab", active: true, holder: "guest:g~1" }));
+        }
+        expect(events).toEqual([]);
+
+        channel.emit(signal("kicked", "z", { peer: "z~laptop", to: "a~tab" }));
+        expect(events).toEqual([{ type: "kicked" }]);
+
+        const hostless = setup({ peerId: "a~tab" });
+        hostless.manager.start();
+        hostless.channel.emit(signal("mute-request", "z", { to: "a~tab" }));
+        hostless.channel.emit(signal("talking-stick", "z", { active: true, holder: "z~tab" }));
+        expect(hostless.events).toEqual([]);
     });
 });
 
@@ -1416,7 +1434,7 @@ describe("MeshConnectionManager - talking stick", () => {
     });
 
     it("emits talking-stick-changed on receiving one, trusting the latest message with no collision to resolve", () => {
-        const { manager, channel, events } = setup({ peerId: "a~tab" });
+        const { manager, channel, events } = setup({ peerId: "a~tab", hostUid: "z" });
         manager.start();
         channel.emit(signal("talking-stick", "z", { active: true, holder: "z~tab" }));
         expect(events).toContainEqual({ type: "talking-stick-changed", active: true, holder: "z~tab" });
@@ -1426,7 +1444,7 @@ describe("MeshConnectionManager - talking stick", () => {
     });
 
     it("sanitizes an untrusted message's fields rather than trusting their shape off the wire", () => {
-        const { manager, channel, events } = setup({ peerId: "a~tab" });
+        const { manager, channel, events } = setup({ peerId: "a~tab", hostUid: "z" });
         manager.start();
         channel.emit(signal("talking-stick", "z", { active: "yes" as unknown as boolean, holder: 42 as unknown as string }));
         expect(events).toContainEqual({ type: "talking-stick-changed", active: false, holder: undefined });

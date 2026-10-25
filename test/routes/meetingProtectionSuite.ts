@@ -18,7 +18,10 @@ export interface MeetingProtectionSuiteContext {
     findLinks: () => Promise<any[]>;
     /** Sets a meeting's `keyExpiresAt` straight in the datastore. */
     setKeyExpiresAt: (uid: string, at: Date) => Promise<void>;
-    runExpiry: () => Promise<void>;
+    /** Runs `MeetingKeyExpiryJob` once, looking at `batchSize` meetings at most when given. */
+    runExpiry: (batchSize?: number) => Promise<void>;
+    /** `authorizeMeetingSocket()` of the route: why a signaling or relay socket of `user` would be refused, or `undefined`. */
+    authorizeSocket: (meetingUid: string, user: any) => Promise<string | undefined>;
 }
 
 const sealed = (text: string) => Buffer.from(`sealed:${text}`).toString("base64");
@@ -157,6 +160,98 @@ export function meetingProtectionSuite(ctx: MeetingProtectionSuiteContext): void
             const created = await create();
             await ctx.runExpiry();
             expect((await ctx.findMeeting(created.meeting.uid)).meetingKeyCertificate).toBe(CERTIFICATE);
+        });
+
+        it("Reaches an expired meeting behind a whole batch of meetings holding long-lived keys", async () => {
+            const nextYear = new Date(Date.now() + 365 * 86_400_000).toISOString();
+            const longLived = [];
+            for (let i = 0; i < 3; i++) {
+                longLived.push(await create({ calendarEventUid: `series-${i}`, protection: protection({ keyExpiresAt: nextYear }) }));
+            }
+            const expired = await create({ calendarEventUid: "one-off" });
+            await ctx.setKeyExpiresAt(expired.meeting.uid, new Date(Date.now() - 1000));
+
+            await ctx.runExpiry(2);
+
+            expect((await ctx.findMeeting(expired.meeting.uid)).keyDiscardedAt).toBeTruthy();
+            for (const meeting of longLived) {
+                expect((await ctx.findMeeting(meeting.meeting.uid)).meetingKeyCertificate).toBe(CERTIFICATE);
+            }
+        });
+
+        it("Keeps the keyed links of another meeting on the same event when one meeting's key expires", async () => {
+            const replaced = await create();
+            const current = await create();
+            expect(await ctx.findLinks()).toHaveLength(4);
+            const currentTokens = (await ctx.findInvitees()).filter((invitee) => invitee.meetingUid === current.meeting.uid).map((invitee) => invitee.joinToken);
+            await ctx.setKeyExpiresAt(replaced.meeting.uid, new Date(Date.now() - 1000));
+
+            await ctx.runExpiry();
+
+            const links = await ctx.findLinks();
+            expect(links).toHaveLength(2);
+            for (const link of links) {
+                expect(currentTokens.some((token) => link.url.endsWith(`/${token}`))).toBe(true);
+            }
+            expect((await ctx.findMeeting(current.meeting.uid)).keyDiscardedAt ?? null).toBeNull();
+        });
+
+        it("Moves a protected meeting's key expiry for its moved event, and refuses a bad date, an unprotected meeting and an ended one", async () => {
+            const created = await create();
+            const url = `${ctx.baseUrl}/${created.meeting.uid}`;
+            const nextWeek = new Date(Date.now() + 7 * 86_400_000).toISOString();
+            const moved = await as(ctx.ownerToken()).put(url).send({ keyExpiresAt: nextWeek });
+            expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+            expect(new Date((await ctx.findMeeting(created.meeting.uid)).keyExpiresAt).toISOString()).toBe(nextWeek);
+            expect((await request(ctx.app()).get(`${ctx.baseUrl}/join/${await tokenOf("guest@elsewhere.example")}`)).status).toBe(200);
+
+            for (const keyExpiresAt of [new Date(Date.now() - 1000).toISOString(), new Date(Date.now() + 6 * 366 * 86_400_000).toISOString(), "soon", 7, null]) {
+                const res = await as(ctx.ownerToken()).put(url).send({ keyExpiresAt });
+                expect(res.status, String(keyExpiresAt)).toBe(400);
+            }
+            expect((await as(ctx.strangerToken()).put(url).send({ keyExpiresAt: nextWeek })).status).toBe(403);
+
+            const plain = await as(ctx.ownerToken()).post(ctx.baseUrl).send({ mailboxUid: ctx.mailboxUid(), title: "Plain", visibility: "public" });
+            const unprotected = await as(ctx.ownerToken()).put(`${ctx.baseUrl}/${plain.body.meeting.uid}`).send({ keyExpiresAt: nextWeek });
+            expect(unprotected.status).toBe(400);
+
+            await ctx.setKeyExpiresAt(created.meeting.uid, new Date(Date.now() - 1000));
+            const ended = await as(ctx.ownerToken()).put(url).send({ keyExpiresAt: nextWeek });
+            expect(ended.status).toBe(410);
+            expect(ended.body.message).toBe("This meeting has ended.");
+        });
+
+        it("Discards a protected meeting's key as soon as it is cancelled", async () => {
+            const created = await create();
+            const token = await tokenOf("guest@elsewhere.example");
+
+            const cancelled = await as(ctx.ownerToken()).put(`${ctx.baseUrl}/${created.meeting.uid}`).send({ status: "cancelled" });
+            expect(cancelled.status, JSON.stringify(cancelled.body)).toBe(200);
+            expect(cancelled.body.keyDiscardedAt).toBeTruthy();
+
+            const meeting = await ctx.findMeeting(created.meeting.uid);
+            expect(meeting.status).toBe("cancelled");
+            expect(meeting.meetingKeyCertificate ?? null).toBeNull();
+            expect(meeting.keyWraps ?? null).toBeNull();
+            expect(meeting.sealedFields ?? null).toBeNull();
+            expect(meeting.keyDiscardedAt).toBeTruthy();
+            const guest = (await ctx.findInvitees()).find((invitee) => invitee.email === "guest@elsewhere.example");
+            expect(guest.joinToken).not.toBe(token);
+            expect(guest.sealedFields ?? null).toBeNull();
+            expect(await ctx.findLinks()).toEqual([]);
+            // Cancelling again has no key left to discard.
+            expect((await as(ctx.ownerToken()).put(`${ctx.baseUrl}/${created.meeting.uid}`).send({ status: "cancelled" })).status).toBe(200);
+        });
+
+        it("Refuses a participant's signaling and relay sockets once the meeting's key has expired", async () => {
+            const created = await create();
+            const joined = await request(ctx.app()).get(`${ctx.baseUrl}/join/${await tokenOf("guest@elsewhere.example")}`);
+            expect(joined.status).toBe(200);
+            const participant = { uid: joined.body.selfUid, roles: [], scopes: [] };
+            expect(await ctx.authorizeSocket(created.meeting.uid, participant)).toBeUndefined();
+
+            await ctx.setKeyExpiresAt(created.meeting.uid, new Date(Date.now() - 1000));
+            expect(await ctx.authorizeSocket(created.meeting.uid, participant)).toBe("Not permitted.");
         });
     });
 }

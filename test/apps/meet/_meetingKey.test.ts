@@ -36,6 +36,8 @@ describe("_meetingKey", () => {
         const other = await generateMeetingKey(new Date(Date.now() + 3_600_000));
         expect(await openProtectedMeeting(meeting, other.pkcs8)).toBeUndefined();
         expect(await openProtectedMeeting({ ...meeting, sealedFields: undefined }, key.pkcs8)).toBeUndefined();
+        // An unprotected projection, which a link carrying a key must not join in the clear.
+        expect(await openProtectedMeeting({ uid: "m1", title: "Meeting" } as any, key.pkcs8)).toBeUndefined();
         expect(await openProtectedMeeting((await protectedMeeting(7)).meeting, key.pkcs8)).toBeUndefined();
         const numeric = await protectedMeeting(7);
         expect(await openProtectedMeeting(numeric.meeting, numeric.key.pkcs8)).toBeUndefined();

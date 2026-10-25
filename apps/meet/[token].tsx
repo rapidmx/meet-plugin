@@ -108,8 +108,10 @@ function MeetJoinContent({ token, branding, linkKey }: { token: string; branding
                 if (cancelled) {
                     return;
                 }
-                if (result.meeting.protected) {
-                    // A protected meeting is joined only with its key, which only the link carries.
+                // A protected meeting is joined only with its key, which only the link carries. A link carrying a key is
+                // treated as protected whatever the server says, so it can never be talked into an unencrypted call: one
+                // whose projection has no certificate or sealed title doesn't open, and isn't joined.
+                if (result.meeting.protected || linkKey) {
                     const meeting = linkKey ? await openProtectedMeeting(result.meeting, linkKey) : undefined;
                     if (cancelled) {
                         return;

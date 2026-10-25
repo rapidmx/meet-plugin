@@ -543,6 +543,17 @@ describe("MeetJoinPage for a protected meeting", () => {
         expect(await screen.findByText(/This link's key doesn't open this meeting/)).toBeInTheDocument();
     });
 
+    it("never joins in the clear with a link that carries a key, though the server answers the meeting isn't protected", async () => {
+        installMediaDevices(fakeMediaDevices({ userMediaStream: () => fakeMediaStream([fakeTrack("audio"), fakeTrack("video")]) }));
+        meetingKey.takeMeetingKey.mockReturnValue(Uint8Array.of(1));
+        meetingKey.openProtectedMeeting.mockResolvedValue(undefined);
+        mockJoin(joinResponse);
+        render(<MeetJoinPage params={{ token: "tok1" }} />);
+        expect(await screen.findByText(/This link's key doesn't open this meeting/)).toBeInTheDocument();
+        expect(meetingKey.openProtectedMeeting).toHaveBeenCalledWith(joinResponse.meeting, Uint8Array.of(1));
+        expect(screen.queryByText("Join meeting")).not.toBeInTheDocument();
+    });
+
     it("shows the real title, says the meeting is end-to-end encrypted, and hands the call its live key", async () => {
         installMediaDevices(fakeMediaDevices({ userMediaStream: () => fakeMediaStream([fakeTrack("audio"), fakeTrack("video")]) }));
         meetingKey.takeMeetingKey.mockReturnValue(Uint8Array.of(1));

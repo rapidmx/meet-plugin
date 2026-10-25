@@ -25,4 +25,15 @@ describe("MeetingKeyExpiryJob (isolated)", () => {
         expect(job.logger.warn).toHaveBeenCalledWith(expect.stringContaining("couldn't discard the key of meeting m1 yet: store down"));
         expect(job.meetingRepo.update).not.toHaveBeenCalled();
     });
+
+    it("takes the soonest expiry first, skips a meeting with none, and stops at the first that hasn't expired", async () => {
+        const job: any = new MeetingKeyExpiryJobMongo();
+        const past = new Date(Date.now() - 1000);
+        const future = new Date(Date.now() + 60_000);
+        job.meetingRepo = { find: vi.fn().mockResolvedValue([{ uid: "none" }, { uid: "m1", keyExpiresAt: past }, { uid: "m2", keyExpiresAt: future }, { uid: "m3", keyExpiresAt: past }]) };
+        const discard = vi.spyOn(job, "discard").mockResolvedValue(undefined);
+        await job.run();
+        expect(job.meetingRepo.find).toHaveBeenCalledWith(expect.objectContaining({ sort: { keyExpiresAt: "ASC", uid: "ASC" }, limit: 200 }), expect.objectContaining({ limit: 200 }));
+        expect(discard.mock.calls.map(([meeting]: any[]) => meeting.uid)).toEqual(["m1"]);
+    });
 });

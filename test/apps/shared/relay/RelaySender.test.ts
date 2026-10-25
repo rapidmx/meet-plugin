@@ -247,6 +247,37 @@ describe("FramePublisher in a protected meeting", () => {
             pending.shift()!();
             await new Promise((resolve) => setTimeout(resolve, 0));
         }
-        expect(publisher.publish(KIND_VIDEO, false, Uint8Array.of(1), 1)).toBe(true);
+        // The failures are reported on the next frame, so the video sender asks for a key frame.
+        expect(publisher.publish(KIND_VIDEO, false, Uint8Array.of(1), 1)).toBe(false);
+        expect(publisher.publish(KIND_VIDEO, false, Uint8Array.of(2), 2)).toBe(true);
+    });
+
+    it("reports a sealed frame the socket refused on that kind's next delta frame, and lets a key frame through", async () => {
+        const accepted: boolean[] = [true, false];
+        const sent: Uint8Array[] = [];
+        const cipher = { encryptFrame: async (_kind: number, frame: Uint8Array) => frame, decryptFrame: async () => undefined };
+        const publisher = new FramePublisher((m) => {
+            const ok = accepted.shift() ?? true;
+            if (ok) {
+                sent.push(m);
+            }
+            return ok;
+        }, undefined, cipher);
+        expect(publisher.publish(KIND_VIDEO, true, Uint8Array.of(1), 0)).toBe(true);
+        expect(publisher.publish(KIND_VIDEO, false, Uint8Array.of(2), 1)).toBe(true);
+        await vi.waitFor(() => expect(publisher.stats[KIND_VIDEO].framesDropped).toBe(1));
+        // Audio has its own flag.
+        expect(publisher.publish(KIND_AUDIO, true, Uint8Array.of(9), 1)).toBe(true);
+        expect(publisher.publish(KIND_VIDEO, false, Uint8Array.of(3), 2)).toBe(false);
+        expect(publisher.stats[KIND_VIDEO].framesDropped).toBe(2);
+        expect(publisher.publish(KIND_VIDEO, false, Uint8Array.of(4), 3)).toBe(true);
+
+        await vi.waitFor(() => expect(sent).toHaveLength(3));
+        accepted.push(false);
+        expect(publisher.publish(KIND_VIDEO, false, Uint8Array.of(5), 4)).toBe(true);
+        await vi.waitFor(() => expect(publisher.stats[KIND_VIDEO].framesDropped).toBe(3));
+        expect(publisher.publish(KIND_VIDEO, true, Uint8Array.of(6), 5)).toBe(true);
+        await vi.waitFor(() => expect(sent).toHaveLength(4));
+        expect(decodeFragment(sent[3])!.keyFrame).toBe(true);
     });
 });

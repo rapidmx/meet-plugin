@@ -9,8 +9,10 @@
  */
 import * as crypto from "crypto";
 import { ApiError } from "@rapidrest/core";
-import { ApiErrors } from "@rapidrest/service-core";
-import type { MeetingKeyWrap } from "../models/types.js";
+import { ApiErrors, ModelUtils, type RepoUtils } from "@rapidrest/service-core";
+import type { CalendarEventAttendeeLink } from "@rapidmx/restapi";
+import type { MeetingKeyWrap, VideoMeeting, VideoMeetingInvitee } from "../models/types.js";
+import { mintJoinToken } from "./TokenUtils.js";
 
 /** What a protected meeting's readable title holds: its real one is sealed. */
 export const PROTECTED_MEETING_TITLE = "Meeting";
@@ -53,6 +55,71 @@ export function isSealedValue(value: unknown): value is string {
     return typeof value === "string" && value.length > 0 && value.length <= MAX_SEALED_LENGTH && BASE64.test(value);
 }
 
+/** `value` as a protected meeting's key expiry at `now` (400 otherwise): an ISO 8601 date in the future, at most five years ahead. `field`
+ * names it in the error. */
+export function validateKeyExpiry(value: unknown, now: number, field: string): Date {
+    const expires: Date = new Date(typeof value === "string" ? value : NaN);
+    if (isNaN(expires.valueOf()) || expires.valueOf() <= now || expires.valueOf() > now + MAX_KEY_LIFETIME_MS) {
+        throw invalid(`'${field}' must be a date in the future, at most five years ahead.`);
+    }
+    return expires;
+}
+
+/** Whether protected `meeting`'s key is gone at `now`: discarded, or past `keyExpiresAt` though `MeetingKeyExpiryJob` hasn't run yet
+ * (`specs/meeting_privacy.md` §8). Always `false` for an unprotected meeting. */
+export function isMeetingKeyGone(meeting: VideoMeeting, now: number): boolean {
+    return !!meeting.keyProtected && (!!meeting.keyDiscardedAt || (!!meeting.keyExpiresAt && new Date(meeting.keyExpiresAt).valueOf() <= now));
+}
+
+/** The stores `discardMeetingKey()` writes to. */
+export interface MeetingKeyRepos<VM extends VideoMeeting = VideoMeeting> {
+    meetingRepo: RepoUtils<VM>;
+    inviteeRepo: RepoUtils<any>;
+    attendeeLinkRepo: RepoUtils<CalendarEventAttendeeLink>;
+}
+
+/**
+ * Discards protected `meeting`'s key (`specs/meeting_privacy.md` §8), at expiry (`MeetingKeyExpiryJob`) or when the meeting is cancelled.
+ * Deletes the keyed attendee links of the meeting's own invitees, matched by their join tokens as `BaseVideoMeetingRoute.deleteAttendeeLinks()`
+ * matches them, so another meeting on the same calendar event keeps its links. Then replaces the invitees' join tokens and clears their
+ * sealed names, and finally clears the certificate, the wraps and the sealed title and marks the meeting `keyDiscardedAt`. Returns the
+ * updated meeting. Throws whatever the store throws (a version conflict included); everything done before that is safe to do again.
+ */
+export async function discardMeetingKey<VM extends VideoMeeting>(meeting: VM, repos: MeetingKeyRepos<VM>): Promise<VM> {
+    const invitees: VideoMeetingInvitee[] = await repos.inviteeRepo.find({ meetingUid: ModelUtils.literal(meeting.uid) } as any, { ignoreACL: true });
+    if (meeting.calendarEventUid) {
+        const links: CalendarEventAttendeeLink[] = await repos.attendeeLinkRepo.find(
+            { mailboxUid: ModelUtils.literal(meeting.mailboxUid), calendarEventUid: ModelUtils.literal(meeting.calendarEventUid), keyed: true } as any,
+            { ignoreACL: true, skipCache: true },
+        );
+        for (const link of links) {
+            if (invitees.some((invitee) => link.url.endsWith(`/${invitee.joinToken}`))) {
+                await repos.attendeeLinkRepo.delete(link.uid, { ignoreACL: true });
+            }
+        }
+    }
+    for (const invitee of invitees) {
+        await repos.inviteeRepo.update(
+            { uid: invitee.uid, version: (invitee as any).version, sealedFields: null, joinToken: mintJoinToken() } as any,
+            invitee,
+            { ignoreACL: true },
+        );
+    }
+    return await repos.meetingRepo.update(
+        {
+            uid: meeting.uid,
+            version: (meeting as any).version,
+            meetingKeyCertificate: null,
+            meetingKeyFingerprint: null,
+            keyWraps: null,
+            sealedFields: null,
+            keyDiscardedAt: new Date(),
+        } as any,
+        meeting,
+        { ignoreACL: true },
+    );
+}
+
 /**
  * `body` (a create body's `protection`) validated for meeting `mailboxUid` at `now` (400 otherwise): a future `keyExpiresAt` within five
  * years; a sealed title; the meeting key's certificate, whose fingerprint is computed here; and one to `maxWraps` wraps of the key, for
@@ -62,10 +129,7 @@ export function validateProtection(body: MeetingProtectionBody, mailboxUid: stri
     if (!body || typeof body !== "object") {
         throw invalid("'protection' must be an object.");
     }
-    const expires: Date = new Date(typeof body.keyExpiresAt === "string" ? body.keyExpiresAt : NaN);
-    if (isNaN(expires.valueOf()) || expires.valueOf() <= now || expires.valueOf() > now + MAX_KEY_LIFETIME_MS) {
-        throw invalid("'protection.keyExpiresAt' must be a date in the future, at most five years ahead.");
-    }
+    const expires: Date = validateKeyExpiry(body.keyExpiresAt, now, "protection.keyExpiresAt");
     if (!isSealedValue(body.sealedFields?.title)) {
         throw invalid("'protection.sealedFields.title' must be the sealed title.");
     }

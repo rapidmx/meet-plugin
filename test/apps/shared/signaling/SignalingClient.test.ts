@@ -817,6 +817,69 @@ describe("SignalingClient with a protected meeting's cipher", () => {
         client.close();
     });
 
+    it("reports the plaintext a message may take once sealed, and the server's limit itself without a cipher", async () => {
+        const cipher = { ...fakeCipher(), plaintextBudget: vi.fn((limit: number) => limit - 100) };
+        const { client, sockets } = setup({ cipher });
+        const connected = client.connect();
+        ready(sockets[0], 20_000);
+        await connected;
+        expect(client.maxMessageBytes).toBe(20_000);
+        expect(client.maxPlainMessageBytes).toBe(19_900);
+        client.close();
+
+        const plain = setup();
+        expect(plain.client.maxPlainMessageBytes).toBe(SIGNALING_DEFAULT_MAX_MESSAGE_BYTES);
+        expect(setup({ cipher: fakeCipher() }).client.maxPlainMessageBytes).toBe(SIGNALING_DEFAULT_MAX_MESSAGE_BYTES);
+    });
+
+    it("keeps delivering after a listener throws, or a message fails to open, and keeps sending after one fails to seal", async () => {
+        const reportError = vi.fn();
+        vi.stubGlobal("reportError", reportError);
+        const cipher = fakeCipher();
+        const { client, sockets } = setup({ cipher });
+        const received: string[] = [];
+        let throwOnce = true;
+        client.onMessage((message) => {
+            if (throwOnce) {
+                throwOnce = false;
+                throw new Error("listener broke");
+            }
+            received.push(message.kind);
+        });
+        client.onMessage((message) => received.push(`second:${message.kind}`));
+        const connected = client.connect();
+        ready(sockets[0]);
+        await connected;
+        cipher.open.mockRejectedValueOnce(new Error("open broke"));
+        sockets[0].message({ op: "signal", data: { e: "chat", from: "bob" } });
+        sockets[0].message({ op: "signal", data: { e: "hello", from: "bob" } });
+        sockets[0].message({ op: "signal", data: { e: "state", from: "bob" } });
+        await vi.waitFor(() => expect(received).toEqual(["second:hello", "state", "second:state"]));
+        expect(reportError).toHaveBeenCalledWith(expect.objectContaining({ message: "listener broke" }));
+
+        cipher.seal.mockRejectedValueOnce(new Error("seal broke"));
+        client.send(signal("chat"));
+        client.send(signal("bye"));
+        await vi.waitFor(() => expect(frames(sockets[0]).slice(1)).toEqual([{ op: "signal", data: { e: "bye" } }]));
+        client.close();
+    });
+
+    it("hands a plaintext message to the other listeners when one throws, with no error reporting to give it to", async () => {
+        vi.stubGlobal("reportError", undefined);
+        const { client, sockets } = setup();
+        const received: string[] = [];
+        client.onMessage(() => {
+            throw new Error("listener broke");
+        });
+        client.onMessage((message) => received.push(message.kind));
+        const connected = client.connect();
+        ready(sockets[0]);
+        await connected;
+        expect(() => sockets[0].message({ op: "signal", data: signal("hello", "bob") })).not.toThrow();
+        expect(received).toEqual(["hello"]);
+        client.close();
+    });
+
     it("drops what was still being sealed or opened when it closed", async () => {
         const cipher = fakeCipher();
         const { client, sockets } = setup({ cipher });

@@ -3,10 +3,10 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import { ObjectDecorators } from "@rapidrest/core";
-import { ObjectFactory, RepoUtils } from "@rapidrest/service-core";
+import { ModelUtils, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
 import { buildBaseUrl } from "./PublicUrlUtils.js";
-import { mintJoinToken } from "./TokenUtils.js";
-import { type MeetingProtectionBody, PROTECTED_MEETING_TITLE, validateProtection } from "./MeetingProtectionUtils.js";
+import { JOIN_TOKEN_PATTERN, mintJoinToken } from "./TokenUtils.js";
+import { isMeetingKeyGone, type MeetingProtectionBody, PROTECTED_MEETING_TITLE, validateKeyExpiry, validateProtection } from "./MeetingProtectionUtils.js";
 import { VideoMeeting, VideoMeetingInvitee, VideoMeetingStatus, VideoMeetingVisibility } from "../models/types.js";
 const { Config } = ObjectDecorators;
 
@@ -46,7 +46,8 @@ class PublicUrlConfigHolder {
  * NOTES.md` for the calling side, and this plugin's own `.claude/NOTES.md` for the design this integration was
  * built against.
  *
- * This is deliberately the ONLY integration point this package exposes: everything else about `VideoMeeting`/
+ * This and `extendSingleInviteeMeetingKey()` (its companion for a rescheduled booking) are deliberately the ONLY
+ * integration points this package exposes: everything else about `VideoMeeting`/
  * `VideoMeetingInvitee` (routes, signaling, the join flow, cancellation, ...) is reached only through this
  * package's own HTTP API. A caller never gets a `VideoMeeting`/`VideoMeetingInvitee` instance back, only the one
  * value it actually needs, so this package stays free to change anything else about their shape without breaking
@@ -137,4 +138,50 @@ export async function createSingleInviteeVideoMeeting<VM extends VideoMeeting, V
 
     const base: string | undefined = buildBaseUrl(configHolder.publicUrl);
     return base ? `${base}/${inviteeRow.joinToken}` : undefined;
+}
+
+/**
+ * Moves the key expiry of a protected meeting `createSingleInviteeVideoMeeting()` minted - the companion `booking-plugin` calls when a
+ * protected booking is rescheduled, so the meeting's key lasts to the new slot (`specs/meeting_privacy.md` §8) instead of joining
+ * answering 410 from the old slot's end on. The meeting is found by the invitee join token `joinUrl` ends in (anything after `#` or
+ * `?` is ignored), and must belong to `mailboxUid`. Nothing is changed, and `false` returned, when the URL names no meeting of that
+ * mailbox, or names one that isn't protected, is cancelled, or whose key has already expired or been discarded.
+ *
+ * @param objectFactory The caller's own `ObjectFactory` - as for `createSingleInviteeVideoMeeting()`.
+ * @param meetingClass The concrete `VideoMeeting` model class for the caller's backend.
+ * @param inviteeClass The concrete `VideoMeetingInvitee` model class for the same backend.
+ * @param mailboxUid The mailbox the meeting was minted under.
+ * @param joinUrl The invitee's join URL `createSingleInviteeVideoMeeting()` returned.
+ * @param keyExpiresAt The new expiry: in the future and at most five years ahead (a `400` `ApiError` otherwise).
+ * @returns Whether the meeting's expiry was moved.
+ */
+export async function extendSingleInviteeMeetingKey<VM extends VideoMeeting, VMI extends VideoMeetingInvitee>(
+    objectFactory: ObjectFactory,
+    meetingClass: new (...args: any[]) => VM,
+    inviteeClass: new (...args: any[]) => VMI,
+    mailboxUid: string,
+    joinUrl: string,
+    keyExpiresAt: Date,
+): Promise<boolean> {
+    const now: number = Date.now();
+    const expires: Date = validateKeyExpiry(keyExpiresAt.toISOString(), now, "keyExpiresAt");
+    const token: string = joinUrl.split(/[#?]/)[0].split("/").pop()!;
+    if (!JOIN_TOKEN_PATTERN.test(token)) {
+        return false;
+    }
+    const meetingRepo: RepoUtils<VM> = await objectFactory.newInstance(RepoUtils, { name: meetingClass.name, args: [meetingClass] });
+    const inviteeRepo: RepoUtils<VMI> = await objectFactory.newInstance(RepoUtils, { name: inviteeClass.name, args: [inviteeClass] });
+    const [invitee]: VMI[] = await inviteeRepo.find({ joinToken: ModelUtils.literal(token) } as any, { ignoreACL: true, limit: 1, skipCache: true });
+    const meeting: VM | undefined = invitee ? await meetingRepo.findOne(invitee.meetingUid, { ignoreACL: true }) : undefined;
+    if (
+        !meeting ||
+        meeting.mailboxUid !== mailboxUid ||
+        !meeting.keyProtected ||
+        meeting.status === VideoMeetingStatus.CANCELLED ||
+        isMeetingKeyGone(meeting, now)
+    ) {
+        return false;
+    }
+    await meetingRepo.update({ uid: meeting.uid, version: (meeting as any).version, keyExpiresAt: expires } as any, meeting, { ignoreACL: true });
+    return true;
 }

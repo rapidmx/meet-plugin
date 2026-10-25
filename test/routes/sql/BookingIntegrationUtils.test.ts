@@ -15,7 +15,7 @@ import { MailboxSQL } from "@rapidmx/restapi/sql";
 import { VideoMeetingSQL } from "../../../src/models/sql/VideoMeetingSQL.js";
 import { VideoMeetingInviteeSQL } from "../../../src/models/sql/VideoMeetingInviteeSQL.js";
 import { VideoMeetingStatus, VideoMeetingVisibility } from "../../../src/models/types.js";
-import { createSingleInviteeVideoMeeting } from "../../../src/util/BookingIntegrationUtils.js";
+import { createSingleInviteeVideoMeeting, extendSingleInviteeMeetingKey } from "../../../src/util/BookingIntegrationUtils.js";
 
 const redis = vi.hoisted(() => ({ createClient: vi.fn() }));
 vi.mock("redis", () => ({ createClient: redis.createClient }));
@@ -114,6 +114,41 @@ describe("BookingIntegrationUtils:SQL Tests", () => {
         await expect(
             createSingleInviteeVideoMeeting(objectFactory, VideoMeetingSQL, VideoMeetingInviteeSQL, mailbox.uid, "x", { email: "g@example.com" }, { ...protection, keyWraps: [] }),
         ).rejects.toMatchObject({ status: 400 });
+    });
+
+    it("Moves a protected booking meeting's key expiry, found by its join URL, and nothing else's.", async () => {
+        const protection = {
+            meetingKey: { certificate: Buffer.from("cert").toString("base64") },
+            keyExpiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+            keyWraps: [{ mailboxUid: mailbox.uid, recipientFingerprint: "ab".repeat(32), kind: "meeting-key", cms: Buffer.from("wrap").toString("base64") }],
+            sealedFields: { title: Buffer.from("sealed").toString("base64") },
+        };
+        const joinUrl = (await createSingleInviteeVideoMeeting(objectFactory, VideoMeetingSQL, VideoMeetingInviteeSQL, mailbox.uid, "Intro", { email: "grace@example.com" }, protection))!;
+        const nextWeek = new Date(Date.now() + 7 * 86_400_000);
+        const findMeeting = async () => (await meetingRepo.find())[0] as any;
+        const setMeeting = async (patch: any) => {
+            const [meeting] = await meetingRepo.find();
+            await meetingRepo.update({ uid: meeting.uid }, patch);
+        };
+        const extend = (url: string, at: Date = nextWeek, mailboxUid: string = mailbox.uid) =>
+            extendSingleInviteeMeetingKey(objectFactory, VideoMeetingSQL, VideoMeetingInviteeSQL, mailboxUid, url, at);
+
+        expect(await extend(`${joinUrl}#k=secret`)).toBe(true);
+        expect(new Date((await findMeeting()).keyExpiresAt).toISOString()).toBe(nextWeek.toISOString());
+
+        expect(await extend(joinUrl, nextWeek, "another-mailbox")).toBe(false);
+        expect(await extend("https://videoconf.rapidmx-test.example.com/meet/not-a-token")).toBe(false);
+        expect(await extend(`https://videoconf.rapidmx-test.example.com/meet/${"A".repeat(43)}`)).toBe(false);
+        await expect(extend(joinUrl, new Date(Date.now() - 1000))).rejects.toMatchObject({ status: 400 });
+
+        await setMeeting({ status: VideoMeetingStatus.CANCELLED });
+        expect(await extend(joinUrl, new Date(Date.now() + 86_400_000))).toBe(false);
+        await setMeeting({ status: VideoMeetingStatus.SCHEDULED, keyDiscardedAt: new Date() });
+        expect(await extend(joinUrl, new Date(Date.now() + 86_400_000))).toBe(false);
+        expect(new Date((await findMeeting()).keyExpiresAt).toISOString()).toBe(nextWeek.toISOString());
+
+        const plainUrl = (await createSingleInviteeVideoMeeting(objectFactory, VideoMeetingSQL, VideoMeetingInviteeSQL, mailbox.uid, "Plain", { email: "ada@example.com" }))!;
+        expect(await extend(plainUrl)).toBe(false);
     });
 
     it("Falls back to a default title when given an empty/blank one.", async () => {

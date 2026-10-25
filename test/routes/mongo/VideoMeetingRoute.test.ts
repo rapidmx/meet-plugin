@@ -21,6 +21,7 @@ import { relaySuite } from "../relaySuite.js";
 import { signalingSuite } from "../signalingSuite.js";
 import { personalRoomSuite } from "../personalRoomSuite.js";
 import { meetingProtectionSuite } from "../meetingProtectionSuite.js";
+import { MAX_PENDING_ADMISSIONS } from "../../../src/util/AdmissionStore.js";
 import { MeetingKeyExpiryJobMongo } from "../../../src/jobs/mongo/MeetingKeyExpiryJobMongo.js";
 import { videoMeetingSecuritySuite } from "../videoMeetingSecuritySuite.js";
 
@@ -800,6 +801,25 @@ describe("Route:VideoMeetingMongo Tests", () => {
             expect(result.status).toBe(400);
         });
 
+        it("Rejects a name over the length limit (400), and a new request once MAX_PENDING_ADMISSIONS are filed (429) - but not one filed again.", async () => {
+            const meeting = await createWaiting();
+            const verify = (body: any, token?: string) => {
+                const req = request(server.getApplication()).post(`${baseUrl}/join/${meeting.publicSlug}/verify`);
+                return (token ? req.set("Authorization", "jwt " + token) : req).send(body);
+            };
+            expect((await verify({ name: "x".repeat(201) })).status).toBe(400);
+
+            const route: any = objectFactory.getInstance("routes.VideoMeetingRoute");
+            for (let i = 0; i < MAX_PENDING_ADMISSIONS - 1; i++) {
+                await route.admissions.set(meeting.uid, `guest:filler-${i}`, { name: "Filler", requestedAt: Date.now(), status: "pending" });
+            }
+            expect((await verify({ name: "Last one in" }, strangerToken)).status).toBe(200);
+            const refused = await verify({ name: "One too many" });
+            expect(refused.status).toBe(429);
+            expect(refused.body.message).toBe("Too many people are waiting to join this meeting. Try again later.");
+            expect((await verify({ name: "Asking again" }, strangerToken)).status).toBe(200);
+        });
+
         it("Files a guest's admission request, returning a usable guest token to poll with, still gated.", async () => {
             const meeting = await createWaiting();
             const result = await request(server.getApplication()).post(`${baseUrl}/join/${meeting.publicSlug}/verify`).send({ name: "Grace" });
@@ -1170,10 +1190,13 @@ describe("Route:VideoMeetingMongo Tests", () => {
         setKeyExpiresAt: async (uid: string, at: Date) => {
             await meetingRepo.updateOne({ uid } as any, { $set: { keyExpiresAt: at } } as any);
         },
-        runExpiry: async () => {
+        runExpiry: async (batchSize?: number) => {
             const job: any = await objectFactory.newInstance(MeetingKeyExpiryJobMongo, { name: "expiry-test" });
+            job.batchSize = batchSize ?? 200;
             await job.run();
         },
+        authorizeSocket: async (meetingUid: string, user: any) =>
+            await objectFactory.getInstance("routes.VideoMeetingRoute").authorizeMeetingSocket(meetingUid, user),
     });
 
     personalRoomSuite({

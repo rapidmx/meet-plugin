@@ -19,6 +19,7 @@ import {
     type AccessControlList,
 } from "@rapidrest/service-core";
 import { CalendarEventAttendeeLink, Mailbox } from "@rapidmx/restapi";
+import { type AdmissionStore, InMemoryAdmissionStore, MAX_PENDING_ADMISSIONS, RedisAdmissionStore } from "../util/AdmissionStore.js";
 import { parseEffectsAssetsUrl } from "../util/EffectsUtils.js";
 import { buildIceServers, IceServerConfig } from "../util/IceServerUtils.js";
 import { hashPassword, verifyPassword as verifyPasswordHash } from "../util/PasswordUtils.js";
@@ -37,7 +38,16 @@ import {
 import { stripTrustedRoles } from "../util/RouteAccessUtils.js";
 import { SIGNALING_LARGE_PAYLOAD_BYTES, SIGNALING_MAX_PAYLOAD_BYTES, SignalingHub } from "../util/SignalingHub.js";
 import { JOIN_TOKEN_PATTERN, PUBLIC_SLUG_PATTERN, mintJoinToken, mintPublicSlug } from "../util/TokenUtils.js";
-import { isSealedValue, type MeetingProtection, type MeetingProtectionBody, PROTECTED_MEETING_TITLE, validateProtection } from "../util/MeetingProtectionUtils.js";
+import {
+    discardMeetingKey,
+    isMeetingKeyGone,
+    isSealedValue,
+    type MeetingProtection,
+    type MeetingProtectionBody,
+    PROTECTED_MEETING_TITLE,
+    validateKeyExpiry,
+    validateProtection,
+} from "../util/MeetingProtectionUtils.js";
 import { type MeetingKeyWrap, VideoMeeting, VideoMeetingInvitee, VideoMeetingStatus, VideoMeetingVisibility } from "../models/types.js";
 const { Config, Destroy, Init, Inject, Logger } = ObjectDecorators;
 const { Description, Summary } = DocDecorators;
@@ -537,14 +547,14 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
      * by `initRelayBus()`. Its socket caps are per server replica. */
     private signalingHub?: SignalingHub;
 
-    /** Every meeting's pending admission requests (`VideoMeeting.waitingRoomEnabled`), keyed by meeting uid then by
-     * the requester's own uid (real or freshly minted guest). In-memory and per server instance only - the same
-     * accepted tradeoff `relayHub` above already has: a restart drops anyone currently waiting, who simply
-     * requests again (see `VideoMeeting.waitingRoomEnabled`'s own doc comment). A request is removed once it
-     * resolves to a final answer and that answer has been polled (`pollAdmission()`) - an abandoned request (the
-     * requester never polls again) is never otherwise cleaned up; there is no GC job, matching this codebase's
-     * existing precedent for other never-expiring state (`Booking.manageToken`, `VideoMeetingInvitee.joinToken`). */
-    private pendingAdmissions = new Map<string, Map<string, { name: string; requestedAt: Date; status: "pending" | "admitted" | "denied" }>>();
+    /** Every meeting's admission requests (`VideoMeeting.waitingRoomEnabled`), keyed by meeting uid then by the requester's own uid
+     * (real or freshly minted guest) - see `util/AdmissionStore.ts`. Shared by every replica on the `events` Redis when
+     * `initRelayBus()` finds one, else in this process. A request is removed once it resolves to a final answer and that answer has
+     * been polled (`pollAdmission()`), and an abandoned one expires after `ADMISSION_TTL_MS`. */
+    private admissions: AdmissionStore = new InMemoryAdmissionStore();
+
+    /** `admissions` when it is on Redis, to close with the route. */
+    private redisAdmissions?: RedisAdmissionStore;
 
     /**
      * Exposes the `@Model(...)`-supplied entity class as an instance property so `@Transactional()` on
@@ -589,6 +599,11 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
                 await redisBus.connect();
                 this.relayBus = redisBus;
                 bus = redisBus;
+                // The waiting room's requests cross replicas on the same Redis.
+                const admissions = new RedisAdmissionStore({ url, logger: this.logger });
+                await admissions.connect();
+                this.redisAdmissions = admissions;
+                this.admissions = admissions;
             } catch (err: any) {
                 this.logger.error(
                     "Could not create the video meeting relay's Redis bus, so signaling and relay only work between participants connected to this " +
@@ -615,6 +630,8 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     public destroyRelayBus(): void {
         this.relayBus?.close();
         this.relayBus = undefined;
+        this.redisAdmissions?.close();
+        this.redisAdmissions = undefined;
     }
 
     /** Builds the model repositories once, before the route serves anything. */
@@ -1021,11 +1038,14 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         return this.withJoinUrls(meeting);
     }
 
-    @Summary("Updates a video meeting's title, force-mute-on-join/password/waiting-room settings, or cancels it.")
+    @Summary("Updates a video meeting's title, force-mute-on-join/password/waiting-room settings or key expiry, or cancels it.")
     @Description(
         "Deliberately minimal for Phase 1: only 'title', 'forceMuteOnJoin', 'password', 'waitingRoomEnabled' and " +
             "cancellation ('status': 'cancelled') may be changed. 'password' hashes before storage; 'null' " +
-            "removes password protection entirely, a non-empty string sets/replaces it. Requires UPDATE on the " +
+            "removes password protection entirely, a non-empty string sets/replaces it. A protected meeting takes its title only " +
+            "sealed ('sealedFields.title'), and a new 'keyExpiresAt' (ISO 8601, in the future and at most five years ahead) when the " +
+            "event it belongs to moves or its series changes - 400 for an unprotected meeting, 410 once its key has expired or been " +
+            "discarded. Cancelling a protected meeting discards its key at once (specs/meeting_privacy.md §8). Requires UPDATE on the " +
             "meeting's owning mailbox. The response never carries the stored password hash, same as every other " +
             "response that includes a meeting.",
     )
@@ -1033,7 +1053,15 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     public async update(
         @Param("id") id: string,
         body:
-            | { title?: string; sealedFields?: { title?: unknown }; status?: string; forceMuteOnJoin?: boolean; password?: string | null; waitingRoomEnabled?: boolean }
+            | {
+                  title?: string;
+                  sealedFields?: { title?: unknown };
+                  keyExpiresAt?: unknown;
+                  status?: string;
+                  forceMuteOnJoin?: boolean;
+                  password?: string | null;
+                  waitingRoomEnabled?: boolean;
+              }
             | undefined,
         @AuthUser user?: JWTUser,
     ): Promise<VM> {
@@ -1047,6 +1075,15 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
                 throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "'sealedFields.title' is the sealed title of a protected meeting.");
             }
             patch.sealedFields = { ...(meeting.sealedFields ?? {}), title: body.sealedFields.title };
+        }
+        if (body?.keyExpiresAt !== undefined) {
+            if (!meeting.keyProtected) {
+                throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "'keyExpiresAt' is the key expiry of a protected meeting.");
+            }
+            if (isMeetingKeyGone(meeting, Date.now())) {
+                throw new ApiError(ApiErrors.NOT_FOUND, 410, "This meeting has ended.");
+            }
+            patch.keyExpiresAt = validateKeyExpiry(body.keyExpiresAt, Date.now(), "keyExpiresAt");
         }
         if (body?.title !== undefined) {
             if (typeof body.title !== "string" || !body.title.trim() || body.title.trim().length > MAX_TITLE_LENGTH) {
@@ -1091,18 +1128,23 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             patch.forceMuteOnJoin === undefined &&
             patch.passwordHash === undefined &&
             patch.waitingRoomEnabled === undefined &&
-            patch.sealedFields === undefined
+            patch.sealedFields === undefined &&
+            patch.keyExpiresAt === undefined
         ) {
             throw new ApiError(
                 ApiErrors.INVALID_REQUEST,
                 400,
-                "Nothing to update: supply 'title' (or, for a protected meeting, 'sealedFields.title'), 'forceMuteOnJoin', 'password', 'waitingRoomEnabled' and/or 'status'.",
+                "Nothing to update: supply 'title' (or, for a protected meeting, 'sealedFields.title' or 'keyExpiresAt'), 'forceMuteOnJoin', 'password', 'waitingRoomEnabled' and/or 'status'.",
             );
         }
         const strippedUser: JWTUser | undefined = stripTrustedRoles(user, this.trustedRoles);
-        const updated: VM = await this.meetingRepo!.update(patch as any, meeting, { user: strippedUser, ignoreACL: true });
+        let updated: VM = await this.meetingRepo!.update(patch as any, meeting, { user: strippedUser, ignoreACL: true });
         if (patch.status === VideoMeetingStatus.CANCELLED) {
             await this.deleteAttendeeLinks(meeting, await this.findInvitees(meeting), strippedUser);
+            // A cancelled protected meeting's key goes with it (specs/meeting_privacy.md §8), not only at its expiry.
+            if (updated.keyProtected && !updated.keyDiscardedAt) {
+                updated = await discardMeetingKey(updated, { meetingRepo: this.meetingRepo!, inviteeRepo: this.inviteeRepo!, attendeeLinkRepo: this.attendeeLinkRepo! });
+            }
         }
         return this.withoutPasswordHash(updated);
     }
@@ -1150,20 +1192,17 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     @Summary("Lists a video meeting's pending admission requests.")
     @Description(
         "Returns everyone currently waiting to be admitted (VideoMeeting.waitingRoomEnabled), oldest first - " +
-            "never anyone already admitted or denied, since pendingAdmissions drops a request once it reaches a " +
+            "never anyone already admitted or denied, since the admission store drops a request once it reaches a " +
             "final answer and the requester has polled it. Requires READ on the meeting's owning mailbox.",
     )
     @Get("/:id/waiting")
     public async listWaiting(@Param("id") id: string, @AuthUser user?: JWTUser): Promise<{ uid: string; name: string; requestedAt: string }[]> {
         const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.READ);
-        const pending = this.pendingAdmissions.get(meeting.uid);
-        if (!pending) {
-            return [];
-        }
+        const pending = await this.admissions.list(meeting.uid);
         return [...pending.entries()]
             .filter(([, request]) => request.status === "pending")
-            .sort(([, a], [, b]) => a.requestedAt.getTime() - b.requestedAt.getTime())
-            .map(([uid, request]) => ({ uid, name: request.name, requestedAt: request.requestedAt.toISOString() }));
+            .sort(([, a], [, b]) => a.requestedAt - b.requestedAt)
+            .map(([uid, request]) => ({ uid, name: request.name, requestedAt: new Date(request.requestedAt).toISOString() }));
     }
 
     @Summary("Admits a pending admission request.")
@@ -1176,9 +1215,9 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     @Post("/:id/admit/:uid")
     public async admit(@Param("id") id: string, @Param("uid") uid: string, @AuthUser user?: JWTUser): Promise<void> {
         const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.UPDATE);
-        const request = this.pendingAdmissions.get(meeting.uid)?.get(uid);
+        const request = await this.admissions.get(meeting.uid, uid);
         if (request) {
-            request.status = "admitted";
+            await this.admissions.set(meeting.uid, uid, { ...request, status: "admitted" });
         }
     }
 
@@ -1191,9 +1230,9 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     @Post("/:id/deny/:uid")
     public async deny(@Param("id") id: string, @Param("uid") uid: string, @AuthUser user?: JWTUser): Promise<void> {
         const meeting: VM = await this.requireOwnedMeeting(id, user, ACLAction.UPDATE);
-        const request = this.pendingAdmissions.get(meeting.uid)?.get(uid);
+        const request = await this.admissions.get(meeting.uid, uid);
         if (request) {
-            request.status = "denied";
+            await this.admissions.set(meeting.uid, uid, { ...request, status: "denied" });
         }
     }
 
@@ -1222,8 +1261,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
      * (`specs/meeting_privacy.md` §8): its guests' access ends with it. */
     private async requireMeetingByToken(token: string): Promise<{ meeting: VM; resolvedVia: VideoMeetingTokenResolution }> {
         const resolved = await this.resolveMeetingByToken(token);
-        const { meeting } = resolved;
-        if (meeting.keyProtected && (meeting.keyDiscardedAt || (meeting.keyExpiresAt && new Date(meeting.keyExpiresAt).valueOf() <= Date.now()))) {
+        if (isMeetingKeyGone(resolved.meeting, Date.now())) {
             throw new ApiError(ApiErrors.NOT_FOUND, 410, "This meeting has ended.");
         }
         return resolved;
@@ -1483,30 +1521,30 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
      * poll - their `selfUid`, and a guest's own `token` to poll with (an already-authenticated caller's existing
      * session cookie already does that job, so none is minted for them).
      */
-    private requestAdmission(
+    private async requestAdmission(
         meeting: VM,
         publicMeeting: PublicVideoMeeting,
         user: JWTUser | undefined,
         name: string,
-    ): VideoMeetingAdmissionRequiredResult {
+    ): Promise<VideoMeetingAdmissionRequiredResult> {
         const isRealCaller: boolean = !!user && !user.uid.startsWith(GUEST_UID_PREFIX);
         if (isRealCaller) {
-            this.registerPendingAdmission(meeting.uid, user!.uid, name);
+            await this.registerPendingAdmission(meeting.uid, user!.uid, name);
             return { meeting: publicMeeting, requiresAdmission: true, authenticated: true, selfUid: user!.uid };
         }
         const { guestUid, token, expiresAt } = this.mintGuestToken();
-        this.registerPendingAdmission(meeting.uid, guestUid, name);
+        await this.registerPendingAdmission(meeting.uid, guestUid, name);
         return { meeting: publicMeeting, requiresAdmission: true, authenticated: false, selfUid: guestUid, token, expiresAt: expiresAt.toISOString() };
     }
 
-    /** Records (or overwrites, for a re-request under the same identity) one pending admission. */
-    private registerPendingAdmission(meetingUid: string, uid: string, name: string): void {
-        let pending = this.pendingAdmissions.get(meetingUid);
-        if (!pending) {
-            pending = new Map();
-            this.pendingAdmissions.set(meetingUid, pending);
+    /** Records (or overwrites, for a re-request under the same identity) one pending admission - 429 when the meeting already holds
+     * `MAX_PENDING_ADMISSIONS` requests of other identities. */
+    private async registerPendingAdmission(meetingUid: string, uid: string, name: string): Promise<void> {
+        const pending = await this.admissions.list(meetingUid);
+        if (!pending.has(uid) && pending.size >= MAX_PENDING_ADMISSIONS) {
+            throw new ApiError(ApiErrors.INVALID_REQUEST, 429, "Too many people are waiting to join this meeting. Try again later.");
         }
-        pending.set(uid, { name, requestedAt: new Date(), status: "pending" });
+        await this.admissions.set(meetingUid, uid, { name, requestedAt: Date.now(), status: "pending" });
     }
 
     @Summary("Joins a video meeting.")
@@ -1577,6 +1615,9 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             if (typeof body?.name !== "string" || !body.name.trim()) {
                 throw new ApiError(ApiErrors.INVALID_REQUEST, 400, "'name' is required to request admission.");
             }
+            if (body.name.trim().length > MAX_DISPLAY_NAME_LENGTH) {
+                throw new ApiError(ApiErrors.INVALID_REQUEST, 400, `'name' must be at most ${MAX_DISPLAY_NAME_LENGTH} characters.`);
+            }
             return this.requestAdmission(meeting, publicMeeting, user, body.name.trim());
         }
         return this.completeJoin(meeting, publicMeeting, user);
@@ -1600,19 +1641,19 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         @AuthUser user: JWTUser,
     ): Promise<VideoMeetingJoinResult | VideoMeetingAdmissionRequiredResult> {
         const { meeting } = await this.requireMeetingByToken(token);
-        const pending = this.pendingAdmissions.get(meeting.uid)?.get(user.uid);
+        const pending = await this.admissions.get(meeting.uid, user.uid);
         if (!pending) {
             throw new ApiError(ApiErrors.NOT_FOUND, 404, ApiErrorMessages.NOT_FOUND);
         }
         if (pending.status === "denied") {
-            this.pendingAdmissions.get(meeting.uid)?.delete(user.uid);
+            await this.admissions.delete(meeting.uid, user.uid);
             throw new ApiError(ApiErrors.AUTH_PERMISSION_FAILURE, 403, "The host denied your request to join.");
         }
         const publicMeeting: PublicVideoMeeting = await this.buildPublicMeeting(meeting, user);
         if (pending.status === "pending") {
             return { meeting: publicMeeting, requiresAdmission: true, authenticated: !user.uid.startsWith(GUEST_UID_PREFIX), selfUid: user.uid };
         }
-        this.pendingAdmissions.get(meeting.uid)?.delete(user.uid);
+        await this.admissions.delete(meeting.uid, user.uid);
         // Grants exactly the uid that was admitted - never completeJoin(), which would mint a brand new guest
         // identity instead of recognizing this poller as the one requestAdmission() already filed (see
         // grantJoin()'s own doc comment).
@@ -1627,7 +1668,8 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     /**
      * Decides whether `user` may open a relay socket to meeting `id`: the relay must be enabled, `user` must hold BOTH
      * `READ` and `CREATE` on the meeting's uid - exactly what `ensureChannelGrant()` gives a joined participant, and
-     * what `signal()` demands too (`authorizeMeetingSocket()`) - and the meeting must exist and be neither cancelled nor ended.
+     * what `signal()` demands too (`authorizeMeetingSocket()`) - and the meeting must exist and be neither cancelled nor ended, nor a
+     * protected meeting whose key has expired or been discarded.
      * Returns the reason to close the socket with, or `undefined` when permitted.
      *
      * `hasPermission()` gets `user` with its trusted roles stripped (`stripTrustedRoles()`), exactly as
@@ -1656,7 +1698,8 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             return RELAY_NOT_PERMITTED;
         }
         const meeting: VM | undefined = await this.meetingRepo!.findOne(id, { ignoreACL: true });
-        if (!meeting || meeting.status === VideoMeetingStatus.CANCELLED || meeting.status === VideoMeetingStatus.ENDED) {
+        // A protected meeting's key gone (specs/meeting_privacy.md §8) ends its sockets too, not only joining.
+        if (!meeting || meeting.status === VideoMeetingStatus.CANCELLED || meeting.status === VideoMeetingStatus.ENDED || isMeetingKeyGone(meeting, Date.now())) {
             return RELAY_NOT_PERMITTED;
         }
         return undefined;
