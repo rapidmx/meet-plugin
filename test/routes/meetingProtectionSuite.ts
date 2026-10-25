@@ -16,6 +16,8 @@ export interface MeetingProtectionSuiteContext {
     findMeeting: (uid: string) => Promise<any>;
     findInvitees: () => Promise<any[]>;
     findLinks: () => Promise<any[]>;
+    /** The records of meeting `uid`'s own ACL: who it grants which actions. */
+    findGrants: (uid: string) => Promise<{ userOrRoleId: string; actions: string[] }[]>;
     /** Sets a meeting's `keyExpiresAt` straight in the datastore. */
     setKeyExpiresAt: (uid: string, at: Date) => Promise<void>;
     /** Runs `MeetingKeyExpiryJob` once, looking at `batchSize` meetings at most when given. */
@@ -57,6 +59,17 @@ export function meetingProtectionSuite(ctx: MeetingProtectionSuiteContext): void
         return res.body;
     };
     const tokenOf = async (email: string) => (await ctx.findInvitees()).find((invitee) => invitee.email === email).joinToken;
+    /** Joins as a guest through each of `meeting`'s invitees' links, returning the guest uids `join()` granted. */
+    const joinAll = async (meetingUid: string) => {
+        const uids: string[] = [];
+        for (const invitee of (await ctx.findInvitees()).filter((invitee) => invitee.meetingUid === meetingUid)) {
+            const joined = await request(ctx.app()).get(`${ctx.baseUrl}/join/${invitee.joinToken}`);
+            expect(joined.status, JSON.stringify(joined.body)).toBe(200);
+            uids.push(joined.body.selfUid);
+        }
+        return uids;
+    };
+    const grantees = async (meetingUid: string) => (await ctx.findGrants(meetingUid)).map((record) => record.userOrRoleId).sort();
 
     describe("protected meetings", () => {
         it("Stores only the placeholder title, sealed fields, the certificate and the organizer's wrap - and keys every invitee's link", async () => {
@@ -179,6 +192,29 @@ export function meetingProtectionSuite(ctx: MeetingProtectionSuiteContext): void
             }
         });
 
+        it("Removes the participants' grants on the expired meeting's own ACL, keeping its creator's and another meeting's participants'", async () => {
+            const expiring = await create();
+            const other = await create({ calendarEventUid: "event-2" });
+            const expiringGuests = await joinAll(expiring.meeting.uid);
+            const otherGuests = await joinAll(other.meeting.uid);
+            const creatorOf = async (uid: string) => (await ctx.findGrants(uid)).filter((record) => !record.actions.every((a) => a === "read" || a === "create"));
+            const expiringCreator = await creatorOf(expiring.meeting.uid);
+            expect(expiringCreator).toHaveLength(1);
+            expect(await grantees(expiring.meeting.uid)).toEqual([...expiringGuests, expiringCreator[0].userOrRoleId].sort());
+            await ctx.setKeyExpiresAt(expiring.meeting.uid, new Date(Date.now() - 1000));
+
+            await ctx.runExpiry();
+
+            expect(await ctx.findGrants(expiring.meeting.uid)).toEqual(expiringCreator);
+            const kept = await grantees(other.meeting.uid);
+            for (const uid of otherGuests) {
+                expect(kept).toContain(uid);
+            }
+            // Idempotent: nothing left to remove.
+            await ctx.runExpiry();
+            expect(await ctx.findGrants(expiring.meeting.uid)).toEqual(expiringCreator);
+        });
+
         it("Keeps the keyed links of another meeting on the same event when one meeting's key expires", async () => {
             const replaced = await create();
             const current = await create();
@@ -224,6 +260,7 @@ export function meetingProtectionSuite(ctx: MeetingProtectionSuiteContext): void
         it("Discards a protected meeting's key as soon as it is cancelled", async () => {
             const created = await create();
             const token = await tokenOf("guest@elsewhere.example");
+            const guests = await joinAll(created.meeting.uid);
 
             const cancelled = await as(ctx.ownerToken()).put(`${ctx.baseUrl}/${created.meeting.uid}`).send({ status: "cancelled" });
             expect(cancelled.status, JSON.stringify(cancelled.body)).toBe(200);
@@ -239,6 +276,11 @@ export function meetingProtectionSuite(ctx: MeetingProtectionSuiteContext): void
             expect(guest.joinToken).not.toBe(token);
             expect(guest.sealedFields ?? null).toBeNull();
             expect(await ctx.findLinks()).toEqual([]);
+            const left = await grantees(created.meeting.uid);
+            expect(left).toHaveLength(1);
+            for (const uid of guests) {
+                expect(left).not.toContain(uid);
+            }
             // Cancelling again has no key left to discard.
             expect((await as(ctx.ownerToken()).put(`${ctx.baseUrl}/${created.meeting.uid}`).send({ status: "cancelled" })).status).toBe(200);
         });

@@ -1604,8 +1604,11 @@ Fixed (findings by review id):
   and reports the next delta frame of that kind as dropped (`publish()` returns false), so `VideoSender` forces a key frame. A key frame
   is let through. Audio frames are all "key", so audio is unaffected.
 - **#4 Relay frame replay.** `decryptFrame()` pins each sender peer's salt and keeps a 128-counter sliding window
-  (`FRAME_REPLAY_WINDOW`), committed only after GCM succeeds. Header fields (seq, timestamp, key flag) are still outside the AAD (left:
-  rewriting them only disorders a stream, which dropping frames already allows); spec §5.2 says so.
+  (`FRAME_REPLAY_WINDOW`), committed only after GCM succeeds. Follow-up (2026-10-25): the frame AAD is now version 2,
+  `"rapidmx-frame-v2|" || kind || keyFrame || seq u16 || timestampMs u32 || sender peer`. `encryptFrame()`/`decryptFrame()` take a
+  `FrameHeader` (`FramePublisher` passes the wire-width values it fragments with; `RelayReceiver` passes the reassembled frame's), so a
+  rewritten seq, timestamp, key flag or kind fails to open. Fragment numbering stays unbound (it only splits the sealed bytes). No
+  compatibility with the version 1 frames (pre-release).
 - **#5 Signaling freshness.** The sealed plaintext carries `t` (sender clock); `open()` drops a message more than `MAX_SIGNAL_AGE_MS`
   (5 min) from the receiver's clock. Unreleased protocol, so no compatibility shim. Tradeoff: a device clock off by more than 5 minutes
   can't take part in a protected meeting's signaling, and messages queued through a reconnect longer than that are dropped.
@@ -1627,7 +1630,11 @@ Fixed (findings by review id):
   deletes only links of the meeting's mailbox and event whose url ends in one of its own invitees' join tokens, before rotating them.
 - **#12 Key outliving cancellation / sockets after expiry.** Cancelling a protected meeting runs `discardMeetingKey()` at once.
   `authorizeMeetingSocket()` refuses signaling and relay sockets once the key is gone (`isMeetingKeyGone()`, also used by join).
-  Left: the job still doesn't strip the per-meeting ACL grants; the socket check makes them inert for a protected meeting.
+  Follow-up (2026-10-25): `discardMeetingKey()` (so the job and the cancel path both) now also runs `revokeParticipantGrants()`
+  before marking `keyDiscardedAt`: one read and at most one save of the meeting's own ACL, dropping every record whose actions are exactly
+  `READ`+`CREATE` (what `ensureChannelGrant()` adds per joiner), keeping the creator's CRUD record and anything else; version conflicts
+  retried 5 times. `MeetingKeyRepos` gained `aclUtils` (the job `@Inject`s `ACLUtils`). Unprotected meetings still accumulate guest
+  grants (the 2026-09 known limitation).
 - **#20 (meet-plugin half).** New integration function `extendSingleInviteeMeetingKey(objectFactory, meetingClass, inviteeClass,
   mailboxUid, joinUrl, keyExpiresAt)`: finds the minted meeting by the join token at the end of `joinUrl` (ignoring `#`/`?`), and moves
   its `keyExpiresAt` when it belongs to the mailbox, is protected, not cancelled and its key still held. Returns whether it did.

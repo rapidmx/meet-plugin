@@ -653,7 +653,7 @@ describe("createRelayTransport in a protected meeting", () => {
         const sealed = fragmentFrame(KIND_AUDIO, true, 0, 100, Uint8Array.of(9, 9, 9), undefined, true)[0];
         const id = new TextEncoder().encode("peer-a~x");
         socket.message(Uint8Array.of(id.length, ...id, ...sealed).buffer);
-        await vi.waitFor(() => expect(cipher.decryptFrame).toHaveBeenCalledWith(KIND_AUDIO, "peer-a~x", Uint8Array.of(9, 9, 9)));
+        await vi.waitFor(() => expect(cipher.decryptFrame).toHaveBeenCalledWith({ kind: KIND_AUDIO, keyFrame: true, seq: 0, timestampMs: 100 }, "peer-a~x", Uint8Array.of(9, 9, 9)));
         transport.close();
     });
 });

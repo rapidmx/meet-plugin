@@ -11,8 +11,10 @@
  * still stamps `from`/`peer` and routes by `to`; a receiver drops a message it can't open, one whose sealed sender differs from the
  * stamped one, one replayed (`n` not above the last it accepted from that peer), one sealed more than `MAX_SIGNAL_AGE_MS` from now
  * (`t`, so what the server kept from an earlier session or occurrence can't be passed off as live), and anything sent in the clear.
- * - **Relay frames**: each encoded audio packet or video picture is sealed before it is fragmented, bound to its kind and sender. A
- * receiver drops a frame whose nonce it already accepted from that sender, or one too far behind the newest (`FRAME_REPLAY_WINDOW`).
+ * - **Relay frames** (version 2): each encoded audio packet or video picture is sealed before it is fragmented, bound to its sender
+ * and to every header field a receiver acts on (kind, key-frame flag, seq, timestamp - `FrameHeader`), so a relay or peer rewriting
+ * one makes the frame fail to open. A receiver drops a frame whose nonce it already accepted from that sender, or one too far behind
+ * the newest (`FRAME_REPLAY_WINDOW`).
  *
  * Authenticating the signaling is also what makes direct peer-to-peer media end to end: the server can no longer swap the DTLS
  * fingerprints in the SDP it relays.
@@ -31,9 +33,24 @@ export interface SignalCipher {
     plaintextBudget?(maxEnvelopeBytes: number): number;
 }
 
+/** The header fields of a relay frame (`apps/shared/relay/frames.ts`) its seal is bound to: everything a receiver acts on besides
+ * the fragment numbering, which only splits the sealed bytes (reordering or re-splitting them makes them fail to open). */
+export interface FrameHeader {
+    kind: number;
+    keyFrame: boolean;
+    /** As on the wire: the per-kind counter modulo 65536. */
+    seq: number;
+    /** As on the wire: the sender's clock in milliseconds modulo 2^32. */
+    timestampMs: number;
+}
+
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
 const SALT_BYTES = 4;
+/** What a frame's AAD starts with; the version changes whenever what it binds does. */
+const FRAME_AAD_TAG = new TextEncoder().encode("rapidmx-frame-v2|");
+/** kind u8, key-frame u8, seq u16, timestamp u32 - see `frameAad()`. */
+const FRAME_AAD_HEADER_BYTES = 8;
 
 /** How far from this tab's clock a signal's sealing time (`t`) may be: room for a message held while the socket reconnects, and for
  * the difference between two participants' clocks. */
@@ -137,23 +154,23 @@ export class MeetingCipher implements SignalCipher {
         return sealedBytes - IV_BYTES - TAG_BYTES - SIGNAL_INNER_OVERHEAD_BYTES;
     }
 
-    /** `frame` (one encoded packet or picture of `kind`) sealed to send through the relay: nonce, then ciphertext. */
-    public async encryptFrame(kind: number, frame: Uint8Array): Promise<Uint8Array> {
+    /** `frame` (one encoded packet or picture) sealed to send through the relay under `header`: nonce, then ciphertext. */
+    public async encryptFrame(header: FrameHeader, frame: Uint8Array): Promise<Uint8Array> {
         const nonce = new Uint8Array(IV_BYTES);
         this.frameSalt ??= crypto.getRandomValues(new Uint8Array(SALT_BYTES));
         nonce.set(this.frameSalt, 0);
         new DataView(nonce.buffer).setBigUint64(SALT_BYTES, ++this.frameCounter);
         const sealed = await crypto.subtle.encrypt(
-            { name: "AES-GCM", iv: nonce, additionalData: this.frameAad(kind, this.self.peer) as BufferSource },
+            { name: "AES-GCM", iv: nonce, additionalData: this.frameAad(header, this.self.peer) as BufferSource },
             this.liveKey,
             frame as BufferSource,
         );
         return concat(nonce, new Uint8Array(sealed));
     }
 
-    /** A relayed frame of `kind` from `senderPeer`, opened - `undefined` when it doesn't open (another key, tampered, or not sealed) or
-     * is a replay (`acceptFrameNonce()`). */
-    public async decryptFrame(kind: number, senderPeer: string, payload: Uint8Array): Promise<Uint8Array | undefined> {
+    /** A relayed frame from `senderPeer` that arrived under `header`, opened - `undefined` when it doesn't open (another key, tampered
+     * bytes or header, or not sealed) or is a replay (`acceptFrameNonce()`). */
+    public async decryptFrame(header: FrameHeader, senderPeer: string, payload: Uint8Array): Promise<Uint8Array | undefined> {
         if (payload.length <= IV_BYTES) {
             return undefined;
         }
@@ -161,7 +178,7 @@ export class MeetingCipher implements SignalCipher {
         try {
             frame = new Uint8Array(
                 await crypto.subtle.decrypt(
-                    { name: "AES-GCM", iv: payload.subarray(0, IV_BYTES) as BufferSource, additionalData: this.frameAad(kind, senderPeer) as BufferSource },
+                    { name: "AES-GCM", iv: payload.subarray(0, IV_BYTES) as BufferSource, additionalData: this.frameAad(header, senderPeer) as BufferSource },
                     this.liveKey,
                     payload.subarray(IV_BYTES) as BufferSource,
                 ),
@@ -202,7 +219,15 @@ export class MeetingCipher implements SignalCipher {
         return true;
     }
 
-    private frameAad(kind: number, peer: string): Uint8Array {
-        return concat(Uint8Array.of(kind), new TextEncoder().encode(peer));
+    /** `"rapidmx-frame-v2|" || kind u8 || keyFrame u8 || seq u16 || timestampMs u32 || UTF-8 sender peer id` (big-endian), the header
+     * fields reduced to their wire widths so both ends bind the same values. */
+    private frameAad(header: FrameHeader, peer: string): Uint8Array {
+        const fields = new Uint8Array(FRAME_AAD_HEADER_BYTES);
+        const view = new DataView(fields.buffer);
+        view.setUint8(0, header.kind & 0xff);
+        view.setUint8(1, header.keyFrame ? 1 : 0);
+        view.setUint16(2, header.seq & 0xffff);
+        view.setUint32(4, header.timestampMs >>> 0);
+        return concat(FRAME_AAD_TAG, fields, new TextEncoder().encode(peer));
     }
 }

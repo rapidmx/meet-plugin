@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import { describe, expect, it, vi } from "vitest";
+import type { FrameHeader } from "../../../../apps/shared/crypto/MeetingCipher.js";
 import { decodeFragment, KIND_AUDIO, KIND_VIDEO, MAX_FRAME_BYTES } from "../../../../apps/shared/relay/frames.js";
 import { FramePublisher, MAX_FRAMES_SEALING, RelaySender } from "../../../../apps/shared/relay/RelaySender.js";
 import { createFakeRelayEnv, fakeChunk, track } from "./relayFakes.js";
@@ -204,9 +205,11 @@ describe("RelaySender", () => {
 describe("FramePublisher in a protected meeting", () => {
     it("seals every frame before fragmenting it, marks it sealed, and keeps the order", async () => {
         const sent: Uint8Array[] = [];
+        const headers: FrameHeader[] = [];
         let slow = true;
         const cipher = {
-            encryptFrame: async (_kind: number, frame: Uint8Array) => {
+            encryptFrame: async (header: FrameHeader, frame: Uint8Array) => {
+                headers.push(header);
                 if (slow) {
                     slow = false;
                     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -217,13 +220,19 @@ describe("FramePublisher in a protected meeting", () => {
         };
         const publisher = new FramePublisher((m) => (sent.push(m), true), undefined, cipher);
         expect(publisher.publish(KIND_AUDIO, true, Uint8Array.of(1), 0)).toBe(true);
-        expect(publisher.publish(KIND_AUDIO, true, Uint8Array.of(2), 20)).toBe(true);
+        expect(publisher.publish(KIND_AUDIO, true, Uint8Array.of(2), 2 ** 32 + 20)).toBe(true);
         await vi.waitFor(() => expect(sent).toHaveLength(2));
         const fragments = sent.map((m) => decodeFragment(m)!);
         expect(fragments.map((f) => [f.seq, f.encrypted, Array.from(f.data)])).toEqual([
             [0, true, [0xaa, 1]],
             [1, true, [0xaa, 2]],
         ]);
+        // Each frame is sealed bound to the header it goes out under, as the receiver reads it off the wire.
+        expect(headers).toEqual([
+            { kind: KIND_AUDIO, keyFrame: true, seq: 0, timestampMs: 0 },
+            { kind: KIND_AUDIO, keyFrame: true, seq: 1, timestampMs: 20 },
+        ]);
+        expect(fragments[1].timestampMs).toBe(20);
         expect(publisher.stats[KIND_AUDIO].framesSent).toBe(2);
     });
 
@@ -231,7 +240,7 @@ describe("FramePublisher in a protected meeting", () => {
         let fail = false;
         const pending: (() => void)[] = [];
         const cipher = {
-            encryptFrame: (_kind: number, frame: Uint8Array) =>
+            encryptFrame: (_header: FrameHeader, frame: Uint8Array) =>
                 new Promise<Uint8Array>((resolve, reject) => pending.push(() => (fail ? reject(new Error("no key")) : resolve(frame)))),
             decryptFrame: async () => undefined,
         };
@@ -255,7 +264,7 @@ describe("FramePublisher in a protected meeting", () => {
     it("reports a sealed frame the socket refused on that kind's next delta frame, and lets a key frame through", async () => {
         const accepted: boolean[] = [true, false];
         const sent: Uint8Array[] = [];
-        const cipher = { encryptFrame: async (_kind: number, frame: Uint8Array) => frame, decryptFrame: async () => undefined };
+        const cipher = { encryptFrame: async (_header: FrameHeader, frame: Uint8Array) => frame, decryptFrame: async () => undefined };
         const publisher = new FramePublisher((m) => {
             const ok = accepted.shift() ?? true;
             if (ok) {

@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
+import type { FrameHeader } from "../crypto/MeetingCipher.js";
 import type { RelayReceiveDiagnostics, RelayReceiveStats } from "../webrtc/types.js";
 import { AudioPlayer } from "./AudioPlayer.js";
 import { decodeFragment, type Frame, FrameReassembler, KIND_AUDIO, seqIsNewer } from "./frames.js";
@@ -61,11 +62,11 @@ export class RelayReceiver {
     private closed = false;
 
     /** `open`: a protected meeting's - every frame must be sealed, and is opened before it is decoded (`specs/meeting_privacy.md`
-     * §5.2). Without it, a sealed frame can't be decoded and is dropped. */
+     * §5.2) under the header it arrived with. Without it, a sealed frame can't be decoded and is dropped. */
     constructor(
         env: RelayEnv,
         playbackContext: AudioContextLike,
-        private readonly open?: (kind: number, payload: Uint8Array) => Promise<Uint8Array | undefined>,
+        private readonly open?: (header: FrameHeader, payload: Uint8Array) => Promise<Uint8Array | undefined>,
     ) {
         const destination = playbackContext.createMediaStreamDestination();
         this.audio = new AudioPlayer(env, playbackContext, destination);
@@ -101,7 +102,7 @@ export class RelayReceiver {
             return;
         }
         this.opening = this.opening.then(async () => {
-            const data = await open(frame.kind, frame.data);
+            const data = await open({ kind: frame.kind, keyFrame: frame.keyFrame, seq: frame.seq, timestampMs: frame.timestampMs }, frame.data);
             if (data && !this.closed) {
                 this.play({ ...frame, data, encrypted: false }, counter);
             }

@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
+import type { FrameHeader } from "../crypto/MeetingCipher.js";
 import type { RelaySendDiagnostics, RelaySendStats } from "../webrtc/types.js";
 import { AudioSender } from "./AudioSender.js";
 import { DEFAULT_MESSAGE_BYTES, fragmentFrame, type FrameKind, KIND_AUDIO, KIND_VIDEO } from "./frames.js";
@@ -17,8 +18,10 @@ export const MAX_FRAMES_SEALING = 8;
 
 /** How a protected meeting's frames are sealed and opened (`MeetingCipher`, `specs/meeting_privacy.md` §5.2). */
 export interface FrameCipher {
-    encryptFrame(kind: number, frame: Uint8Array): Promise<Uint8Array>;
-    decryptFrame(kind: number, senderPeer: string, payload: Uint8Array): Promise<Uint8Array | undefined>;
+    /** `frame` sealed and bound to `header`, the fields it goes out under. */
+    encryptFrame(header: FrameHeader, frame: Uint8Array): Promise<Uint8Array>;
+    /** `payload` opened, or `undefined` unless `senderPeer` sealed it under exactly `header`. */
+    decryptFrame(header: FrameHeader, senderPeer: string, payload: Uint8Array): Promise<Uint8Array | undefined>;
 }
 
 /** Numbers and fragments the frames of one sender. The counters belong to the transport rather than to a capture
@@ -71,9 +74,11 @@ export class FramePublisher {
             }
         }
         this.sealing += 1;
+        // Bound as the receiver will read them off the wire.
+        const header: FrameHeader = { kind, keyFrame, seq, timestampMs: timestampMs >>> 0 };
         this.chain = this.chain.then(async () => {
             try {
-                if (!this.sendFrame(kind, keyFrame, seq, timestampMs, await cipher.encryptFrame(kind, data), true)) {
+                if (!this.sendFrame(kind, keyFrame, seq, timestampMs, await cipher.encryptFrame(header, data), true)) {
                     this.sealedSendFailed[kind] = true;
                 }
             } catch {

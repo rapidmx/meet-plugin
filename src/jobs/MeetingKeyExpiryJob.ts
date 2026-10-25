@@ -3,19 +3,19 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import { ObjectDecorators } from "@rapidrest/core";
-import { BackgroundService, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
+import { ACLUtils, BackgroundService, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
 import type { CalendarEventAttendeeLink } from "@rapidmx/restapi";
 import type { VideoMeeting, VideoMeetingInvitee } from "../models/types.js";
 import { discardMeetingKey } from "../util/MeetingProtectionUtils.js";
-const { Config, Init, Logger } = ObjectDecorators;
+const { Config, Init, Inject, Logger } = ObjectDecorators;
 
 /** The most meetings one run discards. */
 const BATCH = 200;
 
 /**
  * Discards the key of each protected meeting whose `keyExpiresAt` has passed (`specs/meeting_privacy.md` §8): its certificate, every
- * wrap, the guest-readable sealed title and names, and the invitees' join tokens (replaced, so the old links stop resolving), and the
- * keyed attendee links of those invitees (`discardMeetingKey()`). Joining answers 410 from `keyExpiresAt` on whether or not this has
+ * wrap, the guest-readable sealed title and names, the invitees' join tokens (replaced, so the old links stop resolving), the keyed
+ * attendee links of those invitees, and the participants' grants on the meeting's own ACL (`discardMeetingKey()`). Joining answers 410 from `keyExpiresAt` on whether or not this has
  * run yet. Idempotent: a meeting is marked `keyDiscardedAt` and never selected again, and every replica may run it.
  */
 export abstract class MeetingKeyExpiryJob extends BackgroundService {
@@ -29,6 +29,9 @@ export abstract class MeetingKeyExpiryJob extends BackgroundService {
     protected meetingRepo?: RepoUtils<VideoMeeting>;
     protected inviteeRepo?: RepoUtils<VideoMeetingInvitee>;
     protected attendeeLinkRepo?: RepoUtils<CalendarEventAttendeeLink>;
+
+    @Inject(ACLUtils)
+    protected aclUtils?: ACLUtils;
 
     /** The most meetings one run looks at. */
     protected batchSize: number = BATCH;
@@ -84,7 +87,12 @@ export abstract class MeetingKeyExpiryJob extends BackgroundService {
 
     private async discard(meeting: VideoMeeting): Promise<void> {
         try {
-            await discardMeetingKey(meeting, { meetingRepo: this.meetingRepo!, inviteeRepo: this.inviteeRepo!, attendeeLinkRepo: this.attendeeLinkRepo! });
+            await discardMeetingKey(meeting, {
+                meetingRepo: this.meetingRepo!,
+                inviteeRepo: this.inviteeRepo!,
+                attendeeLinkRepo: this.attendeeLinkRepo!,
+                aclUtils: this.aclUtils!,
+            });
         } catch (err: any) {
             // Changed meanwhile, or the store is unavailable: the next run takes it again (joining is already refused).
             this.logger?.warn(`MeetingKeyExpiryJob: couldn't discard the key of meeting ${meeting.uid} yet: ${err?.message ?? err}`);

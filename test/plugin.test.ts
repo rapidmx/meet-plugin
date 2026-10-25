@@ -109,6 +109,7 @@ describe("plugin entry points", () => {
                 "REDIS_RELAY_WARN_INTERVAL_MS",
                 "RedisRelayBus",
                 "redisRelayChannel",
+                "revokeParticipantGrants",
                 "JOIN_TOKEN_PATTERN",
                 "PUBLIC_SLUG_PATTERN",
                 "mintJoinToken",

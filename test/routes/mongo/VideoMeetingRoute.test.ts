@@ -1187,6 +1187,8 @@ describe("Route:VideoMeetingMongo Tests", () => {
         findMeeting: async (uid: string) => await meetingRepo.findOne({ uid } as any),
         findInvitees: async () => await inviteeRepo.find({}).toArray(),
         findLinks: async () => await findLinks(),
+        findGrants: async (uid: string) =>
+            ((await objectFactory.getInstance(ACLUtils)!.findACL(uid, [], { skipCache: true, skipParents: true }))?.records ?? []) as any[],
         setKeyExpiresAt: async (uid: string, at: Date) => {
             await meetingRepo.updateOne({ uid } as any, { $set: { keyExpiresAt: at } } as any);
         },

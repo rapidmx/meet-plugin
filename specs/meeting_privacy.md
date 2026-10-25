@@ -95,12 +95,19 @@ The hub only ever reads `to`, and stamps `from` and `peer`. A protected meeting'
 
 ### 5.2 Relay frames
 
-- **Encryption.** Each encoded audio packet or video picture is encrypted before it is fragmented (`apps/shared/relay/frames.ts`):
-  - `frame' = nonce[12] || AES-256-GCM(live key, nonce, frame, aad = kind byte || UTF-8 sender peer id)`.
+- **Encryption** (frame version 2). Each encoded audio packet or video picture is encrypted before it is fragmented
+  (`apps/shared/relay/frames.ts`):
+  - `frame' = nonce[12] || AES-256-GCM(live key, nonce, frame, aad)`.
+  - `aad = "rapidmx-frame-v2|" || kind u8 || keyFrame u8 (0/1) || seq u16 || timestampMs u32 || UTF-8 sender peer id`, big-endian, each
+    field reduced to its wire width (seq modulo 2^16, timestamp modulo 2^32) so both ends bind what the receiver reads off the fragment
+    header.
   - `nonce = senderSalt[4] || counter[8]`. `senderSalt` is random per sender session and `counter` increments per frame.
+- **Header binding.** The receiver opens a reassembled frame under the kind, key-frame flag, seq and timestamp its fragments carried, and
+  the sender peer the server stamped. A relay or peer that rewrites any of them makes the frame fail to open, and it is dropped. The
+  fragment numbering (`fragIndex`, `fragCount`) is not bound: it only splits the sealed bytes, so reordering or re-splitting them changes
+  the ciphertext and fails the tag. `FLAG_ENCRYPTED` is implied by the frame being opened at all.
 - **Replay.** A receiver pins each sender peer's salt to the first frame that opens, and accepts a counter above the highest it has
-  accepted from that peer, or one of the 128 below it once. Anything else is a replay and is dropped. The fragment header (seq, timestamp,
-  key-frame flag) is still outside the AAD: rewriting it can only disorder a stream, which the server can do by dropping frames anyway.
+  accepted from that peer, or one of the 128 below it once. Anything else is a replay and is dropped.
 - **The flag.** Flag bit 1 (`FLAG_ENCRYPTED`) marks an encrypted frame. A protected meeting drops frames without it.
 - **Requirement.** Encryption is required: a browser that can't run WebCrypto AES-GCM over the frames can't join a protected meeting.
 
@@ -165,7 +172,8 @@ server refuses an unprotected booking of such a host ("This booking page is out 
   - A booking uses its slot's end plus the grace.
 - **What goes.** At `expiresAt`, `MeetingKeyExpiryJob` deletes the certificate, the organizer's wrap, the sealed title and names, and
   the keyed attendee links of the meeting's own invitees (another meeting on the same event keeps its links), replaces the invitees' join
-  tokens, and marks the meeting `keyDiscardedAt`. Cancelling a protected meeting does the same at once. For a booking, the job removes the
+  tokens, removes the participants' `READ`/`CREATE` grants from the meeting's own ACL (the creator's record and other meetings' grants
+  stay), and marks the meeting `keyDiscardedAt`. Cancelling a protected meeting does the same at once. For a booking, the job removes the
   sealed fields addressed to the meeting key and keeps the host's zero-access copy.
 - **After expiry.**
   - Joining answers `410` ("This meeting has ended."), and the meeting's signaling and relay sockets are refused.

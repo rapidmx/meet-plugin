@@ -3,7 +3,10 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import { describe, expect, it, vi } from "vitest";
+import { deriveLiveKey } from "@rapidmx/web-client/lib/crypto/meetingKeys.js";
+import { type FrameHeader, MeetingCipher } from "../../../../apps/shared/crypto/MeetingCipher.js";
 import { fragmentFrame, KIND_AUDIO, KIND_VIDEO } from "../../../../apps/shared/relay/frames.js";
+import { FramePublisher } from "../../../../apps/shared/relay/RelaySender.js";
 import { RelayReceiver } from "../../../../apps/shared/relay/RelayReceiver.js";
 import { createFakeRelayEnv, FakeAudioContext, FakeAudioData, FakeVideoFrame } from "./relayFakes.js";
 
@@ -89,7 +92,7 @@ describe("RelayReceiver.handleMedia", () => {
 });
 
 describe("RelayReceiver in a protected meeting", () => {
-    function protectedSetup(open: (kind: number, payload: Uint8Array) => Promise<Uint8Array | undefined>) {
+    function protectedSetup(open: (header: FrameHeader, payload: Uint8Array) => Promise<Uint8Array | undefined>) {
         const fake = createFakeRelayEnv();
         const receiver = new RelayReceiver(fake.env, new FakeAudioContext(48_000), open);
         return { fake, receiver };
@@ -98,7 +101,9 @@ describe("RelayReceiver in a protected meeting", () => {
 
     it("plays only sealed frames that open, in the order they arrived", async () => {
         let slow = true;
-        const { fake, receiver } = protectedSetup(async (_kind, payload) => {
+        const headers: FrameHeader[] = [];
+        const { fake, receiver } = protectedSetup(async (header, payload) => {
+            headers.push(header);
             if (slow) {
                 slow = false;
                 await new Promise((resolve) => setTimeout(resolve, 10));
@@ -110,6 +115,41 @@ describe("RelayReceiver in a protected meeting", () => {
         receiver.handleMedia(fragmentFrame(KIND_AUDIO, true, 2, 102, Uint8Array.of(3))[0]);
         receiver.handleMedia(sealed(3, 4));
         await vi.waitFor(() => expect(fake.encodedAudioChunks.map((c) => Array.from(c.data))).toEqual([[1], [4]]));
+        // Each frame is opened under the header it arrived with.
+        expect(headers.map((h) => [h.kind, h.keyFrame, h.seq, h.timestampMs])).toEqual([
+            [KIND_AUDIO, true, 0, 100],
+            [KIND_AUDIO, true, 1, 101],
+            [KIND_AUDIO, true, 3, 103],
+        ]);
+    });
+
+    it("drops a sealed frame whose seq, timestamp or key-frame flag a relay rewrote, end to end through the meeting cipher", async () => {
+        const secret = crypto.getRandomValues(new Uint8Array(32));
+        const sender = new MeetingCipher(await deriveLiveKey(secret, "m1"), "m1", { uid: "alice", peer: "alice~1" });
+        const wire: Uint8Array[] = [];
+        const publisher = new FramePublisher((m) => (wire.push(m), true), undefined, sender);
+        publisher.publish(KIND_VIDEO, true, Uint8Array.of(0, 0xee), 1000);
+        publisher.publish(KIND_VIDEO, false, Uint8Array.of(1, 0xee), 1033);
+        await vi.waitFor(() => expect(wire).toHaveLength(2));
+        /** What a receiver decodes of the key frame followed by the delta frame with byte `at` of its header set to `value`. */
+        const decodedWith = async (at?: number, value?: number) => {
+            const delta = Uint8Array.from(wire[1]);
+            if (at !== undefined) {
+                delta[at] = value!;
+            }
+            const cipher = new MeetingCipher(await deriveLiveKey(secret, "m1"), "m1", { uid: "bob", peer: "bob~1" });
+            const fake = createFakeRelayEnv();
+            const receiver = new RelayReceiver(fake.env, new FakeAudioContext(48_000), (header, payload) => cipher.decryptFrame(header, "alice~1", payload));
+            receiver.handleMedia(wire[0]);
+            receiver.handleMedia(delta);
+            await vi.waitFor(() => expect(fake.encodedVideoChunks.length).toBeGreaterThan(0));
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            return fake.encodedVideoChunks.map((c) => c.data[0]);
+        };
+        expect(await decodedWith()).toEqual([0, 1]);
+        expect(await decodedWith(1, wire[1][1] | 1)).toEqual([0]); // marked a key frame
+        expect(await decodedWith(3, wire[1][3] + 1)).toEqual([0]); // seq moved on
+        expect(await decodedWith(9, wire[1][9] + 1)).toEqual([0]); // timestamp shifted
     });
 
     it("drops what is still being opened when it closes, and an unprotected meeting drops sealed frames", async () => {

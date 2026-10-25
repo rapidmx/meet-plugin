@@ -9,7 +9,7 @@
  */
 import * as crypto from "crypto";
 import { ApiError } from "@rapidrest/core";
-import { ApiErrors, ModelUtils, type RepoUtils } from "@rapidrest/service-core";
+import { type AccessControlList, ACLAction, type ACLRecord, type ACLUtils, ApiErrors, ModelUtils, type RepoUtils } from "@rapidrest/service-core";
 import type { CalendarEventAttendeeLink } from "@rapidmx/restapi";
 import type { MeetingKeyWrap, VideoMeeting, VideoMeetingInvitee } from "../models/types.js";
 import { mintJoinToken } from "./TokenUtils.js";
@@ -23,6 +23,8 @@ const MAX_SEALED_LENGTH = 64 * 1024;
 const MAX_CERTIFICATE_LENGTH = 8 * 1024;
 /** The furthest ahead a key may expire: a long recurring series. */
 const MAX_KEY_LIFETIME_MS = 5 * 366 * 24 * 60 * 60 * 1000;
+/** How many times `revokeParticipantGrants()` retries an optimistic-lock conflict on the meeting's ACL (a join saving at once). */
+const GRANT_REVOKE_MAX_ATTEMPTS = 5;
 
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 const FINGERPRINT = /^[0-9a-f]{64}$/;
@@ -76,14 +78,47 @@ export interface MeetingKeyRepos<VM extends VideoMeeting = VideoMeeting> {
     meetingRepo: RepoUtils<VM>;
     inviteeRepo: RepoUtils<any>;
     attendeeLinkRepo: RepoUtils<CalendarEventAttendeeLink>;
+    /** Where the meeting's own `AccessControlList`, holding its participants' grants, is kept. */
+    aclUtils: ACLUtils;
+}
+
+/** Whether `record` is a participant's channel grant: exactly `READ` and `CREATE`, what `BaseVideoMeetingRoute.ensureChannelGrant()` adds
+ * for each joiner. The creator's record (`RepoUtils.create()` grants CRUD) and anything else the owner put there differ. */
+function isParticipantGrant(record: ACLRecord): boolean {
+    return record.actions.length === 2 && record.actions.includes(ACLAction.READ) && record.actions.includes(ACLAction.CREATE);
+}
+
+/**
+ * Removes every participant's channel grant (`isParticipantGrant()`) from meeting `meetingUid`'s own `AccessControlList`, which only that
+ * meeting's records are kept on, so no other meeting's participants lose anything. One read and at most one save per attempt, whatever
+ * the number of grants. A no-op when there are none (already revoked) or the meeting has no ACL. Retries a version conflict (a join
+ * saving at the same time) against the re-read ACL; throws any other error, or the last conflict.
+ */
+export async function revokeParticipantGrants(meetingUid: string, aclUtils: ACLUtils): Promise<void> {
+    for (let attempt = 1; ; attempt++) {
+        const acl: AccessControlList | undefined = await aclUtils.findACL(meetingUid, [], { skipCache: true, skipParents: true });
+        if (!acl || !acl.records.some(isParticipantGrant)) {
+            return;
+        }
+        acl.records = acl.records.filter((record) => !isParticipantGrant(record));
+        try {
+            await aclUtils.saveACL(acl);
+            return;
+        } catch (err: any) {
+            if (attempt >= GRANT_REVOKE_MAX_ATTEMPTS || !/must be of the same version/.test(err?.message ?? "")) {
+                throw err;
+            }
+        }
+    }
 }
 
 /**
  * Discards protected `meeting`'s key (`specs/meeting_privacy.md` §8), at expiry (`MeetingKeyExpiryJob`) or when the meeting is cancelled.
  * Deletes the keyed attendee links of the meeting's own invitees, matched by their join tokens as `BaseVideoMeetingRoute.deleteAttendeeLinks()`
  * matches them, so another meeting on the same calendar event keeps its links. Then replaces the invitees' join tokens and clears their
- * sealed names, and finally clears the certificate, the wraps and the sealed title and marks the meeting `keyDiscardedAt`. Returns the
- * updated meeting. Throws whatever the store throws (a version conflict included); everything done before that is safe to do again.
+ * sealed names, removes the participants' grants from the meeting's own ACL (`revokeParticipantGrants()`), and finally clears the
+ * certificate, the wraps and the sealed title and marks the meeting `keyDiscardedAt`. Returns the updated meeting. Throws whatever the
+ * store throws (a version conflict included); everything done before that is safe to do again.
  */
 export async function discardMeetingKey<VM extends VideoMeeting>(meeting: VM, repos: MeetingKeyRepos<VM>): Promise<VM> {
     const invitees: VideoMeetingInvitee[] = await repos.inviteeRepo.find({ meetingUid: ModelUtils.literal(meeting.uid) } as any, { ignoreACL: true });
@@ -105,6 +140,7 @@ export async function discardMeetingKey<VM extends VideoMeeting>(meeting: VM, re
             { ignoreACL: true },
         );
     }
+    await revokeParticipantGrants(meeting.uid, repos.aclUtils);
     return await repos.meetingRepo.update(
         {
             uid: meeting.uid,

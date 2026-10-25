@@ -191,7 +191,7 @@ class WebSocketRelayTransport implements RelayTransport {
                 this.stopResume = resumeAudioContext(this.playback, this.env.document);
             }
             const cipher = this.cipher;
-            return new RelayReceiver(this.env, this.playback, cipher && ((kind, payload) => cipher.decryptFrame(kind, peerId, payload)));
+            return new RelayReceiver(this.env, this.playback, cipher && ((header, payload) => cipher.decryptFrame(header, peerId, payload)));
         } catch {
             return undefined;
         }

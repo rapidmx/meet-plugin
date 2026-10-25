@@ -1143,7 +1143,12 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             await this.deleteAttendeeLinks(meeting, await this.findInvitees(meeting), strippedUser);
             // A cancelled protected meeting's key goes with it (specs/meeting_privacy.md §8), not only at its expiry.
             if (updated.keyProtected && !updated.keyDiscardedAt) {
-                updated = await discardMeetingKey(updated, { meetingRepo: this.meetingRepo!, inviteeRepo: this.inviteeRepo!, attendeeLinkRepo: this.attendeeLinkRepo! });
+                updated = await discardMeetingKey(updated, {
+                    meetingRepo: this.meetingRepo!,
+                    inviteeRepo: this.inviteeRepo!,
+                    attendeeLinkRepo: this.attendeeLinkRepo!,
+                    aclUtils: this.aclUtils!,
+                });
             }
         }
         return this.withoutPasswordHash(updated);

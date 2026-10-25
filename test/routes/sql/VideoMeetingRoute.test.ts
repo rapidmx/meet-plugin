@@ -1008,6 +1008,8 @@ describe("Route:VideoMeetingSQL Tests", () => {
         findMeeting: async (uid: string) => await meetingRepo.findOne({ where: { uid } }),
         findInvitees: async () => await inviteeRepo.find(),
         findLinks: async () => await findLinks(),
+        findGrants: async (uid: string) =>
+            ((await objectFactory.getInstance(ACLUtils)!.findACL(uid, [], { skipCache: true, skipParents: true }))?.records ?? []) as any[],
         setKeyExpiresAt: async (uid: string, at: Date) => {
             await meetingRepo.update({ uid }, { keyExpiresAt: at });
         },
