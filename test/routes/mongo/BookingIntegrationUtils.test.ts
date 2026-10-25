@@ -106,6 +106,24 @@ describe("BookingIntegrationUtils:Mongo Tests", () => {
         expect(joinUrl).toBe(`https://videoconf.rapidmx-test.example.com/meet/${invitees[0].joinToken}`);
     });
 
+    it("Mints a protected meeting from a booking's protection: the placeholder title, no readable name, and refuses a malformed one.", async () => {
+        const protection = {
+            meetingKey: { certificate: Buffer.from("cert").toString("base64") },
+            keyExpiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+            keyWraps: [{ mailboxUid: mailbox.uid, recipientFingerprint: "ab".repeat(32), kind: "meeting-key", cms: Buffer.from("wrap").toString("base64") }],
+            sealedFields: { title: Buffer.from("sealed").toString("base64") },
+        };
+        await createSingleInviteeVideoMeeting(objectFactory, VideoMeetingMongo, VideoMeetingInviteeMongo, mailbox.uid, "Intro Call with Grace Hopper", { email: "grace@example.com", displayName: "Grace Hopper" }, protection);
+
+        const [meeting]: any[] = await meetingRepo.find({}).toArray();
+        expect(meeting).toMatchObject({ title: "Meeting", keyProtected: true, sealedFields: protection.sealedFields });
+        const [invitee]: any[] = await inviteeRepo.find({}).toArray();
+        expect(invitee.displayName ?? null).toBeNull();
+        await expect(
+            createSingleInviteeVideoMeeting(objectFactory, VideoMeetingMongo, VideoMeetingInviteeMongo, mailbox.uid, "x", { email: "g@example.com" }, { ...protection, keyWraps: [] }),
+        ).rejects.toMatchObject({ status: 400 });
+    });
+
     it("Falls back to a default title when given an empty/blank one.", async () => {
         await createSingleInviteeVideoMeeting(objectFactory, VideoMeetingMongo, VideoMeetingInviteeMongo, mailbox.uid, "   ", {
             email: "grace@example.com",

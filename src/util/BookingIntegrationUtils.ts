@@ -6,6 +6,7 @@ import { ObjectDecorators } from "@rapidrest/core";
 import { ObjectFactory, RepoUtils } from "@rapidrest/service-core";
 import { buildBaseUrl } from "./PublicUrlUtils.js";
 import { mintJoinToken } from "./TokenUtils.js";
+import { type MeetingProtectionBody, PROTECTED_MEETING_TITLE, validateProtection } from "./MeetingProtectionUtils.js";
 import { VideoMeeting, VideoMeetingInvitee, VideoMeetingStatus, VideoMeetingVisibility } from "../models/types.js";
 const { Config } = ObjectDecorators;
 
@@ -75,6 +76,10 @@ class PublicUrlConfigHolder {
  * @param mailboxUid The mailbox the meeting is minted under - the caller's own already-authorized mailbox.
  * @param title A short, human-readable meeting title (e.g. the caller's own meeting/event name).
  * @param invitee The sole invitee of the new private meeting.
+ * @param protection Makes the meeting protected end to end (`specs/meeting_privacy.md`), as a booking whose host has zero-access is: its
+ * key's certificate, the host's wrap of the key, its sealed title and when the key is discarded - validated as `BaseVideoMeetingRoute`
+ * validates a protected meeting (a `400` `ApiError` otherwise). The title is then stored as `"Meeting"`, the invitee's name isn't
+ * stored, and the returned link needs the meeting key after `#`, which the caller adds where it sends the link.
  * @returns The invitee's join URL, or `undefined` when `mail:videoconf:public_url` isn't configured on this
  * deployment - mirroring `VideoMeetingInviteeJoinInfo.joinUrl`'s identical semantics exactly. Never throws for
  * that reason alone; a genuine failure (a bad `objectFactory`, a database error, ...) still propagates.
@@ -86,7 +91,9 @@ export async function createSingleInviteeVideoMeeting<VM extends VideoMeeting, V
     mailboxUid: string,
     title: string,
     invitee: SingleMeetingInvitee,
+    protection?: MeetingProtectionBody,
 ): Promise<string | undefined> {
+    const secured = protection ? validateProtection(protection, mailboxUid, Date.now(), 4) : undefined;
     const meetingRepo: RepoUtils<VM> = await objectFactory.newInstance(RepoUtils, { name: meetingClass.name, args: [meetingClass] });
     const inviteeRepo: RepoUtils<VMI> = await objectFactory.newInstance(RepoUtils, { name: inviteeClass.name, args: [inviteeClass] });
     const configHolder: PublicUrlConfigHolder = await objectFactory.initialize(new PublicUrlConfigHolder());
@@ -98,9 +105,19 @@ export async function createSingleInviteeVideoMeeting<VM extends VideoMeeting, V
     // under - see `BaseVideoMeetingRoute.persistMeeting()`'s identical reasoning.
     const meetingInstance: VM = new meetingClass({
         mailboxUid,
-        title: safeTitle,
+        title: secured ? PROTECTED_MEETING_TITLE : safeTitle,
         visibility: VideoMeetingVisibility.PRIVATE,
         status: VideoMeetingStatus.SCHEDULED,
+        ...(secured
+            ? {
+                  keyProtected: true,
+                  meetingKeyCertificate: secured.certificate,
+                  meetingKeyFingerprint: secured.fingerprint,
+                  keyExpiresAt: secured.keyExpiresAt,
+                  keyWraps: secured.keyWraps,
+                  sealedFields: { title: secured.sealedTitle },
+              }
+            : {}),
     });
     const meeting: VM = await meetingRepo.create(meetingInstance, {
         ignoreACL: true,
@@ -112,7 +129,7 @@ export async function createSingleInviteeVideoMeeting<VM extends VideoMeeting, V
             meetingUid: meeting.uid,
             mailboxUid,
             email: invitee.email.trim().toLowerCase(),
-            displayName: invitee.displayName?.trim().slice(0, MAX_DISPLAY_NAME_LENGTH) || undefined,
+            displayName: secured ? undefined : invitee.displayName?.trim().slice(0, MAX_DISPLAY_NAME_LENGTH) || undefined,
             joinToken: mintJoinToken(),
         }),
         { ignoreACL: true },

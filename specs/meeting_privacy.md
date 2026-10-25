@@ -115,17 +115,23 @@ The hub only ever reads `to`, and stamps `from` and `peer`. A protected meeting'
 
 ### 6.2 booking-plugin
 
-The booking page creates the meeting keypair.
+A booking is protected while zero-access encryption covers the host's **calendar**: the calendar event is then sealed too, so nothing the
+booker wrote is stored readable anywhere. The public booking type carries the host's zero-access certificate (`hostCertificate`), and the
+server refuses an unprotected booking of such a host ("This booking page is out of date").
 
-- **Sealed fields:** the booker's name, notes, phone and location instructions are sealed to the meeting certificate and to the host's
-  zero-access certificate. The booking page receives the host's certificate with the booking type.
-- **Readable:** the booker's email and time zone, the times and the status stay readable, because the server mails the booker and checks
-  availability.
-- **Mail:** the request carries the plaintext for the confirmation and the host notification. The server uses it to compose that mail
-  and stores only the sealed fields.
-- **Links:** the confirmation's manage link and join link carry the fragment.
-- **Who opens what:** the manage page opens the booking with the fragment, and the host's booking list opens it with the host's
-  zero-access key.
+- **The booking page** makes the booking key (expiring an hour after the slot) and seals the booker's name, notes, phone and location
+  instructions twice: to the host's certificate (`sealedFields`, kept) and to the booking key (`guestSealedFields`, the booker's copy). It
+  wraps the key to the host (`keyWraps`) and, for a video booking, seals the meeting's title to both.
+- **Stored readable:** the booker's email and time zone, the times and status. The booking's `bookerName` holds the booker's address, and
+  the calendar event's attendee entry has no name.
+- **Mail:** the book request carries the plaintext for the confirmation and the host's notification. Later requests carry it as
+  `content` plus the `linkKey`: a reschedule or cancellation from the manage page (opened with the link's key), and a video-link change
+  from the host's list (opened with the host's zero-access key, with the link key unwrapped from `keyWraps`).
+- **Links:** the confirmation's manage link carries the key after `#`, and so does the video link of a meeting minted for the booking,
+  which is protected with the same key.
+- **The host's notification** in their Inbox carries what the booker wrote only when it is filed sealed (zero-access covering the host's
+  mail). Otherwise it names the booker by address and says to open the booking in RapidMX.
+- **Expiry:** `BookingKeyExpiryJob` removes the booker's copy, the certificate and the wrap at `keyExpiresAt`, and keeps the host's copy.
 
 ## 7. restapi
 
