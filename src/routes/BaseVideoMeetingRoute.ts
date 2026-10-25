@@ -1573,19 +1573,38 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
 
     /** Records (or overwrites, for a re-request under the same identity) one pending admission - 429 when the meeting already holds
      * `MAX_PENDING_ADMISSIONS` requests of other identities still waiting for an answer, or `MAX_PENDING_ADMISSIONS_PER_SOURCE` of them
-     * from the requester's network. A request the host admitted or denied no longer counts, though the requester can still poll it. */
+     * from the requester's network. A request the host admitted or denied no longer counts, though the requester can still poll it.
+     *
+     * The check and the write are two steps (on Redis an HGETALL, then an HSET), which a burst of concurrent requests could each pass
+     * on the same snapshot. So a new request is counted again once it is written, against everything filed by then, and taken back
+     * and refused if a cap is now exceeded: of any set of requests over a cap, the one written last sees all of the others, so no
+     * more than a cap's worth stays filed. A burst may refuse one it could have taken, never take one too many. */
     private async registerPendingAdmission(meetingUid: string, uid: string, requester: AdmissionRequester): Promise<void> {
         const filed = await this.admissions.list(meetingUid);
-        if (!filed.has(uid)) {
-            const waiting: PendingAdmission[] = [...filed.values()].filter((request) => request.status === "pending");
-            if (waiting.length >= MAX_PENDING_ADMISSIONS) {
-                throw new ApiError(ApiErrors.INVALID_REQUEST, 429, "Too many people are waiting to join this meeting. Try again later.");
-            }
-            if (requester.source && waiting.filter((request) => request.source === requester.source).length >= MAX_PENDING_ADMISSIONS_PER_SOURCE) {
-                throw new ApiError(ApiErrors.INVALID_REQUEST, 429, "Too many people from your network are waiting to join this meeting. Try again later.");
-            }
+        const isNew: boolean = !filed.has(uid);
+        if (isNew) {
+            this.checkPendingAdmissionCaps(filed, uid, requester);
         }
         await this.admissions.set(meetingUid, uid, { ...requester, requestedAt: Date.now(), status: "pending" });
+        if (isNew) {
+            try {
+                this.checkPendingAdmissionCaps(await this.admissions.list(meetingUid), uid, requester);
+            } catch (err) {
+                await this.admissions.delete(meetingUid, uid);
+                throw err;
+            }
+        }
+    }
+
+    /** Throws `registerPendingAdmission()`'s 429 when `filed`, besides `uid`'s own, already holds a cap's worth of requests still waiting. */
+    private checkPendingAdmissionCaps(filed: Map<string, PendingAdmission>, uid: string, requester: AdmissionRequester): void {
+        const waiting: PendingAdmission[] = [...filed].filter(([other, request]) => other !== uid && request.status === "pending").map(([, request]) => request);
+        if (waiting.length >= MAX_PENDING_ADMISSIONS) {
+            throw new ApiError(ApiErrors.INVALID_REQUEST, 429, "Too many people are waiting to join this meeting. Try again later.");
+        }
+        if (requester.source && waiting.filter((request) => request.source === requester.source).length >= MAX_PENDING_ADMISSIONS_PER_SOURCE) {
+            throw new ApiError(ApiErrors.INVALID_REQUEST, 429, "Too many people from your network are waiting to join this meeting. Try again later.");
+        }
     }
 
     /**
@@ -1769,7 +1788,11 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             return RELAY_NOT_PERMITTED;
         }
         const checked: JWTUser | undefined = stripTrustedRoles(user, this.trustedRoles);
-        if (!(await this.aclUtils!.hasPermission(checked, id, ACLAction.READ)) || !(await this.aclUtils!.hasPermission(checked, id, ACLAction.CREATE))) {
+        // The grant read from the database, never the ACL cache: a concurrent read of the ACL from before kick() revoked it writes that
+        // old copy back to the cache without waiting, possibly after the revoke's own write, which would let a removed participant
+        // straight back in until it expired.
+        const acl: AccessControlList | string = (await this.aclUtils!.findACL(id, [], { skipCache: true })) ?? id;
+        if (!(await this.aclUtils!.hasPermission(checked, acl, ACLAction.READ)) || !(await this.aclUtils!.hasPermission(checked, acl, ACLAction.CREATE))) {
             return RELAY_NOT_PERMITTED;
         }
         const meeting: VM | undefined = await this.meetingRepo!.findOne(id, { ignoreACL: true });
@@ -1850,9 +1873,13 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         if (closed) {
             return;
         }
-        conn = this.relayHub!.attach(id!, user!.uid, sock);
+        const attached: RelayConnection | undefined = this.relayHub!.attach(id!, user!.uid, sock);
+        if (!attached || !(await this.reauthorizeAttached(attached, sock, () => closed, () => this.authorizeRelay(id, user), "Relay unavailable."))) {
+            return;
+        }
+        conn = attached;
         for (const message of queued) {
-            conn?.message(message.data, message.isBinary);
+            conn.message(message.data, message.isBinary);
         }
     }
 
@@ -1903,9 +1930,53 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         if (closed) {
             return;
         }
-        conn = this.signalingHub!.attach(id!, user!.uid, sock);
-        for (const message of queued) {
-            conn?.message(message.data, message.isBinary);
+        const attached: RelayConnection | undefined = this.signalingHub!.attach(id!, user!.uid, sock);
+        if (!attached || !(await this.reauthorizeAttached(attached, sock, () => closed, () => this.authorizeMeetingSocket(id, user), "Signaling unavailable."))) {
+            return;
         }
+        conn = attached;
+        for (const message of queued) {
+            conn.message(message.data, message.isBinary);
+        }
+    }
+
+    /**
+     * Authorizes a meeting socket (`relay()`, `signal()`) once more, now that `attached` has put it in its room, and whether it may
+     * go on - otherwise it is taken out again and closed. Until this returns, what the socket sends is still held, so it can do
+     * nothing in the room.
+     *
+     * The first check alone leaves a gap: `kick()` saves the revoked grant and then evicts the sockets already in the room, so a
+     * socket whose check read the grant before the revoke was saved, but which attached after the eviction, would stay in for good.
+     * This check reads the grant after the attach: either it sees the revoke, or it read the grant before the revoke was saved, in
+     * which case the socket was attached before `kick()` evicted, and the eviction (on this replica directly, on another through
+     * the bus, which always carries an eviction) closes it.
+     */
+    private async reauthorizeAttached(
+        attached: RelayConnection,
+        sock: any,
+        isClosed: () => boolean,
+        authorize: () => Promise<string | undefined>,
+        unavailable: string,
+    ): Promise<boolean> {
+        let code: number = 1008;
+        let refusal: string | undefined;
+        try {
+            refusal = await authorize();
+        } catch (err: any) {
+            this.logger.error(`Failed to authorize an attached meeting socket again: ${err?.message ?? err}`);
+            code = 1011;
+            refusal = unavailable;
+        }
+        // Closed meanwhile: the hub must still forget it, since the socket's close handler had no connection to close yet.
+        if (isClosed()) {
+            attached.close();
+            return false;
+        }
+        if (refusal) {
+            attached.close();
+            sock.close(code, refusal);
+            return false;
+        }
+        return true;
     }
 }

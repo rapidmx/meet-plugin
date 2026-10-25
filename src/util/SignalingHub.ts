@@ -359,7 +359,7 @@ export class SignalingHub {
         const frame: BusFrame = { t: "evict", uid };
         // Published under a sender of its own: a bus may refuse an empty one (`RedisRelayBus` cannot encode it, so an
         // eviction published as "" never left this replica). No socket's peer id can start with "~".
-        this.bus.publish(signalingBusRoom(roomId), SIGNALING_EVICT_SENDER, Buffer.from(JSON.stringify(frame), "utf8"));
+        this.bus.publish(signalingBusRoom(roomId), SIGNALING_EVICT_SENDER, Buffer.from(JSON.stringify(frame), "utf8"), true);
         // A replica with no socket in the room has no bus subscription to hear that on - including this one, possibly.
         // The rest of the room is told by the bus frame's delivery alone, so each replica tells its sockets once.
         this.evictLocal(signalingBusRoom(roomId), uid, false);

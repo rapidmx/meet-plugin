@@ -93,8 +93,9 @@ export interface RelayBus {
      * function that removes it. */
     subscribe(roomId: string, listener: RelayBusListener): () => void;
     /** Publishes `frame` (the complete forwarded message, sender header included) that `sender` (a peer id) sent
-     * to `roomId`. */
-    publish(roomId: string, sender: string, frame: Buffer): void;
+     * to `roomId`. `control` marks a frame of the hub's own (an eviction) that must reach every replica: a bus may
+     * skip carrying a media frame across replicas when it believes no other replica listens, but never one of these. */
+    publish(roomId: string, sender: string, frame: Buffer, control?: boolean): void;
 }
 
 /** A `RelayBus` that delivers synchronously to the listeners of this one process - see `RelayHub`'s doc comment for
@@ -534,7 +535,7 @@ export class RelayHub {
      * bus - every other, so a removed participant whose client ignores its removal can neither send nor receive
      * another frame. */
     public evict(roomId: string, uid: string): void {
-        this.bus.publish(roomId, RELAY_EVICT_SENDER, Buffer.from(uid, "utf8"));
+        this.bus.publish(roomId, RELAY_EVICT_SENDER, Buffer.from(uid, "utf8"), true);
         // A replica with no socket in the room has no bus subscription to hear that on - including this one, possibly.
         this.evictLocal(roomId, uid);
     }

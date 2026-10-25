@@ -671,13 +671,13 @@ export default function CallView({
      * delay). Re-added if the save itself fails, so a failure doesn't silently lose the request from the list. */
     function handleAdmitParticipant(uid: string) {
         setWaitingParticipants((prev) => prev.filter((p) => p.uid !== uid));
-        admitParticipant(channel, uid).catch(() => void listWaitingParticipants(channel).then(setWaitingParticipants, () => undefined));
+        admitParticipant(channel, uid).catch(() => void fetchWaitingParticipants(channel, liveKey).then(setWaitingParticipants, () => undefined));
     }
 
     /** Denies one pending request - same optimistic-removal shape as `handleAdmitParticipant()`. */
     function handleDenyParticipant(uid: string) {
         setWaitingParticipants((prev) => prev.filter((p) => p.uid !== uid));
-        denyParticipant(channel, uid).catch(() => void listWaitingParticipants(channel).then(setWaitingParticipants, () => undefined));
+        denyParticipant(channel, uid).catch(() => void fetchWaitingParticipants(channel, liveKey).then(setWaitingParticipants, () => undefined));
     }
 
     function handleAudioBlocked() {
@@ -706,14 +706,11 @@ export default function CallView({
         }
         let cancelled = false;
         const poll = () => {
-            // A protected meeting's names arrive sealed: opened here with the meeting's key, which the server never holds.
-            listWaitingParticipants(channel)
-                .then((list) => openWaitingNames(list, liveKey, channel))
-                .then((list) => {
-                    if (!cancelled) {
-                        setWaitingParticipants(list);
-                    }
-                }, () => undefined);
+            fetchWaitingParticipants(channel, liveKey).then((list) => {
+                if (!cancelled) {
+                    setWaitingParticipants(list);
+                }
+            }, () => undefined);
         };
         poll();
         const interval = setInterval(poll, DEFAULT_WAITING_POLL_MS);
@@ -1052,6 +1049,13 @@ function RemoteAudio({ stream, onBlocked }: { stream: MediaStream; onBlocked: ()
 function createRelay(meetingUid: string, peerId: string, cipher?: MeetingCipher): RelayTransportLike | undefined {
     const relay = createRelayTransport({ meetingUid, peerId, cipher });
     return relay.supported ? relay : undefined;
+}
+
+/** `meetingUid`'s waiting room as the host's drawer shows it - a protected meeting's names arrive sealed, opened here with
+ * `liveKey`, the meeting's key the server never holds. The poll and the re-fetch after a failed admit or deny both go
+ * through it, so neither lists a sealed requester as unreadable. Rejects only when the list itself can't be fetched. */
+function fetchWaitingParticipants(meetingUid: string, liveKey: CryptoKey | undefined): Promise<WaitingParticipant[]> {
+    return listWaitingParticipants(meetingUid).then((list) => openWaitingNames(list, liveKey, meetingUid));
 }
 
 function stopLevelMeter(ref: React.MutableRefObject<Record<string, LevelMeterHandle>>, uid: string): void {

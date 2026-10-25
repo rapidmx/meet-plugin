@@ -153,7 +153,9 @@ interface BusRoom {
  * this bus's next poll noticing is therefore bounded by `numSubPollMs` - frames to that listener may be briefly
  * missing right at that boundary, which is the same order of magnitude as, and no worse than, media this transport
  * already tolerates losing under ordinary backpressure (see `RelayHub.RELAY_WS_MAX_BACKPRESSURE_BYTES`'s own doc
- * comment).
+ * comment). A `control` frame (a hub's eviction) is the exception: it is always published, whatever `localOnly`
+ * says, since missing one is no glitch - it would leave a removed participant's just-arrived socket open on the
+ * replica the poll hadn't counted yet.
  *
  * @author Jean-Philippe Steinmetz
  */
@@ -247,15 +249,17 @@ export class RedisRelayBus implements RelayBus {
         };
     }
 
-    public publish(roomId: string, sender: string, frame: Buffer): void {
-        this.publishToRedis(roomId, sender, frame);
+    public publish(roomId: string, sender: string, frame: Buffer, control?: boolean): void {
+        this.publishToRedis(roomId, sender, frame, control === true);
         for (const listener of this.rooms.get(roomId)?.listeners ?? []) {
             listener(sender, frame);
         }
     }
 
-    private publishToRedis(roomId: string, sender: string, frame: Buffer): void {
-        if (this.rooms.get(roomId)?.localOnly) {
+    /** Publishes to Redis - unless the room is `localOnly`, which never holds back a `control` frame: a replica whose socket just
+     * arrived may not have been counted yet, and an eviction it misses leaves a removed participant's socket open there. */
+    private publishToRedis(roomId: string, sender: string, frame: Buffer, control: boolean): void {
+        if (!control && this.rooms.get(roomId)?.localOnly) {
             this.stats.publishSkippedLocalOnly++;
             return;
         }

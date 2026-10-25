@@ -3,6 +3,7 @@
 // Copyright (C) 2026 Jean-Philippe Steinmetz. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
+import { webcrypto } from "node:crypto";
 import React from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -130,7 +131,7 @@ vi.mock("../../../apps/meet/_meetApi.js", () => ({
 }));
 
 import CallView, { accountUidOf, computeMainUid, newPeerId } from "../../../apps/meet/_CallView.js";
-import { MeetingCipher } from "../../../apps/shared/crypto/MeetingCipher.js";
+import { MeetingCipher, sealWaitingName } from "../../../apps/shared/crypto/MeetingCipher.js";
 import { CollabSession } from "../../../apps/shared/collab/CollabSession.js";
 
 /** This tab's own id on the channel - `CallView` appends a random suffix to the uid it is given (stubbed below). */
@@ -1492,6 +1493,35 @@ describe("CallView - host waiting room", () => {
         fireEvent.click(screen.getByRole("button", { name: "Deny Grace" }));
 
         await waitFor(() => expect(screen.getByText("Grace")).toBeInTheDocument());
+    });
+
+    it("opens a protected meeting's sealed names again when re-fetching after a failed admit or deny", async () => {
+        // The real Web Crypto, for the meeting's live key and the sealed names; the stub's fixed UUID kept for the peer id.
+        vi.stubGlobal("crypto", { randomUUID: () => "fixed", subtle: webcrypto.subtle, getRandomValues: <T extends ArrayBufferView>(array: T) => webcrypto.getRandomValues(array as any) });
+        const liveKey = (await webcrypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"])) as CryptoKey;
+        const sealed = [
+            { uid: "guest:abc", sealedName: await sealWaitingName(liveKey, "meeting-1", "Grace"), requestedAt: "2026-01-01T00:00:00.000Z" },
+            { uid: "guest:def", sealedName: await sealWaitingName(liveKey, "meeting-1", "Heidi"), requestedAt: "2026-01-01T00:00:01.000Z" },
+        ];
+        listWaitingParticipantsMock.mockResolvedValue(sealed);
+        admitParticipantMock.mockRejectedValueOnce(new Error("network error"));
+        denyParticipantMock.mockRejectedValueOnce(new Error("network error"));
+        await connected({ selfUid: "local-me", hostUid: "local-me", initialWaitingRoomEnabled: true, liveKey });
+        fireEvent.click(screen.getByRole("button", { name: /participants/ }));
+        expect(await screen.findByText("Grace")).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole("button", { name: "Admit Grace" }));
+        await waitFor(() => expect(admitParticipantMock).toHaveBeenCalledWith("meeting-1", "guest:abc"));
+        // Back with its opened name well before the next poll, never as the unreadable placeholder.
+        expect(await screen.findByText("Grace")).toBeInTheDocument();
+        expect(screen.getByText("Heidi")).toBeInTheDocument();
+        expect(screen.queryByText("Someone")).toBeNull();
+
+        fireEvent.click(screen.getByRole("button", { name: "Deny Heidi" }));
+        await waitFor(() => expect(denyParticipantMock).toHaveBeenCalledWith("meeting-1", "guest:def"));
+        expect(await screen.findByText("Heidi")).toBeInTheDocument();
+        expect(screen.queryByText("Someone")).toBeNull();
+        expect(listWaitingParticipantsMock.mock.calls.length).toBe(3);
     });
 
     it("gives up quietly if the re-fetch after a failed admit also fails", async () => {

@@ -1673,3 +1673,34 @@ Fixed (findings by review id):
   `sealedName`; `GET /:id/waiting` returns whichever it has. The meet page seals with `sealWaitingName()` (AES-GCM with the live key,
   random IV, AAD `rapidmx-waiting-name-v1|<meetingUid>`), and `_CallView` opens the host's list with `openWaitingNames()`
   (`_meetingKey.ts`); one that won't open shows as "Someone" (`UNREADABLE_WAITING_NAME`). Spec §6.1 updated.
+
+## 2026-10-25: Third review fixes
+
+Fixed (findings by review id):
+
+- **#226 A kicked participant's socket attaching after the eviction.** `relay()`/`signal()` authorized, then attached; a socket whose
+  check read the grant before `kick()` saved the revoke, but which attached after `kick()`'s `evict()`, stayed in the room for good.
+  Both now authorize again right after `attach()` (`reauthorizeAttached()`), holding the socket's messages until it passes; a refusal
+  closes it (1008 with the refusal, 1011 "Relay/Signaling unavailable." when the check throws) and takes it out of the hub. Either the
+  second read sees the revoke, or it read the grant before the revoke was saved, so the socket was attached before the eviction ran.
+  `authorizeMeetingSocket()` reads the meeting's ACL with `findACL(id, [], { skipCache: true })` and checks that object: service-core
+  writes a DB read back to the ACL cache without waiting, so a read from before the revoke could put the old grant back after the
+  revoke's own cache write. `RelayBus.publish()` gained `control`; the hubs' evictions pass it and `RedisRelayBus` publishes a control
+  frame even when the room is `localOnly`, so a socket that just arrived on a replica the last `PUBSUB NUMSUB` poll didn't count still
+  hears it. Left: the cross-replica case still assumes the new socket's replica's SUBSCRIBE reaches Redis before the kicking replica's
+  PUBLISH (it is issued before the second DB read starts, the PUBLISH only after the revoke is saved); the verifier's per-hub
+  "evicted since" record was not added, since the second check covers the same-replica case outright and the record could not reach a
+  replica with no subscription to the room anyway.
+- **#227 Waiting-room caps checked and written in two steps.** `registerPendingAdmission()` still checks before writing, but now counts
+  a new request again once it is written (`checkPendingAdmissionCaps()`, everything filed other than its own uid) and deletes it and
+  answers 429 if a cap is exceeded: of any set of requests over a cap, the one written last sees all the others, so at most a cap's
+  worth stays filed. A burst may refuse one it could have taken, never take one too many. Chosen over a Redis Lua script so the one
+  path serves both stores and is testable here (no real Redis in the suites).
+- **#228 A removed peer coming back as a ghost.** With a cipher, `SignalingClient` delivers a `removed` notice on the same `opening`
+  chain as sealed signals, so it comes after every signal that arrived before it. `MeshConnectionManager.handleRemoved()` remembers
+  each peer id it drops (`removedPeers`, cleared on `stop()`) and `handleMessage()` ignores anything later from one, which covers a
+  message the removed client's replica published after the host's replica published the eviction. A rejoin is a new peer id, so this
+  is no ban. Left: a removed peer id this tab never saw (no message from it before the notice) is not blocked; blocking the whole
+  account for a while instead would drop a legitimate rejoin's `hello`, which nobody repeats.
+- **#229 Failed admit/deny re-listing sealed names as "Someone".** The poll and both failure re-fetches in `_CallView` go through one
+  module function, `fetchWaitingParticipants(meetingUid, liveKey)`, which opens sealed names.

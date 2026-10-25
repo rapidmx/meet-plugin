@@ -274,9 +274,21 @@ export class SignalingClient implements SignalingChannel {
         if (frame.op === "ready") {
             this.handleReady(frame.maxMessageBytes);
         } else if (frame.op === "removed") {
-            if (typeof frame.uid === "string" && frame.uid) {
-                this.deliverRemoved(frame.uid);
+            const uid = frame.uid;
+            if (typeof uid !== "string" || !uid) {
+                return;
             }
+            if (!this.options.cipher) {
+                this.deliverRemoved(uid);
+                return;
+            }
+            // Behind every sealed signal that arrived before it and is still being opened, so none of the removed peer's
+            // last messages comes out after the notice and brings them back.
+            this.opening = this.opening.then(() => {
+                if (!this.closed) {
+                    this.deliverRemoved(uid);
+                }
+            });
         } else if (frame.op === "signal" && frame.data && typeof frame.data === "object") {
             const cipher = this.options.cipher;
             const data = frame.data as Record<string, unknown>;

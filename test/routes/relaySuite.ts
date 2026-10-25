@@ -441,6 +441,45 @@ export function relaySuite(ctx: RelaySuiteContext): void {
             });
         });
 
+        it("Closes a relay socket whose first check read the grant before a kick, but which attached after the kick evicted.", async () => {
+            const { uid, publicSlug } = await ctx.createPublicMeeting();
+            const guest = await joinAsGuest(publicSlug);
+            const route: any = ctx.route();
+            const original = route.authorizeRelay.bind(route);
+            let read!: () => void;
+            const granted = new Promise<void>((resolve) => (read = resolve));
+            let release!: () => void;
+            const gate = new Promise<void>((resolve) => (release = resolve));
+            let calls = 0;
+            const spy = vi.spyOn(route, "authorizeRelay").mockImplementation(async (...args: any[]) => {
+                const refusal = await original(args[0], args[1]);
+                if (++calls === 1) {
+                    read();
+                    await gate;
+                }
+                return refusal;
+            });
+            try {
+                const sock = fakeSocket();
+                const done: Promise<void> = route.relay(uid, {}, sock, { uid: guest.uid, roles: [], scopes: [] });
+                sock.emit("message", helloText(`${guest.uid}~tab`), false);
+                await granted;
+                const kicked = await request(ctx.app())
+                    .post(`${ctx.baseUrl}/${uid}/kick/${encodeURIComponent(guest.uid)}`)
+                    .set("Authorization", "jwt " + ctx.ownerToken());
+                expect(kicked.status).toBe(204);
+                release();
+                await done;
+
+                expect(sock.close).toHaveBeenCalledWith(1008, "Not permitted.");
+                expect(sock.send).not.toHaveBeenCalled();
+                expect(route.relayHub.socketCount(uid)).toBe(0);
+                expect(calls).toBe(2);
+            } finally {
+                spy.mockRestore();
+            }
+        });
+
         it("Holds only a handful of messages while authorizing, dropping the rest.", async () => {
             const { uid } = await ctx.createPublicMeeting();
             await withHeldAuthorization(uid, async (sock, release, done) => {

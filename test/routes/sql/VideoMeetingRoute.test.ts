@@ -859,6 +859,57 @@ describe("Route:VideoMeetingSQL Tests", () => {
             }
         });
 
+        it("Keeps a concurrent burst from one network within MAX_PENDING_ADMISSIONS_PER_SOURCE, though every request's first check passes on one snapshot.", async () => {
+            const meeting = await createWaiting();
+            const route: any = objectFactory.getInstance("routes.VideoMeetingRoute");
+            const store = route.admissions;
+            const burst = MAX_PENDING_ADMISSIONS_PER_SOURCE + 10;
+            // Every request's first read waits until the whole burst has read, as concurrent HGETALLs on Redis can: none sees another's write.
+            let reads = 0;
+            let release!: () => void;
+            const allRead = new Promise<void>((resolve) => (release = resolve));
+            route.admissions = {
+                list: async (meetingUid: string) => {
+                    const snapshot = await store.list(meetingUid);
+                    if (reads < burst) {
+                        if (++reads === burst) {
+                            release();
+                        }
+                        await allRead;
+                    }
+                    return snapshot;
+                },
+                get: (meetingUid: string, uid: string) => store.get(meetingUid, uid),
+                set: (meetingUid: string, uid: string, filed: any) => store.set(meetingUid, uid, filed),
+                delete: (meetingUid: string, uid: string) => store.delete(meetingUid, uid),
+            };
+            try {
+                const from = { socket: { remoteAddress: "198.51.100.9" }, headers: {} };
+                const outcomes = await Promise.all(
+                    Array.from({ length: burst }, (_, i) =>
+                        route.verifyPassword(meeting.publicSlug, { name: `Burst ${i}` }, from, undefined).then(
+                            (result: any) => result.selfUid as string,
+                            (err: any) => err.status as number,
+                        ),
+                    ),
+                );
+                const filed = outcomes.filter((outcome) => typeof outcome === "string");
+                expect(filed.length).toBeLessThanOrEqual(MAX_PENDING_ADMISSIONS_PER_SOURCE);
+                expect(outcomes.filter((outcome) => outcome === 429)).toHaveLength(burst - filed.length);
+                // A refused request is taken back: only the ones answered as filed are waiting.
+                const waiting = [...(await store.list(meeting.uid)).keys()];
+                expect(waiting.sort()).toEqual([...filed].sort());
+
+                // Once the burst is over, its network can file again up to the cap.
+                for (let i = filed.length; i < MAX_PENDING_ADMISSIONS_PER_SOURCE; i++) {
+                    expect((await route.verifyPassword(meeting.publicSlug, { name: `After ${i}` }, from, undefined)).requiresAdmission).toBe(true);
+                }
+                await expect(route.verifyPassword(meeting.publicSlug, { name: "One too many" }, from, undefined)).rejects.toMatchObject({ status: 429 });
+            } finally {
+                route.admissions = store;
+            }
+        });
+
         it("Files a request with no source when the caller's address is unknown.", async () => {
             const meeting = await createWaiting();
             const route: any = objectFactory.getInstance("routes.VideoMeetingRoute");

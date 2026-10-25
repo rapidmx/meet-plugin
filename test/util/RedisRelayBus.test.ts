@@ -12,6 +12,7 @@ import {
     type RedisRelayBusOptions,
 } from "../../src/util/RedisRelayBus.js";
 import { RelayHub, type RelayBusListener, type RelayConnection, type RelaySocket } from "../../src/util/RelayHub.js";
+import { SignalingHub } from "../../src/util/SignalingHub.js";
 import { FakeRedisServer } from "./fakeRedis.js";
 
 const redis = vi.hoisted(() => ({ createClient: vi.fn() }));
@@ -336,6 +337,38 @@ describe("RedisRelayBus", () => {
             alice.conn.message(Buffer.from("x"), true);
             expect(server.commands("PUBLISH")).toHaveLength(0);
             expect(r1.bus.stats.publishSkippedLocalOnly).toBe(1);
+        });
+
+        it("always publishes an eviction, so a socket that just arrived on a replica the last poll didn't count is closed too.", async () => {
+            vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+            const r1 = await replica({ numSubPollMs: 10 });
+            const r2 = await replica({ numSubPollMs: 10 });
+            const alice = join(r1.hub, "room", "alice");
+            await vi.advanceTimersByTimeAsync(10);
+            // Arrives on the other replica after r1's poll found the room local-only: r1 hasn't noticed it yet.
+            const mallory = join(r2.hub, "room", "mallory", ["alice"]);
+            const close = vi.spyOn(mallory.sock, "close");
+
+            alice.conn.message(Buffer.from("x"), true);
+            expect(r1.bus.stats.publishSkippedLocalOnly).toBe(1);
+            r1.hub.evict("room", "mallory");
+            await server.settle();
+            expect(close).toHaveBeenCalledWith(1008, "Removed from the meeting.");
+            expect(r2.hub.socketCount("room")).toBe(0);
+            expect(r1.bus.stats.published).toBe(1);
+
+            // The signaling hub's eviction likewise.
+            const signaling1 = new SignalingHub({ bus: r1.bus });
+            const signaling2 = new SignalingHub({ bus: r2.bus });
+            signaling1.attach("room", "alice", new FakeSocket());
+            await vi.advanceTimersByTimeAsync(10);
+            const mallorySignal = new FakeSocket();
+            const signalClose = vi.spyOn(mallorySignal, "close");
+            signaling2.attach("room", "mallory", mallorySignal);
+            signaling1.evict("room", "mallory");
+            await server.settle();
+            expect(signalClose).toHaveBeenCalledWith(1008, "Removed from the meeting.");
+            expect(signaling2.socketCount("room")).toBe(0);
         });
 
         it("counts a failed subscriber-count check as a failure, warns once, and leaves rooms publishing.", async () => {

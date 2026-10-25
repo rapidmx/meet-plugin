@@ -300,6 +300,97 @@ export function signalingSuite(ctx: RelaySuiteContext): void {
             });
         });
 
+        /** `authorizeMeetingSocket()` as it is, apart from `around(call, run)`, which wraps its `call`-th run (1-based). */
+        const aroundAuthorization = (around: (call: number, run: () => Promise<string | undefined>) => Promise<string | undefined>) => {
+            const route: any = ctx.route();
+            const original = route.authorizeMeetingSocket.bind(route);
+            let calls = 0;
+            return vi.spyOn(route, "authorizeMeetingSocket").mockImplementation(async (...args: any[]) => around(++calls, () => original(args[0], args[1])));
+        };
+
+        it("Closes a socket whose first check read the grant before a kick, but which attached after the kick evicted.", async () => {
+            const { uid, publicSlug } = await ctx.createPublicMeeting();
+            const guest = await joinAsGuest(publicSlug);
+            const route: any = ctx.route();
+            const findACL = vi.spyOn(route.aclUtils, "findACL");
+            let read!: () => void;
+            const granted = new Promise<void>((resolve) => (read = resolve));
+            let release!: () => void;
+            const gate = new Promise<void>((resolve) => (release = resolve));
+            const spy = aroundAuthorization(async (call, run) => {
+                const refusal = await run();
+                if (call === 1) {
+                    read();
+                    await gate;
+                }
+                return refusal;
+            });
+            try {
+                const sock = fakeSocket();
+                const done: Promise<void> = route.signal(uid, {}, sock, { uid: guest.uid, roles: [], scopes: [] });
+                sock.emit("message", helloText(`${guest.uid}~tab`), false);
+                await granted;
+                const kicked = await request(ctx.app())
+                    .post(`${ctx.baseUrl}/${uid}/kick/${encodeURIComponent(guest.uid)}`)
+                    .set("Authorization", "jwt " + ctx.ownerToken());
+                expect(kicked.status).toBe(204);
+                release();
+                await done;
+
+                expect(sock.close).toHaveBeenCalledWith(1008, "Not permitted.");
+                expect(sock.send).not.toHaveBeenCalled();
+                expect(route.signalingHub.socketCount(uid)).toBe(0);
+                expect(spy).toHaveBeenCalledTimes(2);
+                // Read from the database each time, never from a cache that may still hold the revoked grant.
+                expect(findACL).toHaveBeenCalledWith(uid, expect.any(Array), { skipCache: true });
+            } finally {
+                spy.mockRestore();
+                findACL.mockRestore();
+            }
+        });
+
+        it("Closes with 1011 \"Signaling unavailable.\" when authorizing again once attached throws, and forgets the socket.", async () => {
+            const { uid } = await ctx.createPublicMeeting();
+            const route: any = ctx.route();
+            for (const failure of [new Error("database exploded"), "plain string"]) {
+                const spy = aroundAuthorization(async (call, run) => {
+                    if (call === 2) {
+                        throw failure;
+                    }
+                    return run();
+                });
+                try {
+                    const sock = fakeSocket();
+                    sock.emit("message", helloText(ctx.ownerUid()), false);
+                    await route.signal(uid, {}, sock, owner());
+                    expect(sock.close).toHaveBeenCalledWith(1011, "Signaling unavailable.");
+                    expect(sock.send).not.toHaveBeenCalled();
+                    expect(route.signalingHub.socketCount(uid)).toBe(0);
+                } finally {
+                    spy.mockRestore();
+                }
+            }
+        });
+
+        it("Forgets a socket that closed while it was being authorized again once attached.", async () => {
+            const { uid } = await ctx.createPublicMeeting();
+            const route: any = ctx.route();
+            const sock = fakeSocket();
+            const spy = aroundAuthorization(async (call, run) => {
+                if (call === 2) {
+                    sock.emit("close");
+                }
+                return run();
+            });
+            try {
+                await route.signal(uid, {}, sock, owner());
+                expect(route.signalingHub.socketCount(uid)).toBe(0);
+                expect(sock.close).not.toHaveBeenCalled();
+            } finally {
+                spy.mockRestore();
+            }
+        });
+
         it("Leaves a socket the hub refused (room full) alone, replaying nothing.", async () => {
             const { uid } = await ctx.createPublicMeeting();
             const route: any = ctx.route();

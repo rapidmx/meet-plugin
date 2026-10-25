@@ -1452,14 +1452,41 @@ describe("MeshConnectionManager - removal by the server", () => {
         expect(manager.participants).toEqual([]);
     });
 
-    it("forgets ICE candidates held for a removed peer, so a later offer from that id starts clean", async () => {
-        const { manager, channel, created } = setup();
+    it("forgets ICE candidates held for a removed peer, and ignores a later offer from that id", async () => {
+        const { manager, channel, created, events } = setup();
         manager.start();
         channel.emit(signal("ice-candidate", "z~1", { candidate: { candidate: "held" } }));
         channel.remove("z");
         channel.emit(offer("z~1", "a"));
         await flush();
-        expect(created[0].addIceCandidate).not.toHaveBeenCalled();
+        expect(created).toEqual([]);
+        expect(manager.participants).toEqual([]);
+        expect(events).toEqual([]);
+    });
+
+    it("ignores a removed peer's hello or offer that arrives after the notice, and still takes the account back on a new peer id", async () => {
+        const { manager, channel, created, events } = setup({ peerId: "a~tab" });
+        manager.start();
+        channel.emit({ ...hello("z", "Zed"), peer: "z~laptop" });
+        await flush();
+        channel.remove("z");
+        events.length = 0;
+        channel.sent.length = 0;
+
+        // Sent before the removal, but delivered after it (another server replica's ordering).
+        channel.emit({ ...hello("z", "Zed"), peer: "z~laptop" });
+        channel.emit({ ...offer("z", "a~tab"), peer: "z~laptop" });
+        channel.emit({ ...signal("state", "z", { state: { audioOn: true, videoOn: false, handRaised: false } }), peer: "z~laptop" });
+        await flush();
+        expect(manager.participants).toEqual([]);
+        expect(events).toEqual([]);
+        expect(channel.sent).toEqual([]);
+        expect(created).toHaveLength(1);
+
+        // A rejoin is a new tab's new peer id - no ban.
+        channel.emit({ ...hello("z", "Zed"), peer: "z~reloaded" });
+        await flush();
+        expect(manager.participants.map((p) => p.uid)).toEqual(["z~reloaded"]);
     });
 
     it("ignores a notice naming its own account, and a peer's signal that only claims to be one", async () => {

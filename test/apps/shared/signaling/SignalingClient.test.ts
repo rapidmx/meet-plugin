@@ -941,6 +941,40 @@ describe("SignalingClient with a protected meeting's cipher", () => {
         client.close();
     });
 
+    it("hands on a removed notice only after every signal that arrived before it has been opened", async () => {
+        const cipher = fakeCipher();
+        const { client, sockets } = setup({ cipher });
+        const order: string[] = [];
+        client.onMessage((message) => order.push(`${message.kind}:${message.from}`));
+        client.onRemoved((uid) => order.push(`removed:${uid}`));
+        const connected = client.connect();
+        ready(sockets[0]);
+        await connected;
+        // The first open is the slow one: the hello is still being opened when the notice arrives.
+        sockets[0].message({ op: "signal", data: { e: "hello", from: "bob~1" } });
+        sockets[0].message({ op: "removed", uid: "bob" });
+        sockets[0].message({ op: "signal", data: { e: "state", from: "carol~1" } });
+        expect(order).toEqual([]);
+        await vi.waitFor(() => expect(order).toEqual(["hello:bob~1", "removed:bob", "state:carol~1"]));
+        client.close();
+    });
+
+    it("drops a removed notice still waiting behind a signal being opened when it closed", async () => {
+        const cipher = fakeCipher();
+        const { client, sockets } = setup({ cipher });
+        const removed = vi.fn();
+        client.onRemoved(removed);
+        const connected = client.connect();
+        ready(sockets[0]);
+        await connected;
+        sockets[0].message({ op: "signal", data: { e: "hello", from: "bob~1" } });
+        sockets[0].message({ op: "removed", uid: "bob" });
+        client.close();
+        await vi.waitFor(() => expect(cipher.open).toHaveBeenCalledTimes(1));
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(removed).not.toHaveBeenCalled();
+    });
+
     it("drops what was still being sealed or opened when it closed", async () => {
         const cipher = fakeCipher();
         const { client, sockets } = setup({ cipher });

@@ -77,6 +77,10 @@
  * once, exactly as if each had said `bye` - its `RTCPeerConnection` closed, its relay stream stopped. A removed client
  * that ignores `kicked` and never says `bye` would otherwise keep its direct connections, which need no signaling once
  * up. The notice comes only from the server, never as a `SignalMessage`, so no participant can remove another.
+ * Every peer id dropped that way is remembered until `stop()`, and anything later from it ignored: a message the removed
+ * client sent just before the notice can still arrive after it (published by its own server replica, the notice by the
+ * host's), and would otherwise bring it back as a peer nobody can reach. A rejoin is a new tab's new peer id, so this
+ * is no ban.
  *
  * ## Talking stick (`talking-stick`)
  *
@@ -237,6 +241,8 @@ export class MeshConnectionManager {
     private readonly peers = new Map<string, PeerState>();
     private readonly listeners = new Set<(event: MeshEvent) => void>();
     private readonly orphanCandidates = new Map<string, RTCIceCandidateInit[]>();
+    /** Every peer id `handleRemoved()` dropped - see this module's doc comment on host moderation. */
+    private readonly removedPeers = new Set<string>();
     private readonly localTracks: Record<MediaKind, MediaStreamTrack | null>;
     private localState: ParticipantState;
     private unsubscribe: (() => void) | undefined;
@@ -312,6 +318,7 @@ export class MeshConnectionManager {
         }
         this.peers.clear();
         this.orphanCandidates.clear();
+        this.removedPeers.clear();
         this.listeners.clear();
         this.options.relay?.close();
     }
@@ -436,7 +443,7 @@ export class MeshConnectionManager {
         // The account the hub stamped, before `from` becomes the peer id: only the host's moderation counts.
         const fromHost = !!this.options.hostUid && raw.from === this.options.hostUid;
         const message: SignalMessage = { ...raw, from: raw.peer ?? raw.from };
-        if (message.from === this.selfId) {
+        if (message.from === this.selfId || this.removedPeers.has(message.from)) {
             return;
         }
         if (message.to !== undefined && message.to !== this.selfId) {
@@ -574,8 +581,9 @@ export class MeshConnectionManager {
     }
 
     /** The server removed account `uid` from the meeting - see this module's doc comment on host moderation. Drops
-     * every peer of that account (`uid` itself or `<uid>~...`), and any ICE candidates held for one. A notice naming this
-     * participant's own account is ignored: the server has closed its own socket, and `stop()` is the caller's to call. */
+     * every peer of that account (`uid` itself or `<uid>~...`), and any ICE candidates held for one, and ignores each of
+     * those peer ids from now on. A notice naming this participant's own account is ignored: the server has closed its
+     * own socket, and `stop()` is the caller's to call. */
     private handleRemoved(uid: string): void {
         if (uid === this.options.selfUid) {
             return;
@@ -583,9 +591,11 @@ export class MeshConnectionManager {
         const ofAccount = (peerId: string): boolean => peerId === uid || peerId.startsWith(`${uid}~`);
         for (const peerId of [...this.orphanCandidates.keys()].filter(ofAccount)) {
             this.orphanCandidates.delete(peerId);
+            this.removedPeers.add(peerId);
         }
         for (const peerId of [...this.peers.keys()].filter(ofAccount)) {
             this.handleBye(peerId);
+            this.removedPeers.add(peerId);
         }
     }
 
