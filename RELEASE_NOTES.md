@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+### Added
+
+- **End-to-end protected meetings.** A video meeting created from the calendar of a mailbox that has zero-access encryption is now protected with a temporary key of its own. The key travels in the fragment of every participant's join link (`#k=...`), which the browser never sends to the server, so the server can neither read the meeting nor take part in it. The meeting's title and invitees' names are stored only sealed (the stored title is "Meeting"), and the organizer keeps a copy of the key wrapped to their own zero-access certificate. In the call, chat, the whiteboard, reactions, presence, moderation and call setup are all encrypted, and every audio and video frame sent through the server's WebSocket relay is encrypted too. Anything that arrives unencrypted is dropped. The join page opens the real title with the key, says that the meeting is end-to-end encrypted, and refuses to join when the link has no key or the wrong one, so a protected meeting never falls back to an unencrypted call. A waiting-room name is sealed with the meeting key and only the host's page opens it. An organizer without a zero-access key gets an unprotected meeting as before, and the event editor says why. The design is in `specs/meeting_privacy.md`.
+- **A protected meeting's key expires.** The key lasts until an hour after the meeting ends, or after the last occurrence of a series, and never more than five years. A meeting with no end time keeps it for 24 hours. Moving or resizing the event, or accepting a proposed new time, moves the expiry with it (`PUT /:id` takes `keyExpiresAt`, for a protected meeting only). Once the key has expired, or the meeting is cancelled, the new `MeetingKeyExpiryJob` discards the key, the sealed title and names, the keyed invitation links and the participants' access, and replaces the join tokens so the old links stop working. Join answers `410` from then on, and the call's signaling and relay are refused. The job runs every five minutes (`mail:videoconf:key_expiry:schedule`, default `0 */5 * * * *`) and is exported from `./mongo` and `./sql` like the plugin's other jobs.
+- **Protected bookings.** `createSingleInviteeVideoMeeting()` takes a `protection`, so booking-plugin can create a booking's meeting protected with the booking's own key and never hand this plugin the booker's name. The new `extendSingleInviteeMeetingKey()` moves that meeting's key expiry when the booking is rescheduled. The new `SINGLE_INVITEE_MEETING_PROTECTION` export tells booking-plugin that this release honors the protection. Without it, booking-plugin will not create a protected booking's meeting, because an older release would store it unprotected with the booker's name readable.
+
+### Changed
+
+- **Removing a participant now ends their media too.** Removing a participant used to close only their signaling. It now also closes their relay connections on every server replica. Everyone left in the call drops their connections to that account, including direct peer-to-peer ones. Mute, removal and talking-stick requests are honored only when they come from the host's account.
+- **Open call connections are checked again every minute.** Each replica re-checks every open signaling and relay connection once a minute, and again whenever its Redis connection comes back. A participant who has been removed is disconnected even if the removal was missed during a Redis outage. **Behavior change:** connections to a meeting that has been cancelled or has ended, or to a protected meeting whose key has expired, are now closed within a minute. Before, only new connections were refused. Turning the relay setting off still leaves open relay connections alone.
+- **Waiting-room requests are shared across replicas.** Requests to join now live on the `events` Redis that every replica shares, so a host on one replica sees, and can admit, a guest who asked on another. Without Redis they stay in memory, as before. A request expires after an hour. A meeting holds at most 100 waiting requests and at most 20 from one client network, and a request beyond either cap is answered `429`. A name is at most 200 characters, and a longer one is answered `400`. Admitted and denied requests no longer count toward the cap.
+- **Signaling and relay text messages are metered before they are read**, so a flood of pings or malformed messages is dropped, and the socket is closed, like a flood of signals or media.
+- **Builds against `@rapidmx/restapi` 0.35 and `@rapidmx/web-client` 0.37, and protected meetings need them.**
+  - restapi 0.35 brings zero-access encryption for calendars, contacts and tasks. It also adds keyed invitation links: each attendee's invitation carries their key, and it goes only to a copy that would not be stored readable. Invitations that carry a key ask for headers-only bounces, and replies RapidMX composes never echo the meeting link. Its REST clients must name the protected fields they empty in `clearedFields`, and must handle the `409` a protected write can answer.
+  - web-client 0.37 creates, carries and opens the meeting keys, protects new meetings and moves a key's expiry with its event.
+  - OpenPGP interoperability also arrives in both packages.
+
+### Fixed
+
+- **Signaling between participants on different server replicas no longer gets lost.** A participant who joined on another replica sometimes never received the existing participants' answer and connection offer, and so never connected to them.
+- **A removal made while Redis was reconnecting** now still disconnects the removed participant on the other replicas. Before, it could be lost. The server also logs a warning when it happens.
+- **A removed participant's socket that connected just as they were removed** is closed. Before, it could stay in the call.
+- **A removed participant no longer reappears** in everyone's call from a message that was sent before their removal.
+- **The host's waiting-room list no longer shows a protected meeting's guests as "Someone"** after an admit or deny fails.
+- **In a protected meeting, one message that fails to encrypt or decrypt no longer stops the call's signaling.** The same is true when one part of the page fails while handling a message.
+- **Late joiners to a protected meeting get the whole chat and whiteboard.** Before, the catch-up parts could be too large once encrypted and were dropped.
+- **Video sent through the relay recovers after a lost frame** in a protected meeting, by sending a fresh key frame.
+- **Ordinary relay delays no longer drop video in a protected meeting.** Video could freeze when the relay lagged behind the call's signaling.
+- **The key-expiry job processes the oldest expired keys first**, so meetings with long-lived keys can't hold back the ones due. Its cleanup only removes the expiring meeting's own invitation links, never those of another meeting on the same event. A discard that races a change to the key's expiry leaves every invitee's link working, and an interrupted cleanup is finished on the job's next run.
+
+### Security
+
+- **A protected meeting's encrypted signals and relayed frames can't be replayed.** Each signal is sealed with its sender's clock, and one more than five minutes away from the receiver's clock is dropped. Each relayed frame is only played if it is fresh: it has to fall within what the sender's recent signals announced, and its kind, key-frame flag, sequence and timestamp are bound into its encryption. A server that kept a participant's frames can't play them to someone joining later as if they were live. Frame nonces can't repeat across the many sessions that share a meeting's key. Two things follow from this. First, a device whose clock is more than five minutes off can't take part in a protected meeting's signaling. Second, a tab opened before this release that is still in a protected meeting has its relayed media ignored by updated participants until it is reloaded. Signaling and direct connections are not affected.
+- **Joining a protected meeting can't be quietly downgraded.** A link that carries a key is always treated as protected, whatever the server answers.
+- **A protected meeting's participants lose access when its key is discarded.** Their access to the meeting is removed when the key expires or the meeting is cancelled.
+- **Dependency audit.** The fixed `undici` is pinned through `resolutions`. The audit ignores only node-forge's advisory 1240912 (GHSA-86w9-cpqp-85rv), which has no fixed release yet and comes in through `acme-client`, and it will be removed once one ships. Every other node-forge advisory still fails the audit.
+
 ## v0.17.0
 
 ## v0.16.0
