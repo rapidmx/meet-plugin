@@ -13,7 +13,8 @@
 //
 // It models what the bus relies on: buffer-mode pub/sub delivered asynchronously, SUBSCRIBE / UNSUBSCRIBE only when a
 // client's first listener of a channel arrives / its last one leaves, a client that is not ready rejecting commands
-// when its offline queue is disabled, and subscriptions surviving an outage (node-redis re-issues them on reconnect).
+// when its offline queue is disabled, subscriptions surviving an outage (node-redis re-issues them on reconnect), and
+// the `ready` event a client emits each time its connection is up again.
 import { EventEmitter } from "events";
 
 /** One logged Redis command. */
@@ -51,6 +52,7 @@ export class FakeRedisClient extends EventEmitter {
         this.isOpen = true;
         if (this.server.autoReady) {
             this.isReady = true;
+            this.emit("ready");
         }
         return this;
     }
@@ -205,10 +207,15 @@ export class FakeRedisServer {
         }
     }
 
-    /** Simulates the connection coming back; node-redis has re-issued the subscriptions by then. */
+    /** Simulates the connection coming back; node-redis has re-issued the subscriptions by then, and emits `ready` on
+     * each client that was not ready. */
     public recover(): void {
         for (const client of this.clients) {
+            const was: boolean = client.isReady;
             client.isReady = client.isOpen;
+            if (!was && client.isReady) {
+                client.emit("ready");
+            }
         }
     }
 

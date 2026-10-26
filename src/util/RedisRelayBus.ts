@@ -4,7 +4,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 import * as crypto from "crypto";
 import { attachRedisErrorHandler, importRedis } from "@rapidrest/service-core";
-import type { RelayBus, RelayBusListener } from "./RelayHub.js";
+import type { RelayBus, RelayBusListener, RelayFrameKind } from "./RelayHub.js";
 
 /** The prefix of the Redis pub/sub channel a room's frames travel on: `videoconf:relay:<roomId>`. */
 export const REDIS_RELAY_CHANNEL_PREFIX = "videoconf:relay:";
@@ -19,6 +19,12 @@ export const REDIS_RELAY_WARN_INTERVAL_MS = 30_000;
 /** How often the bus re-checks, via one batched `PUBSUB NUMSUB`, whether any other replica still has a listener for
  * each of its active rooms - see the class doc comment's "Skipping Redis for a single-replica room" section. */
 export const REDIS_RELAY_NUMSUB_POLL_MS = 2_000;
+
+/** The most `control` frames (evictions) a bus holds while its publisher is not connected; past it the oldest is dropped. */
+export const REDIS_RELAY_CONTROL_QUEUE_MAX = 256;
+
+/** How long a held `control` frame stays worth publishing once Redis is back: one older than this is dropped. */
+export const REDIS_RELAY_CONTROL_QUEUE_TTL_MS = 120_000;
 
 /** The channel a room's frames are published to. */
 export function redisRelayChannel(roomId: string): string {
@@ -46,8 +52,14 @@ export interface RedisRelayBusStats {
     /** Frames published to Redis. */
     published: number;
     /** Frames not published because the publisher was not connected (or the sender id cannot be encoded) - an
-     * actual problem, unlike `publishSkippedLocalOnly`. */
+     * actual problem, unlike `publishSkippedLocalOnly`. A `control` frame held for later is counted in
+     * `controlQueued` instead. */
     publishSkipped: number;
+    /** `control` frames held because the publisher was not connected, or whose publish failed, to be published once it
+     * is ready again. */
+    controlQueued: number;
+    /** Held `control` frames dropped unpublished: past `REDIS_RELAY_CONTROL_QUEUE_TTL_MS`, or pushed out of a full queue. */
+    controlDropped: number;
     /** Frames not published to Redis because `pollLocalOnly()` last confirmed no other replica currently has a
      * listener for the room - the optimization working as intended, not a problem. */
     publishSkippedLocalOnly: number;
@@ -62,6 +74,8 @@ export interface RedisRelayBusStats {
 /** The part of a node-redis client the bus uses (structurally typed so the plugin needs no `redis` types). */
 interface RelayRedisClient {
     readonly isReady: boolean;
+    /** node-redis emits `ready` each time the connection is up and usable, after a reconnect too. */
+    on(event: "ready", listener: () => void): unknown;
     connect(): Promise<unknown>;
     publish(channel: string, message: Buffer): Promise<unknown>;
     subscribe(channel: string, listener: (message: Buffer, channel: Buffer) => void, bufferMode: true): Promise<unknown>;
@@ -82,6 +96,15 @@ interface BusRoom {
      * until the first poll completes. `publishToRedis()` treats only `true` as license to skip Redis entirely;
      * `undefined` and `false` both publish, which is the safe default for a room nothing has measured yet. */
     localOnly?: boolean;
+}
+
+/** A `control` frame held while the publisher could not publish it. */
+interface HeldControlFrame {
+    roomId: string;
+    sender: string;
+    frame: Buffer;
+    /** When it was first held (`Date.now()`). */
+    at: number;
 }
 
 /**
@@ -122,8 +145,12 @@ interface BusRoom {
  * (retry forever with backoff), and on reconnect node-redis re-issues SUBSCRIBE for every channel the subscriber held
  * (`resubscribe()` in the client's socket initiator), so the bus needs no re-subscribe logic of its own - relay
  * between replicas resumes by itself when Redis comes back, and frames sent during the outage are simply lost, which
- * media tolerates. A bus used before `connect()`, after `close()`, or whose Redis is unavailable behaves as an
- * `InProcessRelayBus`.
+ * media tolerates, and so do signaling messages (an offer from before the outage would be stale by the time it landed;
+ * the clients' own reconnect handling recovers). A `control` frame (a hub's eviction) is the exception: one the
+ * publisher cannot take, or whose PUBLISH fails, is held - at most `REDIS_RELAY_CONTROL_QUEUE_MAX` of them, each for
+ * at most `REDIS_RELAY_CONTROL_QUEUE_TTL_MS` - and published when the publisher is `ready` again, so a kick made while
+ * Redis was reconnecting still closes the removed participant's sockets on the other replicas. A bus used before
+ * `connect()`, after `close()`, or whose Redis is unavailable behaves as an `InProcessRelayBus` (and holds nothing).
  *
  * ## Bandwidth
  *
@@ -153,15 +180,26 @@ interface BusRoom {
  * this bus's next poll noticing is therefore bounded by `numSubPollMs` - frames to that listener may be briefly
  * missing right at that boundary, which is the same order of magnitude as, and no worse than, media this transport
  * already tolerates losing under ordinary backpressure (see `RelayHub.RELAY_WS_MAX_BACKPRESSURE_BYTES`'s own doc
- * comment). A `control` frame (a hub's eviction) is the exception: it is always published, whatever `localOnly`
- * says, since missing one is no glitch - it would leave a removed participant's just-arrived socket open on the
- * replica the poll hadn't counted yet.
+ * comment). That tolerance is for media only: a `signal` frame (signaling) and a `control` frame (a hub's eviction)
+ * are always published, whatever `localOnly` says. Signaling has no retransmission - a joiner on another replica that
+ * misses the existing participant's `hello` answer and offer never learns of them - and a missed eviction would
+ * leave a removed participant's just-arrived socket open on the replica the poll hadn't counted yet. A frame that
+ * arrives from another replica also clears the room's `localOnly` at once, without waiting for the next poll.
  *
  * @author Jean-Philippe Steinmetz
  */
 export class RedisRelayBus implements RelayBus {
     /** What the bus has done so far. */
-    public readonly stats: RedisRelayBusStats = { published: 0, publishSkipped: 0, publishSkippedLocalOnly: 0, failures: 0, received: 0, receivedDropped: 0 };
+    public readonly stats: RedisRelayBusStats = {
+        published: 0,
+        publishSkipped: 0,
+        publishSkippedLocalOnly: 0,
+        controlQueued: 0,
+        controlDropped: 0,
+        failures: 0,
+        received: 0,
+        receivedDropped: 0,
+    };
 
     private readonly id: Buffer = crypto.randomBytes(REDIS_RELAY_ORIGIN_BYTES);
     private readonly rooms: Map<string, BusRoom> = new Map();
@@ -169,6 +207,7 @@ export class RedisRelayBus implements RelayBus {
     private subscriber?: RelayRedisClient;
     private lastWarn: number = Number.NEGATIVE_INFINITY;
     private pollTimer?: ReturnType<typeof setInterval>;
+    private heldControl: HeldControlFrame[] = [];
 
     constructor(private readonly options: RedisRelayBusOptions) {}
 
@@ -205,6 +244,7 @@ export class RedisRelayBus implements RelayBus {
         }
         this.publisher = publisher;
         this.subscriber = subscriber;
+        publisher.on("ready", () => this.flushControl(publisher));
         this.run("connect the publisher", () => publisher.connect());
         this.run("connect the subscriber", () => subscriber.connect());
         this.pollTimer = setInterval(() => void this.pollLocalOnly(), this.options.numSubPollMs ?? REDIS_RELAY_NUMSUB_POLL_MS);
@@ -212,7 +252,7 @@ export class RedisRelayBus implements RelayBus {
 
     /**
      * Shuts the bus down: destroys both clients (which ends their connections, and with them every subscription),
-     * stops the `pollLocalOnly()` timer and stops publishing. Local delivery keeps working, as after a failed
+     * stops the `pollLocalOnly()` timer, stops publishing and forgets any held `control` frame. Local delivery keeps working, as after a failed
      * `connect()`. Safe to call repeatedly. Nothing is unsubscribed one by one: the connection going away does that
      * server-side, and an UNSUBSCRIBE could only stall behind a Redis that is down.
      */
@@ -222,6 +262,7 @@ export class RedisRelayBus implements RelayBus {
         this.subscriber = undefined;
         clearInterval(this.pollTimer);
         this.pollTimer = undefined;
+        this.heldControl = [];
         for (const client of clients) {
             try {
                 client?.destroy();
@@ -249,24 +290,34 @@ export class RedisRelayBus implements RelayBus {
         };
     }
 
-    public publish(roomId: string, sender: string, frame: Buffer, control?: boolean): void {
-        this.publishToRedis(roomId, sender, frame, control === true);
+    public publish(roomId: string, sender: string, frame: Buffer, kind?: RelayFrameKind): void {
+        this.publishToRedis(roomId, sender, frame, kind ?? "media");
         for (const listener of this.rooms.get(roomId)?.listeners ?? []) {
             listener(sender, frame);
         }
     }
 
-    /** Publishes to Redis - unless the room is `localOnly`, which never holds back a `control` frame: a replica whose socket just
-     * arrived may not have been counted yet, and an eviction it misses leaves a removed participant's socket open there. */
-    private publishToRedis(roomId: string, sender: string, frame: Buffer, control: boolean): void {
-        if (!control && this.rooms.get(roomId)?.localOnly) {
+    /** Publishes to Redis - unless the room is `localOnly`, which holds back only a `media` frame: a replica whose socket just
+     * arrived may not have been counted yet, and a signal or eviction it misses is never sent again. A `control` frame the
+     * publisher cannot take now, or whose PUBLISH fails, is held for `flushControl()`. */
+    private publishToRedis(roomId: string, sender: string, frame: Buffer, kind: RelayFrameKind, heldSince?: number): void {
+        if (kind === "media" && this.rooms.get(roomId)?.localOnly) {
             this.stats.publishSkippedLocalOnly++;
             return;
         }
         const publisher: RelayRedisClient | undefined = this.publisher;
         const senderBytes: Buffer = Buffer.from(sender, "utf8");
-        if (!publisher?.isReady || senderBytes.length === 0 || senderBytes.length > 255) {
+        if (senderBytes.length === 0 || senderBytes.length > 255) {
             this.stats.publishSkipped++;
+            return;
+        }
+        const hold = (): void => this.holdControl({ roomId, sender, frame, at: heldSince ?? Date.now() });
+        if (!publisher?.isReady) {
+            if (kind === "control" && publisher) {
+                hold();
+            } else {
+                this.stats.publishSkipped++;
+            }
             return;
         }
         const message: Buffer = Buffer.allocUnsafe(REDIS_RELAY_ORIGIN_BYTES + 1 + senderBytes.length + frame.length);
@@ -275,7 +326,39 @@ export class RedisRelayBus implements RelayBus {
         senderBytes.copy(message, REDIS_RELAY_ORIGIN_BYTES + 1);
         frame.copy(message, REDIS_RELAY_ORIGIN_BYTES + 1 + senderBytes.length);
         this.stats.published++;
-        this.run("publish a frame", () => publisher.publish(redisRelayChannel(roomId), message));
+        this.run("publish a frame", () => publisher.publish(redisRelayChannel(roomId), message), kind === "control" ? hold : undefined);
+    }
+
+    /** Holds a `control` frame for `flushControl()`, dropping the oldest held one when the queue is full. Holds nothing
+     * once the bus is closed, as nothing would ever flush it. */
+    private holdControl(held: HeldControlFrame): void {
+        if (!this.publisher) {
+            return;
+        }
+        if (this.heldControl.length >= REDIS_RELAY_CONTROL_QUEUE_MAX) {
+            this.heldControl.shift();
+            this.stats.controlDropped++;
+        }
+        this.heldControl.push(held);
+        this.stats.controlQueued++;
+    }
+
+    /** Publishes every held `control` frame once `publisher` is ready again, dropping those past
+     * `REDIS_RELAY_CONTROL_QUEUE_TTL_MS`; one that still cannot be published is held again with its original time. */
+    private flushControl(publisher: RelayRedisClient): void {
+        if (publisher !== this.publisher || this.heldControl.length === 0) {
+            return;
+        }
+        const held: HeldControlFrame[] = this.heldControl;
+        this.heldControl = [];
+        const now: number = Date.now();
+        for (const entry of held) {
+            if (now - entry.at > REDIS_RELAY_CONTROL_QUEUE_TTL_MS) {
+                this.stats.controlDropped++;
+                continue;
+            }
+            this.publishToRedis(entry.roomId, entry.sender, entry.frame, "control", entry.at);
+        }
     }
 
     /** Refreshes every active room's `localOnly` flag with one batched `PUBSUB NUMSUB`, on the publisher client (the
@@ -327,12 +410,15 @@ export class RedisRelayBus implements RelayBus {
      * unless this very bus published it. Never throws - it runs inside the Redis client's own message dispatch. */
     private receive(roomId: string, message: Buffer): void {
         try {
-            const listeners: Set<RelayBusListener> | undefined = this.rooms.get(roomId)?.listeners;
-            const parsed: { sender: string; frame: Buffer } | undefined = listeners ? this.parse(message) : undefined;
-            if (!listeners || !parsed) {
+            const room: BusRoom | undefined = this.rooms.get(roomId);
+            const parsed: { sender: string; frame: Buffer } | undefined = room ? this.parse(message) : undefined;
+            if (!room || !parsed) {
                 this.stats.receivedDropped++;
                 return;
             }
+            // Another replica is in the room: whatever the last poll found, its frames must reach that replica now.
+            room.localOnly = false;
+            const listeners: Set<RelayBusListener> = room.listeners;
             this.stats.received++;
             for (const listener of listeners) {
                 listener(parsed.sender, parsed.frame);
@@ -359,11 +445,15 @@ export class RedisRelayBus implements RelayBus {
         return { sender: message.toString("utf8", REDIS_RELAY_ORIGIN_BYTES + 1, frameStart), frame: message.subarray(frameStart) };
     }
 
-    /** Runs a Redis command without waiting for it: a failure, thrown or rejected, is only counted and logged. */
-    private run(what: string, command: () => Promise<unknown>): void {
+    /** Runs a Redis command without waiting for it: a failure, thrown or rejected, is counted and logged, then handed
+     * to `onFailure` when given. */
+    private run(what: string, command: () => Promise<unknown>, onFailure?: () => void): void {
         (async () => {
             await command();
-        })().catch((err) => this.report(what, err));
+        })().catch((err) => {
+            this.report(what, err);
+            onFailure?.();
+        });
     }
 
     /** Counts a failure and logs it - at `warn` once per `REDIS_RELAY_WARN_INTERVAL_MS`, at `debug` in between. */

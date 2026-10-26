@@ -1708,3 +1708,24 @@ Fixed (findings by review id):
   (restapi a0c5a5d). `specs/meeting_privacy.md` §4.1 now says so: replies and proposals RapidMX composes never carry `LOCATION`, so an
   attendee's `#k=` link isn't sent back to the organizer. It also records the known limit: an external client's own `REPLY` may still
   echo the keyed link to an organizer mailbox here that stores mail readable, which this server can't prevent.
+
+## 2026-10-25: Fourth review fixes
+
+Fixed (findings by review id):
+
+- **#324 Signaling taking the media bus's `localOnly` shortcut.** `RelayBus.publish()`'s `control` flag became a `RelayFrameKind`:
+  `"media"` (default), `"signal"` and `"control"`. `SignalingHub` publishes every signal as `"signal"`, which `RedisRelayBus` never
+  skips for a `localOnly` room: signaling has no retransmission, so a joiner on another replica that missed the existing participant's
+  `hello` answer and offer (published while the room's flag was still stale) never learned of them. `localOnly` is now a media-only
+  shortcut. As defense in depth, a frame arriving from another replica clears the room's `localOnly` at once, without waiting for the
+  next `PUBSUB NUMSUB` poll.
+- **#325 A kick's cross-replica eviction dropped while Redis reconnects.** `RedisRelayBus` holds a `"control"` frame the publisher can't
+  take (not ready) or whose PUBLISH rejects in flight - at most `REDIS_RELAY_CONTROL_QUEUE_MAX` (256), each for at most
+  `REDIS_RELAY_CONTROL_QUEUE_TTL_MS` (2 min), oldest dropped first - and publishes them on the publisher's `ready` event (node-redis
+  emits it after every reconnect). Stats `controlQueued`/`controlDropped`. `kick()` logs a warning when the bus isn't connected, so the
+  deferred eviction is visible. Signals and media are still not held during an outage (a stale offer would only confuse the call).
+  Left: a held eviction dies with the process (a replica restarting during the outage), and nothing sweeps attached sockets' grants
+  periodically; the verifier rated this low (needs several replicas and a Redis outage overlapping the kick), and the queue closes the
+  ordinary reconnect case.
+- **#327 (booking-plugin) spec.** §6.2 now says a booker's mailed links carry the key only by §4.1's rule
+  (`BaseBookingRoute.mayCarryBookingKey()`), and that the clients keep an opened booker field only when it is text (#329).

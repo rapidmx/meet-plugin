@@ -82,6 +82,17 @@ export interface RelaySocket {
 export type RelayBusListener = (sender: string, frame: Buffer) => void;
 
 /**
+ * How a bus must carry a frame between replicas. `"media"` (the default) is a relayed media frame: a bus may skip
+ * carrying it across replicas when it believes no other replica listens to the room, and it is lost while Redis is
+ * unreachable - media tolerates both. `"signal"` is a signaling message: never skipped on that belief, since nothing
+ * resends it (a lost `hello` answer or offer leaves a joiner on another replica never learning of the peer), but still
+ * lost during an outage, when a stale offer would only confuse the call anyway. `"control"` is a hub's own eviction:
+ * never skipped, and held while Redis is unreachable to be published once it is back, since a missed one leaves a
+ * removed participant's sockets open on another replica.
+ */
+export type RelayFrameKind = "media" | "signal" | "control";
+
+/**
  * **The seam between sockets.** How a frame gets from the socket that sent it to the sockets that want it. The hub
  * never delivers directly: it `publish()`es the stamped frame and delivers whatever its own `subscribe()`d listener
  * receives, so a bus that also carries frames between server replicas (a Redis pub/sub channel per room, say) makes
@@ -93,9 +104,9 @@ export interface RelayBus {
      * function that removes it. */
     subscribe(roomId: string, listener: RelayBusListener): () => void;
     /** Publishes `frame` (the complete forwarded message, sender header included) that `sender` (a peer id) sent
-     * to `roomId`. `control` marks a frame of the hub's own (an eviction) that must reach every replica: a bus may
-     * skip carrying a media frame across replicas when it believes no other replica listens, but never one of these. */
-    publish(roomId: string, sender: string, frame: Buffer, control?: boolean): void;
+     * to `roomId`. `kind` (default `"media"`) says how hard the bus must try to carry it to other replicas - see
+     * `RelayFrameKind`. */
+    publish(roomId: string, sender: string, frame: Buffer, kind?: RelayFrameKind): void;
 }
 
 /** A `RelayBus` that delivers synchronously to the listeners of this one process - see `RelayHub`'s doc comment for
@@ -535,7 +546,7 @@ export class RelayHub {
      * bus - every other, so a removed participant whose client ignores its removal can neither send nor receive
      * another frame. */
     public evict(roomId: string, uid: string): void {
-        this.bus.publish(roomId, RELAY_EVICT_SENDER, Buffer.from(uid, "utf8"), true);
+        this.bus.publish(roomId, RELAY_EVICT_SENDER, Buffer.from(uid, "utf8"), "control");
         // A replica with no socket in the room has no bus subscription to hear that on - including this one, possibly.
         this.evictLocal(roomId, uid);
     }

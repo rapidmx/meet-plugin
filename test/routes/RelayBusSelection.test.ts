@@ -217,6 +217,36 @@ describe("BaseVideoMeetingRoute relay bus", () => {
         replica2.destroyRelayBus();
     });
 
+    it("Warns on a kick while the relay's Redis is unreachable, and closes the removed participant's sockets on another replica once it is back.", async () => {
+        const replica1 = await route({ url: "redis://events:6379" });
+        const replica2 = await route({ url: "redis://events:6379" });
+        replica1.requireOwnedMeeting = async () => ({ uid: "meeting-1" });
+        replica1.revokeChannelGrant = async () => undefined;
+        replica2.authorizeMeetingSocket = async () => undefined;
+        const bob: any = new EventEmitter();
+        bob.send = vi.fn();
+        bob.close = vi.fn();
+        await replica2.signal("meeting-1", { path: "/signal/meeting-1" }, bob, { uid: "bob" });
+        bob.emit("message", JSON.stringify({ op: "hello", v: 1, peer: "bob" }), false);
+
+        await replica1.kick("meeting-1", "carol");
+        expect(logger.warn).not.toHaveBeenCalled();
+
+        server.outage();
+        await replica1.kick("meeting-1", "bob");
+        await server.settle();
+        expect(bob.close).not.toHaveBeenCalled();
+        expect(logger.warn).toHaveBeenCalledTimes(1);
+        expect(logger.warn.mock.calls[0][0]).toContain("Removed bob from video meeting meeting-1 while the relay's Redis is unreachable");
+
+        server.recover();
+        await server.settle();
+        expect(bob.close).toHaveBeenCalledWith(1008, "Removed from the meeting.");
+
+        replica1.destroyRelayBus();
+        replica2.destroyRelayBus();
+    });
+
     it("Carries signaling to, and evicts, a participant connected to another replica.", async () => {
         const replica1 = await route({ url: "redis://events:6379" });
         const replica2 = await route({ url: "redis://events:6379" });

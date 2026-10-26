@@ -167,6 +167,15 @@ server refuses an unprotected booking of such a host ("This booking page is out 
   from the host's list (opened with the host's zero-access key, with the link key unwrapped from `keyWraps`).
 - **Links:** the confirmation's manage link carries the key after `#`, and so does the video link of a meeting minted for the booking,
   which is protected with the same key.
+  - By §4.1's rule, the mailed links carry the key only when the booker's address is on another server or is a mailbox here whose mail
+    is zero-access (`BaseBookingRoute.mayCarryBookingKey()`). A booker at a mailbox here without zero-access, or at any other address of
+    a domain this server serves, is mailed both links without it, and the server logs a warning that names the booking but never the
+    key. The booker still has the keyed links the confirmation page showed; the manage page opened without the key says so and offers
+    no reschedule.
+- **What opens is checked:** anyone can seal to the host's public certificate, and the server can only check that a sealed value is a
+  blob. The host's and the booker's clients therefore keep an opened booker field only when it is text: a name that opens to anything
+  else shows as the booker's address, and any other such field is left out. A host copy with such a field opens for no change, so it
+  can't be sent as what the booker wrote.
 - **The host's notification** in their Inbox carries what the booker wrote only when it is filed sealed (zero-access covering the host's
   mail). Otherwise it names the booker by address and says to open the booking in RapidMX.
 - **Expiry:** `BookingKeyExpiryJob` removes the booker's copy, the certificate and the wrap at `keyExpiresAt`, and keeps the host's copy.

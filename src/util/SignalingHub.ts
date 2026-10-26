@@ -243,7 +243,9 @@ class Connection implements RelayConnection {
             }
             frame.to = to;
         }
-        this.env.bus.publish(this.room.id, this.peer!, Buffer.from(JSON.stringify(frame), "utf8"));
+        // A signal, never media: a bus must not skip it for a room it believes no other replica listens to, since
+        // nothing resends a lost `hello` answer or offer to a peer that just joined on another replica.
+        this.env.bus.publish(this.room.id, this.peer!, Buffer.from(JSON.stringify(frame), "utf8"), "signal");
     }
 }
 
@@ -359,7 +361,7 @@ export class SignalingHub {
         const frame: BusFrame = { t: "evict", uid };
         // Published under a sender of its own: a bus may refuse an empty one (`RedisRelayBus` cannot encode it, so an
         // eviction published as "" never left this replica). No socket's peer id can start with "~".
-        this.bus.publish(signalingBusRoom(roomId), SIGNALING_EVICT_SENDER, Buffer.from(JSON.stringify(frame), "utf8"), true);
+        this.bus.publish(signalingBusRoom(roomId), SIGNALING_EVICT_SENDER, Buffer.from(JSON.stringify(frame), "utf8"), "control");
         // A replica with no socket in the room has no bus subscription to hear that on - including this one, possibly.
         // The rest of the room is told by the bus frame's delivery alone, so each replica tells its sockets once.
         this.evictLocal(signalingBusRoom(roomId), uid, false);

@@ -4,6 +4,8 @@
 ///////////////////////////////////////////////////////////////////////////////
 import {
     REDIS_RELAY_CHANNEL_PREFIX,
+    REDIS_RELAY_CONTROL_QUEUE_MAX,
+    REDIS_RELAY_CONTROL_QUEUE_TTL_MS,
     REDIS_RELAY_ORIGIN_BYTES,
     REDIS_RELAY_WARN_INTERVAL_MS,
     RedisRelayBus,
@@ -44,6 +46,21 @@ function join(hub: RelayHub, room: string, uid: string, wanted: string[] = []): 
     conn.message(JSON.stringify({ op: "want", peers: wanted }), false);
     return { sock, conn };
 }
+
+/** Attaches a signaling socket of `uid` to `room` of `hub` and says hello as `uid`. */
+function joinSignaling(hub: SignalingHub, room: string, uid: string): { sock: FakeSocket; conn: RelayConnection } {
+    const sock = new FakeSocket();
+    const conn: RelayConnection = hub.attach(room, uid, sock)!;
+    conn.message(JSON.stringify({ op: "hello", v: 1, peer: uid }), false);
+    return { sock, conn };
+}
+
+/** The signaling messages (`op` other than `ready`) a socket was sent, parsed. */
+const signalsOf = (sock: FakeSocket): any[] =>
+    sock.sent
+        .filter((d): d is string => typeof d === "string")
+        .map((d) => JSON.parse(d))
+        .filter((m) => m.op !== "ready");
 
 /** The `[len][sender][payload]` a receiver is expected to get. */
 const frameOf = (sender: string, payload: Uint8Array): Buffer => {
@@ -371,6 +388,51 @@ describe("RedisRelayBus", () => {
             expect(signaling2.socketCount("room")).toBe(0);
         });
 
+        it("always publishes a signaling message, so a joiner on another replica gets the existing participant's answer.", async () => {
+            vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+            const r1 = await replica({ numSubPollMs: 10 });
+            const r2 = await replica({ numSubPollMs: 10 });
+            const signaling1 = new SignalingHub({ bus: r1.bus });
+            const signaling2 = new SignalingHub({ bus: r2.bus });
+            const alice = joinSignaling(signaling1, "room", "alice");
+            // Alice has been alone long enough for r1's poll to find her room local-only.
+            await vi.advanceTimersByTimeAsync(10);
+
+            // Bob joins on r2; nothing has crossed from r2 yet, so r1 still believes the room is local-only.
+            const bob = joinSignaling(signaling2, "room", "bob");
+            alice.conn.message(JSON.stringify({ op: "signal", data: { type: "hello", to: "bob" } }), false);
+            alice.conn.message(JSON.stringify({ op: "signal", data: { type: "offer", to: "bob" } }), false);
+            await server.settle();
+
+            expect(signalsOf(bob.sock).map((m) => m.data.type)).toEqual(["hello", "offer"]);
+            expect(r1.bus.stats.publishSkippedLocalOnly).toBe(0);
+            // Media in a local-only room is still skipped.
+            const media = join(r1.hub, "media", "carol");
+            await vi.advanceTimersByTimeAsync(10);
+            media.conn.message(Buffer.from("x"), true);
+            expect(r1.bus.stats.publishSkippedLocalOnly).toBe(1);
+        });
+
+        it("publishes again as soon as a frame arrives from another replica, without waiting for the next poll.", async () => {
+            vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+            const r1 = await replica({ numSubPollMs: 10 });
+            const r2 = await replica({ numSubPollMs: 10 });
+            const alice = join(r1.hub, "room", "alice", ["bob"]);
+            await vi.advanceTimersByTimeAsync(10);
+            alice.conn.message(Buffer.from("alone"), true);
+            expect(r1.bus.stats.publishSkippedLocalOnly).toBe(1);
+
+            const bob = join(r2.hub, "room", "bob", ["alice"]);
+            bob.conn.message(Buffer.from("hi"), true);
+            await server.settle();
+            expect(alice.sock.frames).toEqual([frameOf("bob", Buffer.from("hi"))]);
+
+            alice.conn.message(Buffer.from("hi back"), true);
+            await server.settle();
+            expect(bob.sock.frames).toEqual([frameOf("alice", Buffer.from("hi back"))]);
+            expect(r1.bus.stats.publishSkippedLocalOnly).toBe(1);
+        });
+
         it("counts a failed subscriber-count check as a failure, warns once, and leaves rooms publishing.", async () => {
             // Only the interval timer is faked - `setImmediate` stays real, so `server.settle()` (used by some of
             // these tests) keeps working rather than hanging on a now-fake `setImmediate` it never advances.
@@ -568,6 +630,137 @@ describe("RedisRelayBus", () => {
             server.recover();
             alice.conn.message(Buffer.from([7]), true);
             expect(server.commands("PUBLISH")).toHaveLength(1);
+        });
+
+        it("Holds an eviction published while the publisher is not connected, and publishes it once the publisher is ready again.", async () => {
+            const r1 = await replica();
+            const r2 = await replica();
+            const signaling1 = new SignalingHub({ bus: r1.bus });
+            const signaling2 = new SignalingHub({ bus: r2.bus });
+            join(r1.hub, "room", "alice", ["mallory"]);
+            const mallory = join(r2.hub, "room", "mallory", ["alice"]);
+            const close = vi.spyOn(mallory.sock, "close");
+            const aliceSignal = joinSignaling(signaling1, "room", "alice");
+            const mallorySignal = joinSignaling(signaling2, "room", "mallory");
+            const signalClose = vi.spyOn(mallorySignal.sock, "close");
+            const bob = joinSignaling(signaling2, "room", "bob");
+            server.outage();
+
+            r1.hub.evict("room", "mallory");
+            signaling1.evict("room", "mallory");
+            // A signaling message is not held: by the time Redis is back it would be stale.
+            aliceSignal.conn.message(JSON.stringify({ op: "signal", data: { type: "chat" } }), false);
+            await server.settle();
+            expect(close).not.toHaveBeenCalled();
+            expect(signalClose).not.toHaveBeenCalled();
+            expect(r1.bus.stats.controlQueued).toBe(2);
+            expect(r1.bus.stats.publishSkipped).toBe(1);
+            expect(server.commands("PUBLISH")).toHaveLength(0);
+
+            server.recover();
+            await server.settle();
+            expect(close).toHaveBeenCalledWith(1008, "Removed from the meeting.");
+            expect(signalClose).toHaveBeenCalledWith(1008, "Removed from the meeting.");
+            expect(r2.hub.socketCount("room")).toBe(0);
+            expect(signalsOf(bob.sock)).toEqual([{ op: "removed", uid: "mallory" }]);
+            expect(r1.bus.stats.published).toBe(2);
+
+            // Published once only: a later reconnect has nothing left to send.
+            server.outage();
+            server.recover();
+            await server.settle();
+            expect(server.commands("PUBLISH")).toHaveLength(2);
+        });
+
+        it("Does not hold a signaling message or a media frame while the publisher is not connected.", async () => {
+            const { bus } = await replica();
+            server.outage();
+            bus.publish("room", "alice", Buffer.from("m"));
+            bus.publish("room", "alice", Buffer.from("s"), "signal");
+            server.recover();
+            await server.settle();
+            expect(bus.stats.publishSkipped).toBe(2);
+            expect(bus.stats.controlQueued).toBe(0);
+            expect(server.commands("PUBLISH")).toHaveLength(0);
+        });
+
+        it("Holds an eviction whose PUBLISH fails in flight, and publishes it on the next ready.", async () => {
+            const { bus } = await replica();
+            server.fail.publish = true;
+            bus.publish("room", "~evict", Buffer.from("mallory"), "control");
+            // A failing media frame is only counted.
+            bus.publish("room", "alice", Buffer.from("m"));
+            await server.settle();
+            expect(bus.stats.failures).toBe(2);
+            expect(bus.stats.controlQueued).toBe(1);
+
+            server.fail.publish = false;
+            server.outage();
+            server.recover();
+            await server.settle();
+            const published = server.commands("PUBLISH");
+            expect(published).toHaveLength(1);
+            expect(published[0].message!.subarray(REDIS_RELAY_ORIGIN_BYTES + 1 + "~evict".length).toString()).toBe("mallory");
+        });
+
+        it("Drops a held eviction older than the hold time, and the oldest one past the cap.", async () => {
+            const { bus } = await replica();
+            let now: number = Date.now();
+            vi.spyOn(Date, "now").mockImplementation(() => now);
+            server.outage();
+            bus.publish("room", "~evict", Buffer.from("old"), "control");
+            now += REDIS_RELAY_CONTROL_QUEUE_TTL_MS + 1;
+            for (let i = 0; i < REDIS_RELAY_CONTROL_QUEUE_MAX; i++) {
+                bus.publish("room", "~evict", Buffer.from(`u${i}`), "control");
+            }
+            // The cap pushed "old" out; one more pushes out u0.
+            bus.publish("room", "~evict", Buffer.from("last"), "control");
+            expect(bus.stats.controlDropped).toBe(2);
+
+            server.recover();
+            await server.settle();
+            const sent = server.commands("PUBLISH").map((op) => op.message!.subarray(REDIS_RELAY_ORIGIN_BYTES + 1 + "~evict".length).toString());
+            expect(sent).toHaveLength(REDIS_RELAY_CONTROL_QUEUE_MAX);
+            expect(sent[0]).toBe("u1");
+            expect(sent.at(-1)).toBe("last");
+
+            // A held one past its hold time when Redis comes back is dropped.
+            server.outage();
+            bus.publish("room", "~evict", Buffer.from("stale"), "control");
+            now += REDIS_RELAY_CONTROL_QUEUE_TTL_MS + 1;
+            server.recover();
+            await server.settle();
+            expect(server.commands("PUBLISH")).toHaveLength(REDIS_RELAY_CONTROL_QUEUE_MAX);
+            expect(bus.stats.controlDropped).toBe(3);
+        });
+
+        it("Holds nothing once closed, nor before connect().", async () => {
+            const unconnected = new RedisRelayBus({ url: "redis://fake", logger });
+            unconnected.publish("room", "~evict", Buffer.from("u"), "control");
+            expect(unconnected.stats.controlQueued).toBe(0);
+            expect(unconnected.stats.publishSkipped).toBe(1);
+
+            // Held, then forgotten by close(); the old publisher's late `ready` publishes nothing.
+            const { bus } = await replica();
+            const publisher = server.clients.at(-2)!;
+            server.outage();
+            bus.publish("room", "~evict", Buffer.from("u"), "control");
+            bus.close();
+            publisher.isOpen = true;
+            publisher.isReady = true;
+            publisher.emit("ready");
+            await server.settle();
+            expect(server.commands("PUBLISH")).toHaveLength(0);
+
+            // A PUBLISH that fails after close() is not held either.
+            const second = await replica();
+            server.fail.publish = true;
+            second.bus.publish("room", "~evict", Buffer.from("u"), "control");
+            second.bus.close();
+            await server.settle();
+            expect(second.bus.stats.failures).toBe(1);
+            expect(second.bus.stats.controlQueued).toBe(0);
+            server.fail.publish = false;
         });
 
         it("Logs a failure that is not an Error object as it is.", async () => {

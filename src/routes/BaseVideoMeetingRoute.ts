@@ -1214,6 +1214,13 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         await this.revokeChannelGrant(meeting.uid, uid);
         this.relayHub?.evict(meeting.uid, uid);
         this.signalingHub?.evict(meeting.uid, uid);
+        if (this.relayBus && !this.relayBus.connected) {
+            // The bus holds the evictions and publishes them once Redis is back; until then other replicas keep the sockets.
+            this.logger.warn(
+                `Removed ${uid} from video meeting ${meeting.uid} while the relay's Redis is unreachable: other server replicas ` +
+                    "close their sockets once it is back.",
+            );
+        }
     }
 
     @Summary("Lists a video meeting's pending admission requests.")
@@ -1949,7 +1956,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
      * socket whose check read the grant before the revoke was saved, but which attached after the eviction, would stay in for good.
      * This check reads the grant after the attach: either it sees the revoke, or it read the grant before the revoke was saved, in
      * which case the socket was attached before `kick()` evicted, and the eviction (on this replica directly, on another through
-     * the bus, which always carries an eviction) closes it.
+     * the bus, which always carries an eviction, holding it while Redis is unreachable until it is back) closes it.
      */
     private async reauthorizeAttached(
         attached: RelayConnection,
