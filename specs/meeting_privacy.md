@@ -60,6 +60,18 @@ so a key wrapped to a participant's own zero-access key couldn't be opened in th
   - A keyed link goes to no copy this server would store readable: an address on another server, or a mailbox here whose mail is
     zero-access. A mailbox here without zero-access, or any other address on a domain this server serves (a list, an unknown
     address), is skipped with a warning, like a guest with no key (restapi `MeetingInviteSender`, `host.mayCarryMeetingKey`).
+  - **Bounces.** A keyed copy goes out from the organizer's own address (a booker's mail from the host's), so a bounce that returns
+    the whole message, for a mistyped or refused guest, would bring the key back to that mailbox, which may store its mail readable
+    (§2). Each keyed copy therefore asks for a headers-only bounce (`OutboundMessage.dsnReturn: "headers"`; Postfix's sendmail
+    `-R hdrs`, DSN `RET=HDRS`), and a copy without a key asks for nothing. A transport that can't ask (`MailTransport.headersOnlyDsn`
+    unset, such as SES, whose bounce forwarding can't be told) sends a keyed copy only when the organizer's own copy of a bounce may
+    carry the key: their mail is zero-access, or they are elsewhere (restapi `MeetingInviteSender`). Otherwise that guest's copy is
+    skipped with a warning; booking-plugin instead mails the booker the links without their key, as for a booker whose mail is stored
+    readable here.
+  - **Known limit (bounces).** `RET=HDRS` is a request. Postfix passes it on to a next hop that supports DSN, but a remote server that
+    accepts the copy without DSN support and bounces it later decides what its bounce returns, and may return the whole message. This
+    server can't stop that. As below, the leaked key is that meeting's only, expires with it (§8), and lands only in the organizer's
+    own mailbox.
 - **Replies and proposals.** An attendee's copy holds their keyed link in `LOCATION`, so the replies and proposals RapidMX composes for
   an attendee (an iTIP `REPLY`, a `COUNTER` proposing a new time, the resource auto-reply) never carry `LOCATION`. Only a change request
   that asks to move the meeting carries one, the place the guest asks for. The attendee's `#k=` link therefore never travels back to the

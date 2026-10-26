@@ -1796,6 +1796,13 @@ Fixed (findings by review id):
   direct WebRTC media are unaffected). Accepting an unannounced sender would reopen the replay, and every client is served by the same
   deployment, so the mix only lasts for tabs left open across an upgrade.
 
+- **restapi #705 follow-up (keyed invitation bounces).** `specs/meeting_privacy.md` §4.1 gains "Bounces": a keyed copy (and a booker's
+  keyed mail) asks for a headers-only bounce (`OutboundMessage.dsnReturn: "headers"`, sendmail `-R hdrs`, `RET=HDRS`); through a
+  transport without `MailTransport.headersOnlyDsn` (SES) restapi sends a keyed copy only when the organizer's mail is zero-access or
+  they are elsewhere, else skips it with a warning, and booking-plugin mails the booker the links without the key. "Known limit
+  (bounces)": a remote server that accepts the copy without DSN support and bounces it later may still return the whole message.
+  Spec only; restapi 979678f and booking-plugin carry the code.
+
 ## 2026-10-26: Dependency audit
 - **Why.** CI's `validate` job (`validate.sh`: `yarn npm audit -R --severity high --no-deprecations`, production then development) failed on high/critical advisories in transitive dependencies.
 - **Fixed by `resolutions`** in `package.json` (descriptor-scoped, same style as the existing ones; drop each once the parent's own range picks up the fixed version): undici ^8.4.1/^8.10.2 -> ^8.12.3 (jsdom, dev). Only the development audit failed here.
