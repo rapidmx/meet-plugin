@@ -6,7 +6,7 @@
 // in-process - and the relay working across two routes (two server replicas) on one fake Redis. No server is started:
 // the route is constructed and initialized by hand, `authorizeRelay()` is stubbed, and the sockets are fakes.
 import { EventEmitter } from "events";
-import { BaseVideoMeetingRoute } from "../../src/routes/BaseVideoMeetingRoute.js";
+import { BaseVideoMeetingRoute, MEETING_SOCKET_SWEEP_MS } from "../../src/routes/BaseVideoMeetingRoute.js";
 import { InMemoryAdmissionStore, RedisAdmissionStore } from "../../src/util/AdmissionStore.js";
 import { RedisRelayBus } from "../../src/util/RedisRelayBus.js";
 import { InProcessRelayBus, RelayHub } from "../../src/util/RelayHub.js";
@@ -87,7 +87,7 @@ describe("BaseVideoMeetingRoute relay bus", () => {
             [RelayHub, "TestRouteRelayHub"],
             [SignalingHub, "TestRouteSignalingHub"],
         ]);
-        expect(built[3].opts.args[0]).toEqual({ url: "redis://events:6379", logger });
+        expect(built[3].opts.args[0]).toEqual({ url: "redis://events:6379", logger, onSubscriberReady: expect.any(Function) });
         redisRoute.destroyRelayBus();
     });
 
@@ -245,6 +245,106 @@ describe("BaseVideoMeetingRoute relay bus", () => {
 
         replica1.destroyRelayBus();
         replica2.destroyRelayBus();
+    });
+
+    /** Opens a fake socket of `uid` on `r`'s relay or signaling route and says hello. */
+    const open = async (r: any, kind: "relay" | "signal", uid: string): Promise<any> => {
+        const sock: any = new EventEmitter();
+        sock.send = vi.fn();
+        sock.close = vi.fn();
+        await r[kind]("meeting-1", { path: `/${kind}/meeting-1` }, sock, { uid });
+        sock.emit("message", JSON.stringify({ op: "hello", v: 1, peer: uid }), false);
+        return sock;
+    };
+    const removedNotices = (sock: any): any[] =>
+        sock.send.mock.calls.filter((c: any[]) => typeof c[0] === "string").map((c: any[]) => JSON.parse(c[0])).filter((m: any) => m.op === "removed");
+    /** Lets every pending sweep step run. */
+    const flush = async (): Promise<void> => {
+        for (let i = 0; i < 5; i++) {
+            await new Promise((resolve) => setImmediate(resolve));
+        }
+    };
+
+    it("Closes the sockets of a participant kicked while this replica's subscriber was away, once it is back.", async () => {
+        const replica1 = await route({ url: "redis://events:6379" });
+        const replica2 = await route({ url: "redis://events:6379" });
+        const revoked = new Set<string>();
+        replica1.requireOwnedMeeting = async () => ({ uid: "meeting-1" });
+        replica1.revokeChannelGrant = async (_meeting: string, uid: string) => void revoked.add(uid);
+        replica2.authorizeMeetingSocket = async (_id: string, user: any) => (revoked.has(user.uid) ? "Not permitted." : undefined);
+        const bobRelay = await open(replica2, "relay", "bob");
+        const bobSignal = await open(replica2, "signal", "bob");
+        const alice = await open(replica2, "signal", "alice");
+
+        // Only replica 2's subscriber drops: replica 1 publishes the eviction to nobody, holding nothing and warning of nothing.
+        server.disconnect(replica2.relayBus.subscriber);
+        await replica1.kick("meeting-1", "bob");
+        await server.settle();
+        expect(bobSignal.close).not.toHaveBeenCalled();
+        expect(logger.warn).not.toHaveBeenCalled();
+
+        server.recover();
+        await flush();
+        expect(bobRelay.close).toHaveBeenCalledWith(1008, "Removed from the meeting.");
+        expect(bobSignal.close).toHaveBeenCalledWith(1008, "Removed from the meeting.");
+        expect(alice.close).not.toHaveBeenCalled();
+        expect(removedNotices(alice)).toEqual([{ op: "removed", uid: "bob" }]);
+        expect(replica2.meetingSockets.size).toBe(1);
+
+        alice.emit("close");
+        expect(replica2.meetingSockets.size).toBe(0);
+        replica1.destroyRelayBus();
+        replica2.destroyRelayBus();
+    });
+
+    it("Authorizes every socket again on a timer, once per meeting and uid, closing those refused now and keeping one whose check fails.", async () => {
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+        try {
+            const r = await route(null);
+            const refusals = new Map<string, string | Error>();
+            const checks: string[] = [];
+            r.authorizeMeetingSocket = async (_id: string, user: any) => {
+                checks.push(user.uid);
+                const refusal = refusals.get(user.uid);
+                if (refusal instanceof Error) {
+                    throw refusal;
+                }
+                return refusal;
+            };
+            const bobRelay = await open(r, "relay", "bob");
+            const bobSignal = await open(r, "signal", "bob");
+            const carol = await open(r, "signal", "carol");
+            const alice = await open(r, "signal", "alice");
+            checks.length = 0;
+
+            refusals.set("bob", "Not permitted.");
+            refusals.set("carol", new Error("database down"));
+            vi.advanceTimersByTime(MEETING_SOCKET_SWEEP_MS);
+            await flush();
+            expect(checks.sort()).toEqual(["alice", "bob", "carol"]);
+            expect(bobRelay.close).toHaveBeenCalledWith(1008, "Removed from the meeting.");
+            expect(bobSignal.close).toHaveBeenCalledWith(1008, "Removed from the meeting.");
+            expect(carol.close).not.toHaveBeenCalled();
+            expect(logger.debug).toHaveBeenCalledWith("Couldn't authorize the sockets of carol in video meeting meeting-1 again: database down");
+            expect(removedNotices(alice)).toEqual([{ op: "removed", uid: "bob" }]);
+
+            // Asked again while a sweep runs: it runs once more right after, not twice at once.
+            checks.length = 0;
+            refusals.clear();
+            const first = r.sweepMeetingSockets();
+            await r.sweepMeetingSockets();
+            await first;
+            expect(checks.sort()).toEqual(["alice", "alice", "carol", "carol"]);
+
+            // Destroyed: no more sweeps.
+            r.destroyRelayBus();
+            checks.length = 0;
+            vi.advanceTimersByTime(MEETING_SOCKET_SWEEP_MS);
+            await flush();
+            expect(checks).toEqual([]);
+        } finally {
+            vi.useRealTimers();
+        }
     });
 
     it("Carries signaling to, and evicts, a participant connected to another replica.", async () => {

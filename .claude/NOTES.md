@@ -1729,3 +1729,36 @@ Fixed (findings by review id):
   ordinary reconnect case.
 - **#327 (booking-plugin) spec.** §6.2 now says a booker's mailed links carry the key only by §4.1's rule
   (`BaseBookingRoute.mayCarryBookingKey()`), and that the clients keep an opened booker field only when it is text (#329).
+
+## 2026-10-26: Review round 5 fixes
+
+Fixed (findings by review id):
+
+- **#531 An eviction lost on a replica whose Redis subscriber was away.** #325's hold only covers the kicking replica's own publisher:
+  a PUBLISH reaching Redis while another replica's subscriber is disconnected, or hasn't re-issued its SUBSCRIBEs after a Redis
+  restart, reaches nobody there and nothing reports it. The bus is no longer what guarantees an eviction lands. The route keeps a
+  registry of every relay and signaling socket that passed `reauthorizeAttached()` (`meetingSockets`: connection -> meeting uid and
+  JWT user, dropped on close), and `sweepMeetingSockets()` runs `authorizeMeetingSocket()` once per meeting and uid; a refused uid's
+  sockets are closed on this replica (`RelayHub.evictLocal()` and the new public `SignalingHub.evictLocal()`, which also sends the
+  room's `removed` notice), and a check that throws keeps the sockets for the next sweep. It runs every `MEETING_SOCKET_SWEEP_MS`
+  (60 s, unref'd interval started in `initRelayBus()`, cleared in `destroyRelayBus()`), and on each subscriber `ready`
+  (`RedisRelayBusOptions.onSubscriberReady`; node-redis emits `ready` only after its resubscribe). A call while one runs runs it once
+  more afterwards. This also covers the TTL drop of a held eviction, a kicking replica restarting with one held, and a socket that
+  attached while its replica's subscriber was offline (#226's left case). `test/util/fakeRedis.ts` now delivers only to clients that
+  are ready, and has `disconnect(client)` for a one-client drop. **Behavior change:** because the sweep uses the full
+  `authorizeMeetingSocket()`, open sockets of a cancelled or ended meeting, or of a protected meeting past `keyExpiresAt`, are now
+  closed within a minute (before, only new sockets were refused, and the 2026-09 "a meeting cancelled after a socket is attached does
+  not evict it" limitation stood). Spec section 8 says so. Cost: one ACL and one meeting read per meeting and uid per minute per
+  replica. The relay's own on/off setting is not re-checked, so turning the relay off still leaves open relay sockets alone.
+- **#532 Key discard racing a key extension.** `discardMeetingKey()` now claims the meeting first: one update checked against the
+  version the caller read, clearing the certificate, fingerprint, wraps and sealed title, setting `keyDiscardedAt` and the new
+  `keyCleanupPending` (both models and `types.ts`). A racing extension makes it throw before any invitee, link or grant is touched.
+  The rest moved to the new `finishMeetingKeyDiscard()` (delete keyed links, re-token invitees, revoke grants, then clear the flag).
+  `MeetingKeyExpiryJob.run()` first finishes every `keyCleanupPending: true` meeting (batch-limited), then discards expired ones.
+  The cancel path is unchanged (it passes the meeting it just updated).
+- **#533 Unmetered text on the hubs.** `SignalingHub` charges every message, binary or text, valid or not, before `hello` or after,
+  to its message and byte buckets before parsing (`charge()`, the old over-budget handling moved out of `signal()`), so a ping costs a
+  message like a signal does. `RelayHub` charges every text message to a new text bucket (`RELAY_TEXT_RATE_MESSAGES_PER_SECOND` 10,
+  `RELAY_TEXT_BURST_MESSAGES` 50) and its bytes to the existing byte bucket, before parsing; over budget is dropped (no pong) and the
+  shared `overBudget()` closes after 10 s continuously over. The hello now comes out of each socket's burst, so the burst tests
+  expect one frame/message fewer. Binary sent to relay before `hello` is still dropped as invalid without charging (no parse).

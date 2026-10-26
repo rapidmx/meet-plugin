@@ -137,6 +137,11 @@ const RELAY_NOT_PERMITTED = "Not permitted.";
  * can arrive while the meeting is still being looked up); the rest are dropped. */
 const RELAY_MAX_QUEUED_MESSAGES = 8;
 
+/** How often every relay and signaling socket this replica holds is authorized again (`sweepMeetingSockets()`), so one whose
+ * grant was revoked (a kick whose eviction never reached this replica, a discarded key) or whose meeting was cancelled or ended
+ * is closed within this long. One ACL and one meeting read per meeting and uid each time. */
+export const MEETING_SOCKET_SWEEP_MS = 60_000;
+
 /** The request body accepted by `create()`. */
 export interface CreateVideoMeetingBody {
     mailboxUid?: string;
@@ -575,6 +580,17 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
     /** `admissions` when it is on Redis, to close with the route. */
     private redisAdmissions?: RedisAdmissionStore;
 
+    /** Every relay and signaling socket of this replica that passed `reauthorizeAttached()` and hasn't closed: the meeting it is in
+     * and who opened it, for `sweepMeetingSockets()`. */
+    private readonly meetingSockets: Map<RelayConnection, { meetingUid: string; user: JWTUser }> = new Map();
+
+    /** Runs `sweepMeetingSockets()` every `MEETING_SOCKET_SWEEP_MS`, from `initRelayBus()` until the route is destroyed. */
+    private sweepTimer?: ReturnType<typeof setInterval>;
+
+    /** Whether `sweepMeetingSockets()` is running, and whether it was asked to run again meanwhile. */
+    private sweeping: boolean = false;
+    private sweepAgain: boolean = false;
+
     /**
      * Exposes the `@Model(...)`-supplied entity class as an instance property so `@Transactional()` on
      * `persistMeeting()` can resolve which datasource to open a transaction against - identical to
@@ -612,7 +628,8 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         } else {
             const redisBus: RedisRelayBus = await this._objectFactory.newInstance(RedisRelayBus, {
                 name: `${name}RedisRelayBus`,
-                args: [{ url, logger: this.logger }],
+                // An eviction published while this replica's subscriber was away never arrives: check every socket again.
+                args: [{ url, logger: this.logger, onSubscriberReady: () => void this.sweepMeetingSockets() }],
             });
             try {
                 await redisBus.connect();
@@ -641,12 +658,16 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             name: `${name}SignalingHub`,
             args: [{ bus, maxPayloadBytes: SIGNALING_MESSAGE_LIMIT_BYTES, logger: { debug: (message: string) => this.logger.debug(message) } }],
         });
+        this.sweepTimer = setInterval(() => void this.sweepMeetingSockets(), MEETING_SOCKET_SWEEP_MS);
+        this.sweepTimer.unref();
     }
 
     /** Disconnects the Redis relay bus, if there is one, when the object factory destroys the route. (The factory
      * runs one destroy method per object: a subclass declaring its own `@Destroy` must call this one.) */
     @Destroy
     public destroyRelayBus(): void {
+        clearInterval(this.sweepTimer);
+        this.sweepTimer = undefined;
         this.relayBus?.close();
         this.relayBus = undefined;
         this.redisAdmissions?.close();
@@ -1861,7 +1882,10 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         });
         sock.on("close", () => {
             closed = true;
-            conn?.close();
+            if (conn) {
+                this.meetingSockets.delete(conn);
+                conn.close();
+            }
         });
 
         let refusal: string | undefined;
@@ -1885,6 +1909,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             return;
         }
         conn = attached;
+        this.meetingSockets.set(attached, { meetingUid: id!, user: user! });
         for (const message of queued) {
             conn.message(message.data, message.isBinary);
         }
@@ -1919,7 +1944,10 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         });
         sock.on("close", () => {
             closed = true;
-            conn?.close();
+            if (conn) {
+                this.meetingSockets.delete(conn);
+                conn.close();
+            }
         });
 
         let refusal: string | undefined;
@@ -1942,6 +1970,7 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             return;
         }
         conn = attached;
+        this.meetingSockets.set(attached, { meetingUid: id!, user: user! });
         for (const message of queued) {
             conn.message(message.data, message.isBinary);
         }
@@ -1955,8 +1984,10 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
      * The first check alone leaves a gap: `kick()` saves the revoked grant and then evicts the sockets already in the room, so a
      * socket whose check read the grant before the revoke was saved, but which attached after the eviction, would stay in for good.
      * This check reads the grant after the attach: either it sees the revoke, or it read the grant before the revoke was saved, in
-     * which case the socket was attached before `kick()` evicted, and the eviction (on this replica directly, on another through
-     * the bus, which always carries an eviction, holding it while Redis is unreachable until it is back) closes it.
+     * which case the socket was attached before `kick()` evicted, and the eviction closes it: on this replica directly, on another
+     * through the bus (which holds it while the kicking replica's Redis is unreachable), or, when the bus lost it on the way
+     * because this replica's subscriber was away, `sweepMeetingSockets()` once the subscriber is back, or at the latest within
+     * `MEETING_SOCKET_SWEEP_MS`.
      */
     private async reauthorizeAttached(
         attached: RelayConnection,
@@ -1985,5 +2016,54 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
             return false;
         }
         return true;
+    }
+
+    /**
+     * Authorizes every relay and signaling socket this replica holds (`meetingSockets`) again, once per meeting and uid, and closes
+     * every socket of a uid that is refused now (`authorizeMeetingSocket()`: no grant left, or the meeting is gone, cancelled, ended
+     * or its key gone), telling the rest of its signaling room that the uid was removed. Runs every `MEETING_SOCKET_SWEEP_MS` and
+     * each time the Redis bus's subscriber is back (`RedisRelayBusOptions.onSubscriberReady`): a kick's eviction is one PUBLISH,
+     * which is lost for a replica whose subscriber was disconnected or had not subscribed again yet, and for any replica once the
+     * kicking replica held it past `REDIS_RELAY_CONTROL_QUEUE_TTL_MS` or restarted. A check that fails leaves the uid's sockets for
+     * the next sweep. A call made while one runs runs it once more afterwards, so a resync never waits for the timer.
+     */
+    private async sweepMeetingSockets(): Promise<void> {
+        if (this.sweeping) {
+            this.sweepAgain = true;
+            return;
+        }
+        this.sweeping = true;
+        do {
+            this.sweepAgain = false;
+            const held: Map<string, { meetingUid: string; user: JWTUser }> = new Map();
+            for (const socket of this.meetingSockets.values()) {
+                held.set(JSON.stringify([socket.meetingUid, socket.user.uid]), socket);
+            }
+            for (const { meetingUid, user } of held.values()) {
+                await this.recheckMeetingSockets(meetingUid, user);
+            }
+        } while (this.sweepAgain);
+        this.sweeping = false;
+    }
+
+    /** `sweepMeetingSockets()` for the sockets `user` holds in meeting `meetingUid`. Never throws. */
+    private async recheckMeetingSockets(meetingUid: string, user: JWTUser): Promise<void> {
+        let refusal: string | undefined;
+        try {
+            refusal = await this.authorizeMeetingSocket(meetingUid, user);
+        } catch (err: any) {
+            this.logger.debug(`Couldn't authorize the sockets of ${user.uid} in video meeting ${meetingUid} again: ${err?.message ?? err}`);
+            return;
+        }
+        if (!refusal) {
+            return;
+        }
+        for (const [conn, socket] of this.meetingSockets) {
+            if (socket.meetingUid === meetingUid && socket.user.uid === user.uid) {
+                this.meetingSockets.delete(conn);
+            }
+        }
+        this.relayHub!.evictLocal(meetingUid, user.uid);
+        this.signalingHub!.evictLocal(meetingUid, user.uid);
     }
 }

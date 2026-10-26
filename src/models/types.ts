@@ -160,6 +160,10 @@ export interface VideoMeeting extends BaseEntity {
     /** When `MeetingKeyExpiryJob` discarded the key, its wraps and the guest-readable sealed copies. */
     keyDiscardedAt?: Date | null;
 
+    /** Set while a discarded key's cleanup is unfinished (`discardMeetingKey()` claims the meeting before it touches anything else): the
+     * invitees' join tokens, their keyed attendee links and the participants' grants. `MeetingKeyExpiryJob` finishes it. */
+    keyCleanupPending?: boolean | null;
+
     /** A protected meeting's key sealed to the organizer's zero-access certificate (`specs/meeting_privacy.md` §4.2), so any of the
      * organizer's devices can reopen it to invite again. Returned only to whoever may read that mailbox. */
     keyWraps?: MeetingKeyWrap[] | null;

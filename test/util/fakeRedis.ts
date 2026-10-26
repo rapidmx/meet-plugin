@@ -183,11 +183,12 @@ export class FakeRedisServer {
         }
     }
 
-    /** Delivers a published message to every subscriber of `channel` - asynchronously, as Redis does. */
+    /** Delivers a published message to every subscriber of `channel` - asynchronously, as Redis does - whose connection is up: one
+     * that is down (`outage()`, `disconnect()`) misses it for good, as Redis pub/sub keeps nothing for it. */
     public deliver(channel: string, message: Buffer | string): void {
         const copy: Buffer | string = typeof message === "string" ? message : Buffer.from(message);
         queueMicrotask(() => {
-            for (const client of this.clients) {
+            for (const client of this.clients.filter((c) => c.isReady)) {
                 for (const subscription of [...(client.subscriptions.get(channel) ?? [])]) {
                     subscription.listener(copy as Buffer, Buffer.from(channel));
                 }
@@ -205,6 +206,11 @@ export class FakeRedisServer {
         for (const client of this.clients) {
             client.isReady = false;
         }
+    }
+
+    /** Simulates one client's connection dropping on its own (a network blip only it sees); `recover()` brings it back. */
+    public disconnect(client: FakeRedisClient): void {
+        client.isReady = false;
     }
 
     /** Simulates the connection coming back; node-redis has re-issued the subscriptions by then, and emits `ready` on

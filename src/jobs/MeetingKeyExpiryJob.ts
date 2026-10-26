@@ -6,7 +6,7 @@ import { ObjectDecorators } from "@rapidrest/core";
 import { ACLUtils, BackgroundService, ObjectFactory, RepoUtils } from "@rapidrest/service-core";
 import type { CalendarEventAttendeeLink } from "@rapidmx/restapi";
 import type { VideoMeeting, VideoMeetingInvitee } from "../models/types.js";
-import { discardMeetingKey } from "../util/MeetingProtectionUtils.js";
+import { discardMeetingKey, finishMeetingKeyDiscard, type MeetingKeyRepos } from "../util/MeetingProtectionUtils.js";
 const { Config, Init, Inject, Logger } = ObjectDecorators;
 
 /** The most meetings one run discards. */
@@ -16,7 +16,8 @@ const BATCH = 200;
  * Discards the key of each protected meeting whose `keyExpiresAt` has passed (`specs/meeting_privacy.md` §8): its certificate, every
  * wrap, the guest-readable sealed title and names, the invitees' join tokens (replaced, so the old links stop resolving), the keyed
  * attendee links of those invitees, and the participants' grants on the meeting's own ACL (`discardMeetingKey()`). Joining answers 410 from `keyExpiresAt` on whether or not this has
- * run yet. Idempotent: a meeting is marked `keyDiscardedAt` and never selected again, and every replica may run it.
+ * run yet. Idempotent: a meeting is marked `keyDiscardedAt` and never selected again, and every replica may run it. A meeting whose
+ * discard was claimed but whose cleanup failed (`keyCleanupPending`, cancelled meetings included) is finished first, on every run.
  */
 export abstract class MeetingKeyExpiryJob extends BackgroundService {
     protected abstract meetingClass: any;
@@ -66,6 +67,14 @@ export abstract class MeetingKeyExpiryJob extends BackgroundService {
     }
 
     public async run(): Promise<void> {
+        const unfinished: VideoMeeting[] = await this.meetingRepo!.find({ keyCleanupPending: true, limit: this.batchSize } as any, {
+            ignoreACL: true,
+            limit: this.batchSize,
+            skipCache: true,
+        });
+        for (const meeting of unfinished) {
+            await this.attempt(meeting, finishMeetingKeyDiscard);
+        }
         const now: number = Date.now();
         // Selected by flag, soonest expiry first, and filtered by time here (a date comparison in the query isn't reliable on every
         // backend): every meeting after the first unexpired one expires later still, so the run stops there, and meetings holding a
@@ -81,20 +90,22 @@ export abstract class MeetingKeyExpiryJob extends BackgroundService {
             if (new Date(meeting.keyExpiresAt).valueOf() > now) {
                 break;
             }
-            await this.discard(meeting);
+            await this.attempt(meeting, discardMeetingKey);
         }
     }
 
-    private async discard(meeting: VideoMeeting): Promise<void> {
+    /** Runs `step` (`discardMeetingKey()` or `finishMeetingKeyDiscard()`) on `meeting`, logging a failure. */
+    private async attempt(meeting: VideoMeeting, step: (meeting: VideoMeeting, repos: MeetingKeyRepos) => Promise<VideoMeeting>): Promise<void> {
         try {
-            await discardMeetingKey(meeting, {
+            await step(meeting, {
                 meetingRepo: this.meetingRepo!,
                 inviteeRepo: this.inviteeRepo!,
                 attendeeLinkRepo: this.attendeeLinkRepo!,
                 aclUtils: this.aclUtils!,
             });
         } catch (err: any) {
-            // Changed meanwhile, or the store is unavailable: the next run takes it again (joining is already refused).
+            // Changed meanwhile (an extended key is then simply not discarded), or the store is unavailable: the next run takes it
+            // again, and joining is already refused either way.
             this.logger?.warn(`MeetingKeyExpiryJob: couldn't discard the key of meeting ${meeting.uid} yet: ${err?.message ?? err}`);
         }
     }

@@ -368,11 +368,12 @@ describe("SignalingHub", () => {
         it("Passes a full burst of messages, drops beyond it, and passes again once the bucket has refilled.", () => {
             const a = connect(hub, "room", "alice");
             const b = connect(hub, "room", "bob");
+            // The hello took one message of the burst.
             for (let i = 0; i < SIGNALING_BURST_MESSAGES + 5; i++) {
                 signal(a, { i });
             }
-            expect(b.sock.signals).toHaveLength(SIGNALING_BURST_MESSAGES);
-            expect(hub.stats.droppedBudget).toBe(5);
+            expect(b.sock.signals).toHaveLength(SIGNALING_BURST_MESSAGES - 1);
+            expect(hub.stats.droppedBudget).toBe(6);
             expect(a.sock.closed).toBeUndefined();
 
             // 50 messages a second: a tenth of a second buys 5 more.
@@ -380,7 +381,7 @@ describe("SignalingHub", () => {
             for (let i = 0; i < 10; i++) {
                 signal(a, { i });
             }
-            expect(b.sock.signals).toHaveLength(SIGNALING_BURST_MESSAGES + 5);
+            expect(b.sock.signals).toHaveLength(SIGNALING_BURST_MESSAGES - 1 + 5);
         });
 
         it("Limits bytes as well as messages.", () => {
@@ -430,8 +431,60 @@ describe("SignalingHub", () => {
                 }
                 vi.advanceTimersByTime(5000);
             }
-            expect(hub.stats.droppedBudget).toBe(8);
+            // Two drops in the first round, whose burst the hello had already dipped into.
+            expect(hub.stats.droppedBudget).toBe(9);
             expect(a.sock.closed).toBeUndefined();
+        });
+    });
+
+    describe("rate limiting of everything else", () => {
+        const pongs = (p: Peer): number => p.sock.texts.filter((m) => m.op === "pong").length;
+
+        it("Meters a ping, a binary message and malformed text before anything else, so a flood of them gets dropped.", () => {
+            const a = connect(hub, "room", "alice");
+            // The hello took one message of the burst.
+            for (let i = 0; i < SIGNALING_BURST_MESSAGES + 4; i++) {
+                text(a.conn, { op: "ping", t: i });
+            }
+            expect(pongs(a)).toBe(SIGNALING_BURST_MESSAGES - 1);
+            expect(hub.stats.droppedBudget).toBe(5);
+
+            // Fifty a second: a second buys fifty more, which binary and malformed messages use up.
+            vi.advanceTimersByTime(1000);
+            for (let i = 0; i < 25; i++) {
+                a.conn.message(new Uint8Array([1, 2, 3]), true);
+                text(a.conn, "not json");
+            }
+            expect(hub.stats.droppedInvalid).toBe(50);
+            text(a.conn, { op: "ping", t: 1 });
+            a.conn.message(new Uint8Array([1]), true);
+            expect(pongs(a)).toBe(SIGNALING_BURST_MESSAGES - 1);
+            expect(hub.stats.droppedBudget).toBe(7);
+            expect(hub.stats.droppedInvalid).toBe(50);
+        });
+
+        it("Closes a socket that keeps flooding pings for more than 10 seconds with 1008 \"Too much data.\".", () => {
+            const a = connect(hub, "room", "alice");
+            let elapsed = 0;
+            while (!a.sock.closed && elapsed < SIGNALING_OVER_BUDGET_CLOSE_MS * 3) {
+                for (let i = 0; i < 20; i++) {
+                    text(a.conn, { op: "ping", t: i, pad: "x".repeat(1000) });
+                }
+                vi.advanceTimersByTime(100);
+                elapsed += 100;
+            }
+            expect(a.sock.closed).toEqual({ code: 1008, reason: "Too much data." });
+            expect(elapsed).toBeLessThan(SIGNALING_OVER_BUDGET_CLOSE_MS + 3000);
+        });
+
+        it("Never meters a client pinging as its keepalive does.", () => {
+            const a = connect(hub, "room", "alice");
+            for (let i = 0; i < 300; i++) {
+                text(a.conn, { op: "ping", t: i });
+                vi.advanceTimersByTime(1000);
+            }
+            expect(pongs(a)).toBe(300);
+            expect(hub.stats.droppedBudget).toBe(0);
         });
     });
 

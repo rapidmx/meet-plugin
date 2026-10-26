@@ -101,7 +101,7 @@ interface ConnectionEnv {
 export interface SignalingStats {
     /** Messages handed to a receiving socket. */
     delivered: number;
-    /** Messages dropped because their sender was over budget. */
+    /** Messages (any of them, binary or text, valid or not) dropped because their sender was over budget. */
     droppedBudget: number;
     /** Messages dropped for being malformed, oversized, or sent before `hello`. */
     droppedInvalid: number;
@@ -128,6 +128,12 @@ class Connection implements RelayConnection {
 
     public message(data: string | Uint8Array, isBinary: boolean): void {
         if (this.closed) {
+            return;
+        }
+        // Every message is metered before anything else is done with it - a ping, a malformed or binary one, or one sent before
+        // `hello` costs the event loop as a signal does.
+        const size: number = typeof data === "string" ? Buffer.byteLength(data, "utf8") : data.byteLength;
+        if (!this.charge(size)) {
             return;
         }
         if (isBinary) {
@@ -187,7 +193,7 @@ class Connection implements RelayConnection {
                 this.stats.droppedInvalid++;
             }
         } else if (message.op === "signal") {
-            this.signal(message.data, Buffer.byteLength(text, "utf8"));
+            this.signal(message.data);
         } else if (message.op === "ping") {
             if (typeof message.t === "number" && Number.isFinite(message.t)) {
                 this.send(JSON.stringify({ op: "pong", t: message.t }));
@@ -215,21 +221,27 @@ class Connection implements RelayConnection {
         this.send(JSON.stringify({ op: "ready", v: SIGNALING_PROTOCOL_VERSION, maxMessageBytes: this.env.maxPayloadBytes }));
     }
 
-    private signal(data: unknown, size: number): void {
+    /** Takes one message of `size` bytes from the socket's budget; over it, drops the message (returning `false`) and closes the
+     * socket once it has been over budget continuously for more than `SIGNALING_OVER_BUDGET_CLOSE_MS`. */
+    private charge(size: number): boolean {
+        const now: number = Date.now();
+        if (this.budget.take(size, now)) {
+            return true;
+        }
+        this.stats.droppedBudget++;
+        if (this.overBudgetSince === undefined || now - this.lastOverBudget > SIGNALING_OVER_BUDGET_GRACE_MS) {
+            this.overBudgetSince = now;
+        }
+        this.lastOverBudget = now;
+        if (now - this.overBudgetSince > SIGNALING_OVER_BUDGET_CLOSE_MS) {
+            this.evict("Too much data.");
+        }
+        return false;
+    }
+
+    private signal(data: unknown): void {
         if (!data || typeof data !== "object" || Array.isArray(data)) {
             this.stats.droppedInvalid++;
-            return;
-        }
-        const now: number = Date.now();
-        if (!this.budget.take(size, now)) {
-            this.stats.droppedBudget++;
-            if (this.overBudgetSince === undefined || now - this.lastOverBudget > SIGNALING_OVER_BUDGET_GRACE_MS) {
-                this.overBudgetSince = now;
-            }
-            this.lastOverBudget = now;
-            if (now - this.overBudgetSince > SIGNALING_OVER_BUDGET_CLOSE_MS) {
-                this.evict("Too much data.");
-            }
             return;
         }
         // Who sent it is stamped here from the authenticated socket and its `hello`, never read from the payload.
@@ -284,8 +296,9 @@ export interface SignalingHubOptions {
  * ## Limits and removal
  *
  * `SIGNALING_MAX_SOCKETS_PER_ROOM` sockets per room and `SIGNALING_MAX_SOCKETS_PER_UID` per uid per room ("Room full."
- * / "Too many connections."). Each socket's messages are metered by two token buckets (messages and bytes); an
- * over-budget message is dropped, and a socket kept over budget for `SIGNALING_OVER_BUDGET_CLOSE_MS` is closed with
+ * / "Too many connections."). Each socket's messages - every one, before it is parsed: signals, pings, and anything malformed,
+ * binary or sent before `hello` - are metered by two token buckets (messages and bytes); an over-budget message is dropped
+ * (a ping then gets no pong), and a socket kept over budget for `SIGNALING_OVER_BUDGET_CLOSE_MS` is closed with
  * "Too much data.". `evict()` closes every socket of one uid in a room, on every replica the bus reaches - the host
  * removing someone takes them off the signaling channel at once, not at their next reconnect - and then tells every
  * other socket of the room `{"op":"removed","uid":"<uid>"}`, once per replica. That notice comes from the server
@@ -364,11 +377,18 @@ export class SignalingHub {
         this.bus.publish(signalingBusRoom(roomId), SIGNALING_EVICT_SENDER, Buffer.from(JSON.stringify(frame), "utf8"), "control");
         // A replica with no socket in the room has no bus subscription to hear that on - including this one, possibly.
         // The rest of the room is told by the bus frame's delivery alone, so each replica tells its sockets once.
-        this.evictLocal(signalingBusRoom(roomId), uid, false);
+        this.evictInBusRoom(signalingBusRoom(roomId), uid, false);
+    }
+
+    /** Closes every socket `uid` holds in room `roomId` on this replica only (`SIGNALING_EVICTED_REASON`), and tells every socket
+     * left in it there that `uid` was removed - for a caller that found on its own that `uid` may no longer be there, so every
+     * replica that holds such sockets finds it too. */
+    public evictLocal(roomId: string, uid: string): void {
+        this.evictInBusRoom(signalingBusRoom(roomId), uid, true);
     }
 
     /** Closes `uid`'s sockets in `busRoom` and, with `notify`, tells every socket left in it that `uid` was removed. */
-    private evictLocal(busRoom: string, uid: string, notify: boolean): void {
+    private evictInBusRoom(busRoom: string, uid: string, notify: boolean): void {
         const room: Room | undefined = this.rooms.get(busRoom);
         for (const conn of [...(room?.conns ?? [])]) {
             if (conn.uid === uid) {
@@ -408,7 +428,7 @@ export class SignalingHub {
         }
         if (frame?.t === "evict") {
             if (typeof frame.uid === "string") {
-                this.evictLocal(busRoom, frame.uid, true);
+                this.evictInBusRoom(busRoom, frame.uid, true);
             }
             return;
         }

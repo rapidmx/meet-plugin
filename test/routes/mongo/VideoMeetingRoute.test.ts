@@ -23,6 +23,7 @@ import { personalRoomSuite } from "../personalRoomSuite.js";
 import { meetingProtectionSuite } from "../meetingProtectionSuite.js";
 import { MAX_PENDING_ADMISSIONS, MAX_PENDING_ADMISSIONS_PER_SOURCE } from "../../../src/util/AdmissionStore.js";
 import { MeetingKeyExpiryJobMongo } from "../../../src/jobs/mongo/MeetingKeyExpiryJobMongo.js";
+import { discardMeetingKey } from "../../../src/util/MeetingProtectionUtils.js";
 import { videoMeetingSecuritySuite } from "../videoMeetingSecuritySuite.js";
 
 const redis = vi.hoisted(() => ({ createClient: vi.fn() }));
@@ -1313,10 +1314,20 @@ describe("Route:VideoMeetingMongo Tests", () => {
         setKeyExpiresAt: async (uid: string, at: Date) => {
             await meetingRepo.updateOne({ uid } as any, { $set: { keyExpiresAt: at } } as any);
         },
-        runExpiry: async (batchSize?: number) => {
+        runExpiry: async (batchSize?: number, prepare?: (job: any) => void) => {
             const job: any = await objectFactory.newInstance(MeetingKeyExpiryJobMongo, { name: "expiry-test" });
             job.batchSize = batchSize ?? 200;
+            prepare?.(job);
             await job.run();
+        },
+        discardKey: async (meeting: any) => {
+            const route: any = objectFactory.getInstance("routes.VideoMeetingRoute");
+            return await discardMeetingKey(meeting, {
+                meetingRepo: route.meetingRepo,
+                inviteeRepo: route.inviteeRepo,
+                attendeeLinkRepo: route.attendeeLinkRepo,
+                aclUtils: route.aclUtils,
+            });
         },
         authorizeSocket: async (meetingUid: string, user: any) =>
             await objectFactory.getInstance("routes.VideoMeetingRoute").authorizeMeetingSocket(meetingUid, user),

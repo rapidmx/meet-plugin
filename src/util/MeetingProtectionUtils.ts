@@ -114,13 +114,39 @@ export async function revokeParticipantGrants(meetingUid: string, aclUtils: ACLU
 
 /**
  * Discards protected `meeting`'s key (`specs/meeting_privacy.md` §8), at expiry (`MeetingKeyExpiryJob`) or when the meeting is cancelled.
- * Deletes the keyed attendee links of the meeting's own invitees, matched by their join tokens as `BaseVideoMeetingRoute.deleteAttendeeLinks()`
- * matches them, so another meeting on the same calendar event keeps its links. Then replaces the invitees' join tokens and clears their
- * sealed names, removes the participants' grants from the meeting's own ACL (`revokeParticipantGrants()`), and finally clears the
- * certificate, the wraps and the sealed title and marks the meeting `keyDiscardedAt`. Returns the updated meeting. Throws whatever the
- * store throws (a version conflict included); everything done before that is safe to do again.
+ * First claims the meeting, with an update checked against the version the caller read: it clears the certificate, the wraps and the
+ * sealed title, marks it `keyDiscardedAt` and sets `keyCleanupPending`. Only then does `finishMeetingKeyDiscard()` touch the invitees,
+ * their links and the grants. So a change made since the caller's read (an extended `keyExpiresAt` above all) makes the discard throw
+ * before anything is lost, and once the claim is saved no extension can succeed, since the key is gone. Returns the updated meeting.
+ * Throws whatever the store throws (a version conflict included); a failure after the claim leaves `keyCleanupPending` set, and
+ * `MeetingKeyExpiryJob` finishes the cleanup on its next run.
  */
 export async function discardMeetingKey<VM extends VideoMeeting>(meeting: VM, repos: MeetingKeyRepos<VM>): Promise<VM> {
+    const claimed: VM = await repos.meetingRepo.update(
+        {
+            uid: meeting.uid,
+            version: (meeting as any).version,
+            meetingKeyCertificate: null,
+            meetingKeyFingerprint: null,
+            keyWraps: null,
+            sealedFields: null,
+            keyDiscardedAt: new Date(),
+            keyCleanupPending: true,
+        } as any,
+        meeting,
+        { ignoreACL: true },
+    );
+    return await finishMeetingKeyDiscard(claimed, repos);
+}
+
+/**
+ * The cleanup of discarded `meeting` (`discardMeetingKey()`, which has already cleared its key and marked it). Deletes the keyed attendee
+ * links of the meeting's own invitees, matched by their join tokens as `BaseVideoMeetingRoute.deleteAttendeeLinks()` matches them, so
+ * another meeting on the same calendar event keeps its links. Then replaces the invitees' join tokens and clears their sealed names,
+ * removes the participants' grants from the meeting's own ACL (`revokeParticipantGrants()`), and finally clears `keyCleanupPending`.
+ * Returns the updated meeting. Every step is safe to do again, so a failure (thrown) leaves the flag for the next run of the job.
+ */
+export async function finishMeetingKeyDiscard<VM extends VideoMeeting>(meeting: VM, repos: MeetingKeyRepos<VM>): Promise<VM> {
     const invitees: VideoMeetingInvitee[] = await repos.inviteeRepo.find({ meetingUid: ModelUtils.literal(meeting.uid) } as any, { ignoreACL: true });
     if (meeting.calendarEventUid) {
         const links: CalendarEventAttendeeLink[] = await repos.attendeeLinkRepo.find(
@@ -141,19 +167,9 @@ export async function discardMeetingKey<VM extends VideoMeeting>(meeting: VM, re
         );
     }
     await revokeParticipantGrants(meeting.uid, repos.aclUtils);
-    return await repos.meetingRepo.update(
-        {
-            uid: meeting.uid,
-            version: (meeting as any).version,
-            meetingKeyCertificate: null,
-            meetingKeyFingerprint: null,
-            keyWraps: null,
-            sealedFields: null,
-            keyDiscardedAt: new Date(),
-        } as any,
-        meeting,
-        { ignoreACL: true },
-    );
+    return await repos.meetingRepo.update({ uid: meeting.uid, version: (meeting as any).version, keyCleanupPending: null } as any, meeting, {
+        ignoreACL: true,
+    });
 }
 
 /**

@@ -16,6 +16,7 @@ import {
     RELAY_MAX_SOCKETS_PER_UID,
     RELAY_MAX_WANT_PEERS,
     RELAY_OVER_BUDGET_CLOSE_MS,
+    RELAY_TEXT_BURST_MESSAGES,
     RelayHub,
     type RelayBus,
     type RelayBusListener,
@@ -389,12 +390,13 @@ describe("RelayHub", () => {
             const b = connect(hub, "room", "bob");
             want(b, ["alice"]);
 
-            for (let i = 0; i < burstFrames; i++) {
+            // The hello's few bytes came out of the same burst, so the last full frame no longer fits.
+            for (let i = 0; i < burstFrames - 1; i++) {
                 binary(a.conn, chunk);
             }
-            expect(b.sock.frames).toHaveLength(burstFrames);
+            expect(b.sock.frames).toHaveLength(burstFrames - 1);
             binary(a.conn, chunk);
-            expect(b.sock.frames).toHaveLength(burstFrames);
+            expect(b.sock.frames).toHaveLength(burstFrames - 1);
             expect(hub.stats.framesDroppedBudget).toBe(1);
             expect(a.sock.closed).toBeUndefined();
 
@@ -403,7 +405,7 @@ describe("RelayHub", () => {
             for (let i = 0; i < 20; i++) {
                 binary(a.conn, chunk);
             }
-            expect(b.sock.frames).toHaveLength(burstFrames + 16);
+            expect(b.sock.frames).toHaveLength(burstFrames - 1 + 16);
         });
 
         it("Closes a socket kept over budget for more than 10 seconds with 1008 \"Too much data.\".", () => {
@@ -441,8 +443,76 @@ describe("RelayHub", () => {
                 }
                 vi.advanceTimersByTime(2000);
             }
-            expect(hub.stats.framesDroppedBudget).toBe(8);
+            // Two drops in the first round, whose burst the hello had already dipped into.
+            expect(hub.stats.framesDroppedBudget).toBe(9);
             expect(a.sock.closed).toBeUndefined();
+        });
+    });
+
+    describe("rate limiting of text", () => {
+        const pongs = (p: Peer): number => p.sock.texts.filter((m) => m.op === "pong").length;
+
+        it("Meters every text message, however small: a ping past the text budget gets no pong, and the budget refills.", () => {
+            const a = connect(hub, "room", "alice");
+            // The hello took one message of the burst.
+            for (let i = 0; i < RELAY_TEXT_BURST_MESSAGES + 4; i++) {
+                text(a.conn, { op: "ping", t: i });
+            }
+            expect(pongs(a)).toBe(RELAY_TEXT_BURST_MESSAGES - 1);
+            expect(hub.stats.framesDroppedBudget).toBe(5);
+            // Malformed text and a `want` take from it too.
+            text(a.conn, "not json");
+            want(a, ["bob"]);
+            expect(hub.stats.framesDroppedBudget).toBe(7);
+
+            // Ten a second: a second buys ten more, sent as bytes this time.
+            vi.advanceTimersByTime(1000);
+            for (let i = 0; i < 12; i++) {
+                a.conn.message(Buffer.from(JSON.stringify({ op: "ping", t: i }), "utf8"), false);
+            }
+            expect(pongs(a)).toBe(RELAY_TEXT_BURST_MESSAGES - 1 + 10);
+            expect(a.sock.closed).toBeUndefined();
+        });
+
+        it("Charges text to the byte budget as well.", () => {
+            const big = new RelayHub({ maxPayloadBytes: RELAY_LARGE_PAYLOAD_BYTES });
+            const a = connect(big, "room", "alice");
+            const pad = "x".repeat(RELAY_LARGE_PAYLOAD_BYTES - 100);
+            for (let i = 0; i < 20; i++) {
+                text(a.conn, { op: "ping", t: i, pad });
+            }
+            // About sixteen 64 KiB messages fit in the 1 MiB burst, well within the text burst.
+            expect(pongs(a)).toBe(Math.floor(RELAY_BURST_BYTES / (RELAY_LARGE_PAYLOAD_BYTES - 100 + '{"op":"ping","t":10,"pad":""}'.length)));
+            expect(big.stats.framesDroppedBudget).toBe(20 - pongs(a));
+        });
+
+        it("Closes a socket that keeps flooding text for more than 10 seconds with 1008 \"Too much data.\".", () => {
+            const a = connect(hub, "room", "alice");
+            let elapsed = 0;
+            while (!a.sock.closed && elapsed < RELAY_OVER_BUDGET_CLOSE_MS * 3) {
+                // 100 pings a second against a budget of 10.
+                for (let i = 0; i < 10; i++) {
+                    text(a.conn, { op: "ping", t: i });
+                }
+                vi.advanceTimersByTime(100);
+                elapsed += 100;
+            }
+            expect(a.sock.closed).toEqual({ code: 1008, reason: "Too much data." });
+            expect(elapsed).toBeGreaterThan(RELAY_OVER_BUDGET_CLOSE_MS);
+            expect(elapsed).toBeLessThan(RELAY_OVER_BUDGET_CLOSE_MS + 2000);
+        });
+
+        it("Never meters a client pinging every two seconds and changing what it wants now and then.", () => {
+            const a = connect(hub, "room", "alice");
+            for (let i = 0; i < 300; i++) {
+                text(a.conn, { op: "ping", t: i });
+                if (i % 5 === 0) {
+                    want(a, [`peer-${i}`]);
+                }
+                vi.advanceTimersByTime(2000);
+            }
+            expect(pongs(a)).toBe(300);
+            expect(hub.stats.framesDroppedBudget).toBe(0);
         });
     });
 

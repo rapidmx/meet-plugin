@@ -20,8 +20,10 @@ export interface MeetingProtectionSuiteContext {
     findGrants: (uid: string) => Promise<{ userOrRoleId: string; actions: string[] }[]>;
     /** Sets a meeting's `keyExpiresAt` straight in the datastore. */
     setKeyExpiresAt: (uid: string, at: Date) => Promise<void>;
-    /** Runs `MeetingKeyExpiryJob` once, looking at `batchSize` meetings at most when given. */
-    runExpiry: (batchSize?: number) => Promise<void>;
+    /** Runs `MeetingKeyExpiryJob` once, looking at `batchSize` meetings at most when given, after `prepare` has had the job. */
+    runExpiry: (batchSize?: number, prepare?: (job: any) => void) => Promise<void>;
+    /** `discardMeetingKey()` on `meeting` (a copy read earlier), with the route's stores. */
+    discardKey: (meeting: any) => Promise<any>;
     /** `authorizeMeetingSocket()` of the route: why a signaling or relay socket of `user` would be refused, or `undefined`. */
     authorizeSocket: (meetingUid: string, user: any) => Promise<string | undefined>;
     /** The route's waiting-room store (`AdmissionStore`). */
@@ -198,6 +200,62 @@ export function meetingProtectionSuite(ctx: MeetingProtectionSuiteContext): void
             // Already discarded: a second run changes nothing, and the new token still finds an ended meeting.
             await ctx.runExpiry();
             expect((await request(ctx.app()).get(`${ctx.baseUrl}/join/${guest.joinToken}`)).status).toBe(410);
+        });
+
+        it("Keeps every invitee's token, link and grant when the key was extended after the discard read the meeting", async () => {
+            const created = await create();
+            const token = await tokenOf("guest@elsewhere.example");
+            const guests = await joinAll(created.meeting.uid);
+            // What the job read just after the old expiry...
+            const stale = await ctx.findMeeting(created.meeting.uid);
+            stale.keyExpiresAt = new Date(Date.now() - 1000);
+            // ...while the organizer's extension, read just before it, saves first.
+            const nextWeek = new Date(Date.now() + 7 * 86_400_000).toISOString();
+            const extended = await as(ctx.ownerToken()).put(`${ctx.baseUrl}/${created.meeting.uid}`).send({ keyExpiresAt: nextWeek });
+            expect(extended.status, JSON.stringify(extended.body)).toBe(200);
+
+            await expect(ctx.discardKey(stale)).rejects.toThrow();
+
+            const meeting = await ctx.findMeeting(created.meeting.uid);
+            expect(meeting.meetingKeyCertificate).toBe(CERTIFICATE);
+            expect(meeting.keyDiscardedAt ?? null).toBeNull();
+            expect(meeting.keyCleanupPending ?? null).toBeNull();
+            expect(await tokenOf("guest@elsewhere.example")).toBe(token);
+            expect(await ctx.findLinks()).toHaveLength(2);
+            for (const uid of guests) {
+                expect(await grantees(created.meeting.uid)).toContain(uid);
+            }
+            expect((await request(ctx.app()).get(`${ctx.baseUrl}/join/${token}`)).status).toBe(200);
+            // The job's next run sees the new expiry and leaves the meeting.
+            await ctx.runExpiry();
+            expect((await ctx.findMeeting(created.meeting.uid)).meetingKeyCertificate).toBe(CERTIFICATE);
+        });
+
+        it("Finishes on the next run the cleanup of a discard whose claim was saved but whose cleanup failed", async () => {
+            const created = await create();
+            const token = await tokenOf("guest@elsewhere.example");
+            await ctx.setKeyExpiresAt(created.meeting.uid, new Date(Date.now() - 1000));
+
+            let failing: any;
+            await ctx.runExpiry(undefined, (job) => {
+                failing = vi.spyOn(job.inviteeRepo, "find").mockRejectedValueOnce(new Error("store down"));
+            });
+            failing.mockRestore();
+
+            let meeting = await ctx.findMeeting(created.meeting.uid);
+            expect(meeting.meetingKeyCertificate ?? null).toBeNull();
+            expect(meeting.keyDiscardedAt).toBeTruthy();
+            expect(meeting.keyCleanupPending).toBe(true);
+            expect(await ctx.findLinks()).toHaveLength(2);
+            // Joining is refused already.
+            expect((await request(ctx.app()).get(`${ctx.baseUrl}/join/${token}`)).status).toBe(410);
+
+            await ctx.runExpiry();
+
+            meeting = await ctx.findMeeting(created.meeting.uid);
+            expect(meeting.keyCleanupPending ?? null).toBeNull();
+            expect(await tokenOf("guest@elsewhere.example")).not.toBe(token);
+            expect(await ctx.findLinks()).toEqual([]);
         });
 
         it("Leaves a meeting whose key hasn't expired yet", async () => {

@@ -42,6 +42,13 @@ export const RELAY_RATE_BYTES_PER_SECOND: number = 512 * 1024;
 /** Burst allowance of a socket's token bucket, in bytes - also the bucket's capacity. */
 export const RELAY_BURST_BYTES: number = 1024 * 1024;
 
+/** Sustained inbound text messages (`hello`, `want`, `ping`, or anything else) per second per socket. A client pings every two
+ * seconds and sends a `want` when the participants it shows change; text also takes its size from the byte budget above. */
+export const RELAY_TEXT_RATE_MESSAGES_PER_SECOND = 10;
+
+/** Burst allowance, in messages, of a socket's text bucket - also its capacity. */
+export const RELAY_TEXT_BURST_MESSAGES = 50;
+
 /** How long a socket may stay over budget continuously before it is closed with 1008 "Too much data.". */
 export const RELAY_OVER_BUDGET_CLOSE_MS = 10_000;
 
@@ -151,7 +158,7 @@ export interface RelayStats {
     /** Frames a receiver's `send()` reported as dropped (uWS backpressure) or threw on - a subset of the above,
      * apart from a throw, which is not counted as forwarded. */
     framesDroppedBackpressure: number;
-    /** Frames dropped because their sender was over its token-bucket budget. */
+    /** Messages (binary frames and text alike) dropped because their sender was over its token-bucket budget. */
     framesDroppedBudget: number;
     /** Frames dropped for being empty, oversized, or sent before `hello`. */
     framesDroppedInvalid: number;
@@ -202,18 +209,23 @@ function toBuffer(data: string | Uint8Array): Buffer {
     return Buffer.isBuffer(data) ? data : Buffer.from(data.buffer, data.byteOffset, data.byteLength);
 }
 
-/** A token bucket: `capacity` tokens (bytes), refilled at `rate` per second, starting full. */
+/** A token bucket: `capacity` tokens (bytes by default), refilled at `rate` per second, starting full. */
 class TokenBucket {
-    private tokens: number = RELAY_BURST_BYTES;
+    private tokens: number;
     private last: number;
 
-    constructor(now: number) {
+    constructor(
+        now: number,
+        private readonly capacity: number = RELAY_BURST_BYTES,
+        private readonly rate: number = RELAY_RATE_BYTES_PER_SECOND,
+    ) {
+        this.tokens = capacity;
         this.last = now;
     }
 
     /** Takes `amount` tokens if that many are available; returns whether it did. */
     public take(amount: number, now: number): boolean {
-        this.tokens = Math.min(RELAY_BURST_BYTES, this.tokens + ((now - this.last) / 1000) * RELAY_RATE_BYTES_PER_SECOND);
+        this.tokens = Math.min(this.capacity, this.tokens + ((now - this.last) / 1000) * this.rate);
         this.last = now;
         if (this.tokens < amount) {
             return false;
@@ -251,6 +263,8 @@ class Connection implements RelayConnection {
     private closed = false;
     private helloTimer?: ReturnType<typeof setTimeout>;
     private readonly bucket: TokenBucket = new TokenBucket(Date.now());
+    /** Counts text messages, so a flood of small ones (cheap in bytes, each parsed and possibly answered) is capped too. */
+    private readonly textBucket: TokenBucket = new TokenBucket(Date.now(), RELAY_TEXT_BURST_MESSAGES, RELAY_TEXT_RATE_MESSAGES_PER_SECOND);
     private overBudgetSince?: number;
     private lastOverBudget = 0;
 
@@ -270,9 +284,17 @@ class Connection implements RelayConnection {
         }
         if (isBinary) {
             this.binary(toBuffer(data));
-        } else {
-            this.text(typeof data === "string" ? data : toBuffer(data).toString("utf8"));
+            return;
         }
+        // Every text message is metered before it is parsed, whatever it turns out to be: a ping or a malformed one costs the
+        // event loop a parse just as a `want` does.
+        const now: number = Date.now();
+        const size: number = typeof data === "string" ? Buffer.byteLength(data, "utf8") : data.byteLength;
+        if (!this.textBucket.take(1, now) || !this.bucket.take(size, now)) {
+            this.overBudget(now);
+            return;
+        }
+        this.text(typeof data === "string" ? data : toBuffer(data).toString("utf8"));
     }
 
     public close(): void {
@@ -387,6 +409,19 @@ class Connection implements RelayConnection {
         this.wanted = wanted;
     }
 
+    /** Counts a message dropped over budget at `now`, and closes the socket once it has been over budget continuously (see
+     * `RELAY_OVER_BUDGET_GRACE_MS`) for more than `RELAY_OVER_BUDGET_CLOSE_MS`. */
+    private overBudget(now: number): void {
+        this.env.stats.framesDroppedBudget++;
+        if (this.overBudgetSince === undefined || now - this.lastOverBudget > RELAY_OVER_BUDGET_GRACE_MS) {
+            this.overBudgetSince = now;
+        }
+        this.lastOverBudget = now;
+        if (now - this.overBudgetSince > RELAY_OVER_BUDGET_CLOSE_MS) {
+            this.evict("Too much data.");
+        }
+    }
+
     private binary(payload: Buffer): void {
         if (!this.peer || payload.length === 0 || payload.length > this.env.maxPayloadBytes) {
             this.env.stats.framesDroppedInvalid++;
@@ -394,14 +429,7 @@ class Connection implements RelayConnection {
         }
         const now: number = Date.now();
         if (!this.bucket.take(payload.length, now)) {
-            this.env.stats.framesDroppedBudget++;
-            if (this.overBudgetSince === undefined || now - this.lastOverBudget > RELAY_OVER_BUDGET_GRACE_MS) {
-                this.overBudgetSince = now;
-            }
-            this.lastOverBudget = now;
-            if (now - this.overBudgetSince > RELAY_OVER_BUDGET_CLOSE_MS) {
-                this.evict("Too much data.");
-            }
+            this.overBudget(now);
             return;
         }
         // Stamped here from the `hello`, never read from the payload: [sender length][sender][payload].
@@ -445,10 +473,11 @@ class Connection implements RelayConnection {
  *
  * At most `RELAY_MAX_SOCKETS_PER_ROOM` sockets per room and `RELAY_MAX_SOCKETS_PER_UID` per uid per room, counting
  * a socket from `attach()` on (a socket refused for either is closed with 1008 "Room full." / "Too many
- * connections."). Each socket's inbound binary traffic is metered by a token bucket of `RELAY_RATE_BYTES_PER_SECOND`
- * sustained with a `RELAY_BURST_BYTES` burst: an over-budget message is dropped silently, and a socket kept over
- * budget for more than `RELAY_OVER_BUDGET_CLOSE_MS` (see `RELAY_OVER_BUDGET_GRACE_MS`) is closed with 1008 "Too
- * much data.". A receiver whose `send()` reports the message as dropped (uWS backpressure) simply misses that
+ * connections."). Each socket's inbound traffic, binary and text, is metered by a token bucket of `RELAY_RATE_BYTES_PER_SECOND`
+ * sustained with a `RELAY_BURST_BYTES` burst, and its text messages (every one, before it is parsed) also by one of
+ * `RELAY_TEXT_RATE_MESSAGES_PER_SECOND` with a `RELAY_TEXT_BURST_MESSAGES` burst: an over-budget message is dropped
+ * silently (a ping then gets no pong), and a socket kept over budget for more than `RELAY_OVER_BUDGET_CLOSE_MS` (see
+ * `RELAY_OVER_BUDGET_GRACE_MS`) is closed with 1008 "Too much data.". A receiver whose `send()` reports the message as dropped (uWS backpressure) simply misses that
  * frame - counted in `stats`, never queued or retried. Sockets and rooms are released when their socket closes; an
  * empty room is deleted. `evict()` closes every socket of one uid in a room with 1008 "Removed from the meeting.", on
  * every replica the bus reaches - the host removing someone stops their media at once, not at their next reconnect.
@@ -551,7 +580,9 @@ export class RelayHub {
         this.evictLocal(roomId, uid);
     }
 
-    private evictLocal(roomId: string, uid: string): void {
+    /** Closes every socket `uid` holds in room `roomId` on this replica only (`RELAY_EVICTED_REASON`) - for a caller that found
+     * on its own that `uid` may no longer be there, so every replica that holds such sockets finds it too. */
+    public evictLocal(roomId: string, uid: string): void {
         for (const conn of [...(this.rooms.get(roomId)?.conns ?? [])]) {
             if (conn.uid === uid) {
                 conn.evict(RELAY_EVICTED_REASON);

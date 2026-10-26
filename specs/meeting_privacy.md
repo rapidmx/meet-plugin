@@ -198,10 +198,13 @@ server refuses an unprotected booking of such a host ("This booking page is out 
 - **What goes.** At `expiresAt`, `MeetingKeyExpiryJob` deletes the certificate, the organizer's wrap, the sealed title and names, and
   the keyed attendee links of the meeting's own invitees (another meeting on the same event keeps its links), replaces the invitees' join
   tokens, removes the participants' `READ`/`CREATE` grants from the meeting's own ACL (the creator's record and other meetings' grants
-  stay), and marks the meeting `keyDiscardedAt`. Cancelling a protected meeting does the same at once. For a booking, the job removes the
-  sealed fields addressed to the meeting key and keeps the host's zero-access copy.
+  stay), and marks the meeting `keyDiscardedAt`. The mark and the cleared key are saved first, checked against the meeting as the job
+  read it, so a key extended meanwhile is left alone; the rest follows, and a failure there is finished by the job's next run.
+  Cancelling a protected meeting does the same at once. For a booking, the job removes the sealed fields addressed to the meeting key
+  and keeps the host's zero-access copy.
 - **After expiry.**
-  - Joining answers `410` ("This meeting has ended."), and the meeting's signaling and relay sockets are refused.
+  - Joining answers `410` ("This meeting has ended."), and the meeting's signaling and relay sockets are refused. Sockets already open
+    are closed too, at the latest by the server's next re-check of open sockets (every minute).
   - The guest page tells guests beforehand that access ends with the meeting.
   - A copy a guest saved while the meeting ran is outside the server's reach.
 

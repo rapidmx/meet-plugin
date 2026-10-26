@@ -152,6 +152,37 @@ describe("RedisRelayBus", () => {
             expect(server.clients[0].destroyed).toBe(true);
         });
 
+        it("Calls onSubscriberReady each time the subscriber is ready again, but not for the publisher, nor once closed.", async () => {
+            const onSubscriberReady = vi.fn();
+            const { bus } = await replica({ onSubscriberReady });
+            const [publisher, subscriber] = server.clients;
+            expect(onSubscriberReady).toHaveBeenCalledTimes(1);
+
+            server.disconnect(publisher);
+            server.recover();
+            expect(onSubscriberReady).toHaveBeenCalledTimes(1);
+            server.disconnect(subscriber);
+            server.recover();
+            expect(onSubscriberReady).toHaveBeenCalledTimes(2);
+
+            bus.close();
+            subscriber.isReady = true;
+            subscriber.emit("ready");
+            expect(onSubscriberReady).toHaveBeenCalledTimes(2);
+        });
+
+        it("Reports, and keeps out of the Redis client, an onSubscriberReady that throws.", async () => {
+            const { bus } = await replica({
+                onSubscriberReady: () => {
+                    throw new Error("sweep failed");
+                },
+            });
+            expect(bus.stats.failures).toBe(1);
+            expect(logger.warn.mock.calls[0][0]).toContain("handle the subscriber being ready: sweep failed");
+            // Without a callback, a ready subscriber is fine too.
+            await replica();
+        });
+
         it("Logs, and does not throw, when a client's connection attempt fails.", async () => {
             server.failConnect = true;
             const { bus } = await replica();
@@ -286,6 +317,24 @@ describe("RedisRelayBus", () => {
             await server.settle();
             expect(bob.sock.frames).toEqual([frameOf("alice", Buffer.from("back"))]);
             expect(alice.sock.frames).toEqual([frameOf("bob", Buffer.from("back too"))]);
+        });
+
+        it("Loses an eviction published while only another replica's subscriber is down: nothing is held, as the publisher is fine.", async () => {
+            // Why `BaseVideoMeetingRoute` authorizes its sockets again on the subscriber's `ready` (`onSubscriberReady`).
+            const onSubscriberReady = vi.fn();
+            const r1 = await replica();
+            const r2 = await replica({ onSubscriberReady });
+            const bob = join(r2.hub, "room", "bob");
+            server.disconnect(server.clients[3]);
+
+            r1.hub.evict("room", "bob");
+            await server.settle();
+            expect(r1.bus.stats.controlQueued).toBe(0);
+            expect(bob.sock.frames).toEqual([]);
+            expect(r2.hub.socketCount("room")).toBe(1);
+
+            server.recover();
+            expect(onSubscriberReady).toHaveBeenCalledTimes(2);
         });
     });
 

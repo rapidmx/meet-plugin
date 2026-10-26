@@ -45,6 +45,10 @@ export interface RedisRelayBusOptions {
     logger: RedisRelayBusLogger;
     /** Overrides `REDIS_RELAY_NUMSUB_POLL_MS` - a test's only reason to set this. */
     numSubPollMs?: number;
+    /** Called each time the subscriber's connection is up and its subscriptions are in place again (node-redis's `ready`, which
+     * it emits only after re-issuing them), so the caller can re-check whatever an eviction published meanwhile would have
+     * changed: a PUBLISH that reached no subscriber of this bus is lost, and nothing tells the publishing replica. */
+    onSubscriberReady?: () => void;
 }
 
 /** What the bus counts, for tests and diagnostics. */
@@ -148,9 +152,13 @@ interface HeldControlFrame {
  * media tolerates, and so do signaling messages (an offer from before the outage would be stale by the time it landed;
  * the clients' own reconnect handling recovers). A `control` frame (a hub's eviction) is the exception: one the
  * publisher cannot take, or whose PUBLISH fails, is held - at most `REDIS_RELAY_CONTROL_QUEUE_MAX` of them, each for
- * at most `REDIS_RELAY_CONTROL_QUEUE_TTL_MS` - and published when the publisher is `ready` again, so a kick made while
- * Redis was reconnecting still closes the removed participant's sockets on the other replicas. A bus used before
- * `connect()`, after `close()`, or whose Redis is unavailable behaves as an `InProcessRelayBus` (and holds nothing).
+ * at most `REDIS_RELAY_CONTROL_QUEUE_TTL_MS` - and published when the publisher is `ready` again. That only covers this
+ * replica's own publisher: a PUBLISH that reaches Redis while another replica's subscriber is disconnected, or has not
+ * re-issued its SUBSCRIBEs yet, reaches nobody there, and nothing reports it. So the bus is not what guarantees an
+ * eviction reaches every replica: each time this bus's subscriber is `ready` again it calls
+ * `RedisRelayBusOptions.onSubscriberReady`, on which `BaseVideoMeetingRoute` authorizes every socket it holds again
+ * (it also does so on a timer). A bus used before `connect()`, after `close()`, or whose Redis is unavailable behaves as
+ * an `InProcessRelayBus` (and holds nothing).
  *
  * ## Bandwidth
  *
@@ -245,6 +253,7 @@ export class RedisRelayBus implements RelayBus {
         this.publisher = publisher;
         this.subscriber = subscriber;
         publisher.on("ready", () => this.flushControl(publisher));
+        subscriber.on("ready", () => this.subscriberReady(subscriber));
         this.run("connect the publisher", () => publisher.connect());
         this.run("connect the subscriber", () => subscriber.connect());
         this.pollTimer = setInterval(() => void this.pollLocalOnly(), this.options.numSubPollMs ?? REDIS_RELAY_NUMSUB_POLL_MS);
@@ -358,6 +367,19 @@ export class RedisRelayBus implements RelayBus {
                 continue;
             }
             this.publishToRedis(entry.roomId, entry.sender, entry.frame, "control", entry.at);
+        }
+    }
+
+    /** Hands the subscriber's `ready` to `options.onSubscriberReady`, unless the bus has since been closed; a throwing callback is
+     * reported, never let into the Redis client's event dispatch. */
+    private subscriberReady(subscriber: RelayRedisClient): void {
+        if (subscriber !== this.subscriber) {
+            return;
+        }
+        try {
+            this.options.onSubscriberReady?.();
+        } catch (err) {
+            this.report("handle the subscriber being ready", err);
         }
     }
 

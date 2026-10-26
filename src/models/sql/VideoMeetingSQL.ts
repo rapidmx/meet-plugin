@@ -126,6 +126,11 @@ export class VideoMeetingSQL extends BaseEntity implements VideoMeeting {
     @Nullable
     public keyDiscardedAt?: Date;
 
+    @Column({ type: "boolean", nullable: true })
+    @Description("A discarded key whose invitees' tokens, keyed links and participants' grants are still to be removed by MeetingKeyExpiryJob.")
+    @Nullable
+    public keyCleanupPending?: boolean | null;
+
     @Column({ type: "simple-json", nullable: true })
     @Description("The meeting's key sealed to each local participant's zero-access certificate.")
     @Nullable
@@ -157,6 +162,7 @@ export class VideoMeetingSQL extends BaseEntity implements VideoMeeting {
             this.meetingKeyFingerprint = "meetingKeyFingerprint" in other ? other.meetingKeyFingerprint : this.meetingKeyFingerprint;
             this.keyExpiresAt = "keyExpiresAt" in other ? other.keyExpiresAt : this.keyExpiresAt;
             this.keyDiscardedAt = "keyDiscardedAt" in other ? other.keyDiscardedAt : this.keyDiscardedAt;
+            this.keyCleanupPending = "keyCleanupPending" in other ? other.keyCleanupPending : this.keyCleanupPending;
             this.keyWraps = "keyWraps" in other ? other.keyWraps : this.keyWraps;
             this.sealedFields = "sealedFields" in other ? other.sealedFields : this.sealedFields;
         }
