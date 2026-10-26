@@ -166,7 +166,9 @@ server refuses an unprotected booking of such a host ("This booking page is out 
   `content` plus the `linkKey`: a reschedule or cancellation from the manage page (opened with the link's key), and a video-link change
   from the host's list (opened with the host's zero-access key, with the link key unwrapped from `keyWraps`).
 - **Links:** the confirmation's manage link carries the key after `#`, and so does the video link of a meeting minted for the booking,
-  which is protected with the same key.
+  which is protected with the same key. booking-plugin mints it only through a meet-plugin that exports
+  `SINGLE_INVITEE_MEETING_PROTECTION` (an older one ignores the protection and would store an unprotected meeting with the booker's
+  name readable), and never passes it the booker's name; without one it mints nothing, logs a warning, and the host sets the link.
   - By §4.1's rule, the mailed links carry the key only when the booker's address is on another server or is a mailbox here whose mail
     is zero-access (`BaseBookingRoute.mayCarryBookingKey()`). A booker at a mailbox here without zero-access, or at any other address of
     a domain this server serves, is mailed both links without it, and the server logs a warning that names the booking but never the
@@ -176,6 +178,13 @@ server refuses an unprotected booking of such a host ("This booking page is out 
   blob. The host's and the booker's clients therefore keep an opened booker field only when it is text: a name that opens to anything
   else shows as the booker's address, and any other such field is left out. A host copy with such a field opens for no change, so it
   can't be sent as what the booker wrote.
+  - Nor can the host's client be made to open someone else's ciphertext for a booker. A booker could put any CMS sealed to the host's
+    certificate (a sealed event's description, another meeting's key wrap) in the host copy or the wrap, and a video-link change mails
+    what opened to the booker. So the booking page also signs the booker's address with the booking key (`keyBinding`), the host's
+    list gets the booker's copy, the key's certificate and that signature, and a change is sent only when the unwrapped key is the
+    certificate's private key, its signature of the booking's booker address verifies, and every field of the host copy matches the
+    booker's copy opened with it, the name among them. Someone who never saw a stolen ciphertext's plaintext can't seal a matching
+    booker copy, and someone who never had another booking's or meeting's key can't sign their own address with it.
 - **The host's notification** in their Inbox carries what the booker wrote only when it is filed sealed (zero-access covering the host's
   mail). Otherwise it names the booker by address and says to open the booking in RapidMX.
 - **Expiry:** `BookingKeyExpiryJob` removes the booker's copy, the certificate and the wrap at `keyExpiresAt`, and keeps the host's copy.

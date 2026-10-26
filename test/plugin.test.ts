@@ -79,6 +79,7 @@ describe("plugin entry points", () => {
                 "buildIceServers",
                 "createSingleInviteeVideoMeeting",
                 "extendSingleInviteeMeetingKey",
+                "SINGLE_INVITEE_MEETING_PROTECTION",
                 "finishMeetingKeyDiscard",
                 "DEFAULT_STUN_SERVERS",
                 "DEFAULT_TURN_CREDENTIAL_TTL_SECONDS",

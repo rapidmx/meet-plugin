@@ -19,6 +19,13 @@ const { Config } = ObjectDecorators;
 const MAX_TITLE_LENGTH = 200;
 const MAX_DISPLAY_NAME_LENGTH = 200;
 
+/**
+ * `true` in every release whose `createSingleInviteeVideoMeeting()` honors its `protection` argument. An older release ignores that
+ * argument and mints the meeting unprotected, storing the invitee's name readable, so a caller minting for a protected booking checks
+ * this first and mints nothing without it (`booking-plugin`'s `BaseBookingRoute.maybeCreateVideoMeetingJoinUrl()`).
+ */
+export const SINGLE_INVITEE_MEETING_PROTECTION = true;
+
 /** The sole invitee `createSingleInviteeVideoMeeting()` mints a new private meeting for. */
 export interface SingleMeetingInvitee {
     email: string;

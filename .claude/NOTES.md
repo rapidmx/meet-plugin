@@ -1762,3 +1762,14 @@ Fixed (findings by review id):
   `RELAY_TEXT_BURST_MESSAGES` 50) and its bytes to the existing byte bucket, before parsing; over budget is dropped (no pong) and the
   shared `overBudget()` closes after 10 s continuously over. The hello now comes out of each socket's burst, so the burst tests
   expect one frame/message fewer. Binary sent to relay before `hello` is still dropped as invalid without charging (no parse).
+
+## 2026-10-26: Review round 6 fixes
+
+- **booking-plugin #623 (capability flag).** New export `SINGLE_INVITEE_MEETING_PROTECTION = true` (`src/util/BookingIntegrationUtils.ts`):
+  present only in releases whose `createSingleInviteeVideoMeeting()` honors its `protection` argument. booking-plugin checks it before
+  minting a protected booking's meeting, because an older release ignores the argument and stores an unprotected meeting with the
+  invitee's name readable. Added to `test/plugin.test.ts`'s root export list. Nothing else changed here.
+- **booking-plugin #622 (spec only).** `specs/meeting_privacy.md` §6.2 now says the host's client checks a protected booking's unwrapped
+  key against its certificate and the booker's signed address, and the host copy against the booker copy, before a video-link change
+  mails either to the booker; and that booking-plugin mints only through a meet-plugin exporting the flag, never passing the booker's
+  name.
