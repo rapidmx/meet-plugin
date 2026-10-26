@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.18.0
+
 ### Added
 
 - **End-to-end protected meetings.** A video meeting created from the calendar of a mailbox that has zero-access encryption is now protected with a temporary key of its own. The key travels in the fragment of every participant's join link (`#k=...`), which the browser never sends to the server, so the server can neither read the meeting nor take part in it. The meeting's title and invitees' names are stored only sealed (the stored title is "Meeting"), and the organizer keeps a copy of the key wrapped to their own zero-access certificate. In the call, chat, the whiteboard, reactions, presence, moderation and call setup are all encrypted, and every audio and video frame sent through the server's WebSocket relay is encrypted too. Anything that arrives unencrypted is dropped. The join page opens the real title with the key, says that the meeting is end-to-end encrypted, and refuses to join when the link has no key or the wrong one, so a protected meeting never falls back to an unencrypted call. A waiting-room name is sealed with the meeting key and only the host's page opens it. An organizer without a zero-access key gets an unprotected meeting as before, and the event editor says why. The design is in `specs/meeting_privacy.md`.

@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-26
+
+### Added
+- Added extendSingleInviteeMeetingKey for booking-plugin to move a minted meeting's key expiry when its booking is rescheduled
+
+### Changed
+- Specify protected meetings: a temporary per-meeting key every participant's link carries, discarded once the meeting is over
+- Store a protected meeting's title and invitee names only sealed, with its key's certificate and the organizer's wrap of the key
+- Key every invitee's attendee link of a protected meeting, so its invitations carry the key the organizer's client supplies
+- Answer 410 once a protected meeting's key has expired, and discard its key material and guest access with MeetingKeyExpiryJob
+- Encrypt a protected meeting's signaling - chat, whiteboard, reactions, presence and call setup - in a sealed, replay-checked envelope
+- Encrypt each relayed audio and video frame of a protected meeting, and drop any frame that isn't sealed
+- Join a protected meeting only with the key its link carries, showing its real title and that it is end-to-end encrypted
+- Mint a booking's video meeting protected with the booking's own key when createSingleInviteeVideoMeeting is given a protection
+- Specify how protected bookings seal what the booker writes, mail it, and discard the booker's copy
+- Refuse to join a meeting whose link carries a key unless the server's projection opens with it, never falling back to an unencrypted call
+- Size a protected meeting's catch-up parts to the plaintext that still fits the server's limit once sealed
+- Report a sealed relay frame the socket refused on that kind's next delta frame, so the video sender forces a key frame
+- Drop a replayed relay frame with a per-sender salt and sliding counter window
+- Seal each signal with its sender's clock and drop one more than five minutes from the receiver's, so kept messages can't be replayed as live
+- Honor mute, removal and talking-stick signals only from the host's account
+- Take expired protected meetings soonest first in MeetingKeyExpiryJob, so long-lived keys can't keep them out of the batch
+- Accept keyExpiresAt on PUT /:id for a protected meeting whose key is still held
+- Keep waiting-room admissions on the events Redis every replica shares, expire them after an hour, and cap them per meeting and by name length
+- Delete only the expiring meeting's own keyed attendee links, never another meeting's on the same event
+- Discard a protected meeting's key as soon as it is cancelled, and refuse its signaling and relay sockets once the key is gone
+- Keep protected signaling flowing when a listener throws or one message fails to seal or open
+- Specify that a keyed meeting link is mailed only to a copy this server would not store readable
+- Bind a sealed relay frame's kind, key-frame flag, seq and timestamp in its AAD (frame version 2), so a relay or peer that rewrites one makes the frame fail to open
+- Close a kicked participant's relay sockets on every replica, and tell everyone left to drop their connections to that account, direct WebRTC ones included
+- Nonce relay frames with an 8-byte per-session salt and a 4-byte counter, refusing to seal past the counter, so sessions sharing a long-lived live key can't reuse a GCM nonce
+- Count only waiting requests toward a meeting's waiting-room cap, so denying or admitting a flood frees it, and cap waiting requests per client network
+- Take a protected meeting's waiting-room name only sealed with its live key, store and list it sealed, and open it on the host's call page
+- Authorize a relay or signaling socket again once it is attached, reading the meeting's ACL past the cache, so one that attaches after a kick's eviction is closed
+- Always publish a hub's eviction to Redis, even for a room the last subscriber poll found local-only
+- Count a new waiting-room request again once it is written and take it back over a cap, so a concurrent burst can't pass the per-network or per-meeting cap
+- Deliver a protected meeting's removed notice after the signals that arrived before it, and ignore anything later from a removed peer id
+- Open sealed waiting-room names on the re-fetch after a failed admit or deny, as the poll does
+- Document that replies and proposals RapidMX composes never carry LOCATION, so an attendee's keyed link isn't sent back, and that an external client's REPLY may still echo it to an organizer mailbox that stores mail readable
+- Publish every signaling message to Redis even for a room the last subscriber poll found local-only, and clear a room's local-only flag as soon as a frame arrives from another replica, so a cross-replica joiner gets the existing participant's hello answer and offer
+- Hold a hub's eviction while the Redis publisher is reconnecting or its publish fails, and publish it once the publisher is ready again, so a kick made during a Redis outage still closes the removed participant's sockets on other replicas, and warn on such a kick
+- Document that a booker's mailed links carry the booking key only for an address on another server or a zero-access mailbox here, and that clients keep only text from an opened booker field
+- Authorize every open relay and signaling socket again each minute and whenever the Redis subscriber is back, closing those of a uid now refused, so a kick's eviction lost on a replica whose subscriber was away still closes the removed participant's sockets there
+- Claim a protected meeting's key discard with a version-checked update before touching its invitees, links and grants, and finish an interrupted cleanup on the expiry job's next run, so a discard racing a key extension leaves every invitee link working
+- Meter every signaling message and every relay text message before parsing it, so a flood of pings or malformed text is dropped and its socket closed like a flood of signals or media
+- Export SINGLE_INVITEE_MEETING_PROTECTION, so booking-plugin mints a protected booking's meeting only through a release whose createSingleInviteeVideoMeeting honors its protection
+- Specify that the host's client sends a protected booking's video-link change only for a key that is its certificate's and signed the booker's address, and a host copy matching the booker's copy, and that booking-plugin never hands meet-plugin a protected booker's name
+- Announce the sender's frame salt and last frame counter in every sealed signal, and play a peer's relay frames only under the salt its fresh signals announced and no further back than the window below the counter they announced, so a server can't replay a participant's kept frames to someone joining later as if they were live
+- Force the fixed versions of the dependencies the audit flags through resolutions, and ignore only node-forge's unfixed advisory 1240912 until acme-client or node-forge ships a fix
+- Document in meeting_privacy.md §4.1 that a keyed copy asks for a headers-only bounce, that through a transport that can't it goes only when the organizer's mail would seal the bounce, and that a remote server without DSN support may still return the whole message
+- Let a sender's signal only raise a floor FRAME_ANNOUNCE_SLACK (1024) counters below the counter it announced, leaving the 128-counter reorder window to the frames actually accepted, so a signal overtaking a backed-up relay no longer drops the relay's backlog
+- Stop playing a sender's relayed frames once its last announcement is more than MAX_SIGNAL_AGE_MS old, dated from when that signal was sealed, so a stale or held-back anchor can't let the server replay kept frames to a participant who moves onto the relay later
+- Re-send this tab's state every RELAY_ANNOUNCE_INTERVAL_MS while it sends on the relay, and answer a relay-fallback with a point-to-point state, so receivers keep a fresh announcement of its frames
+- Skip a sender's frame counter FRAME_ANNOUNCE_SLACK ahead once it has sealed no relay frame for FRAME_IDLE_SKIP_MS, so the frames it relayed before going quiet die with its next announcement
+- Describe this release's changes in the release notes
+- Build against @rapidmx/restapi ^0.35.0 and @rapidmx/web-client ^0.37.0
+- Publish only from a release tag's own Build, and only once every Build of that commit has finished green
+
+### Removed
+- Removed the participants' grants from a protected meeting's own ACL when its key is discarded at expiry or cancellation
+
 ## [0.17.0] - 2026-10-24
 
 ### Changed
@@ -638,7 +699,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/rapidmx/meet-plugin/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/rapidmx/meet-plugin/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/rapidmx/meet-plugin/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/rapidmx/meet-plugin/compare/v0.14.1...v0.15.0
