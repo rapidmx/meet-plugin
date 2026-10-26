@@ -1773,3 +1773,25 @@ Fixed (findings by review id):
   key against its certificate and the booker's signed address, and the host copy against the booker copy, before a video-link change
   mails either to the booker; and that booking-plugin mints only through a meet-plugin exporting the flag, never passing the booker's
   name.
+
+## 2026-10-26: Review round 7 fixes
+
+- **#715 (relay frames had no freshness).** A receiver used to accept the first relay frame that opened from a sender peer with any
+  counter, pinning its salt to it, and a frame's timestamp is the sender's `performance.now()`, which nobody else can check. So a server
+  that kept a sender's sealed frames could replay them to someone joining later (or reloading) on the relay as if they were live. Fix
+  (the finding's option (b), no change to the frame wire format): every sealed signal now carries `f: { s: <frame salt hex>, c: <last
+  frame counter sealed> }` in its plaintext (`MeetingCipher.seal()`), and the salt is drawn when the cipher is made rather than with the
+  first frame. `open()`, after a signal passes every check including `MAX_SIGNAL_AGE_MS`, hands `f` to `acceptFrameAnnouncement()`: the
+  first one pins that peer's salt and sets its highest counter to the announced one with nothing below it seen; a later, higher one moves
+  the window up. `acceptFrameNonce()` now drops every frame of a peer with no announcement yet, or under another salt. Frames sealed just
+  before the announcing signal (within `FRAME_REPLAY_WINDOW`, 128) still play once, for what is in flight on the relay while the signal
+  overtakes it on the signaling socket. All in `MeetingCipher`, since `_CallView` gives the one cipher to both the signaling client and
+  the relay: nothing in `MeshConnectionManager`/`RelayTransport` changed. `SIGNAL_INNER_OVERHEAD_BYTES` went 512 -> 576 for `f`.
+  Spec §5.1 (plaintext) and §5.2 (new "Freshness", rewritten "Replay") updated. Tests: `MeetingCipher.test.ts` (unannounced peer,
+  stale signal announces nothing, a late joiner refusing kept frames older than the window, in-flight frames once, another salt refused
+  and not re-pinned, a later announcement moving the window, malformed `f` ignored), and the existing frame tests now announce first;
+  `RelayReceiver.test.ts`'s end-to-end cipher test opens the sender's hello first; `_CallView.test.tsx`'s cipher test stubs
+  `crypto.getRandomValues` since the cipher now draws its salt in the constructor.
+  Left deliberately: a client from before this change sends no `f`, so a newer receiver plays none of its relayed frames (signaling and
+  direct WebRTC media are unaffected). Accepting an unannounced sender would reopen the replay, and every client is served by the same
+  deployment, so the mix only lasts for tabs left open across an upgrade.

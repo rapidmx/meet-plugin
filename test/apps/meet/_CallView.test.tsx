@@ -788,6 +788,8 @@ describe("CallView - media paths", () => {
     it("seals a protected meeting's signaling and relayed media with one cipher of its live key", async () => {
         relayMock.supported = true;
         relayMock.created.length = 0;
+        // The cipher draws its frame salt as it is made.
+        vi.stubGlobal("crypto", { randomUUID: () => "fixed", getRandomValues: <T extends ArrayBufferView>(array: T) => webcrypto.getRandomValues(array as any) });
         const liveKey = { type: "secret" } as unknown as CryptoKey;
         await connected({ relayEnabled: true, liveKey });
         const cipher = (FakeSignalingClient.instances.at(-1)!.opts as any).cipher;

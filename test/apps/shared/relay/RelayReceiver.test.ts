@@ -131,6 +131,8 @@ describe("RelayReceiver in a protected meeting", () => {
         publisher.publish(KIND_VIDEO, true, Uint8Array.of(0, 0xee), 1000);
         publisher.publish(KIND_VIDEO, false, Uint8Array.of(1, 0xee), 1033);
         await vi.waitFor(() => expect(wire).toHaveLength(2));
+        // The sender's fresh hello, announcing its frame salt and counter: without it, none of its frames play.
+        const hello = { ...(await sender.seal({ type: "video-meeting-signal", kind: "hello", from: "alice", peer: "alice~1" })), from: "alice", peer: "alice~1" };
         /** What a receiver decodes of the key frame followed by the delta frame with byte `at` of its header set to `value`. */
         const decodedWith = async (at?: number, value?: number) => {
             const delta = Uint8Array.from(wire[1]);
@@ -138,6 +140,7 @@ describe("RelayReceiver in a protected meeting", () => {
                 delta[at] = value!;
             }
             const cipher = new MeetingCipher(await deriveLiveKey(secret, "m1"), "m1", { uid: "bob", peer: "bob~1" });
+            expect(await cipher.open(hello)).toBeDefined();
             const fake = createFakeRelayEnv();
             const receiver = new RelayReceiver(fake.env, new FakeAudioContext(48_000), (header, payload) => cipher.decryptFrame(header, "alice~1", payload));
             receiver.handleMedia(wire[0]);

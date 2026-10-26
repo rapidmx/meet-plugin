@@ -86,7 +86,9 @@ The hub only ever reads `to`, and stamps `from` and `peer`. A protected meeting'
 { "to": "<peerId>"?, "e": "<base64url(iv[12] || ciphertext || tag[16])>" }
 ```
 
-- **The plaintext** is the JSON `{ "from": uid, "peer": peerId, "n": counter, "t": <sender's clock, epoch ms>, "data": <the version 1 data> }`.
+- **The plaintext** is the JSON `{ "from": uid, "peer": peerId, "n": counter, "t": <sender's clock, epoch ms>, "f": { "s": <frame salt,
+  16 lower-case hex digits>, "c": <the last frame counter sealed, 0 before the first> }, "data": <the version 1 data> }`. `f` is what
+  §5.2's replay check anchors relay frames to.
 - **The AAD** is `"rapidmx-signal-v2|" + meetingUid`.
 - **Receiving.** A receiver drops a message when it fails to decrypt, or when its inner `from`/`peer` differ from the stamped ones. It
   also drops one whose `n` is not above the last `n` it accepted from that peer. `n` starts at 1 per socket and resets with a new peer id.
@@ -117,8 +119,16 @@ The hub only ever reads `to`, and stamps `from` and `peer`. A protected meeting'
   the sender peer the server stamped. A relay or peer that rewrites any of them makes the frame fail to open, and it is dropped. The
   fragment numbering (`fragIndex`, `fragCount`) is not bound: it only splits the sealed bytes, so reordering or re-splitting them changes
   the ciphertext and fails the tag. `FLAG_ENCRYPTED` is implied by the frame being opened at all.
-- **Replay.** A receiver pins each sender peer's salt to the first frame that opens, and accepts a counter above the highest it has
-  accepted from that peer, or one of the 128 below it once. Anything else is a replay and is dropped.
+- **Freshness.** A frame carries no time a receiver can check (its timestamp is the sender's page clock), so a frame is anchored to its
+  sender's signaling instead. Every sealed signal announces the sender's frame salt and the last counter it sealed (`f`, §5.1), and only
+  a signal that passed §5.1's checks, freshness included, counts. The first announcement from a peer pins its salt and sets the highest
+  counter to the announced one, none of the 128 below it seen yet. A later announcement above the highest moves the window up to it.
+  Without this, a receiver that had never heard from a peer would accept any first frame that opened, so the server could replay a
+  participant's earlier frames, kept from the relay, to someone who joins later or reloads, as if they were live.
+- **Replay.** A receiver drops every frame of a sender peer none of whose fresh signals has arrived yet, and every frame under a salt
+  other than the one that peer announced. It accepts a counter above the highest, or one of the 128 below it once, so frames sealed just
+  before the announcing signal and still in flight play. Anything else is a replay and is dropped. A client older than `f` announces
+  nothing, so its relayed frames don't play for a newer one; the two still talk, and direct WebRTC media is unaffected.
 - **The flag.** Flag bit 1 (`FLAG_ENCRYPTED`) marks an encrypted frame. A protected meeting drops frames without it.
 - **Requirement.** Encryption is required: a browser that can't run WebCrypto AES-GCM over the frames can't join a protected meeting.
 

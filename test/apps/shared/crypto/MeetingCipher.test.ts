@@ -37,6 +37,15 @@ const hdr = (kind: number, fields: Partial<FrameHeader> = {}): FrameHeader => ({
 const chat = (to?: string): SignalMessage => ({ type: "video-meeting-signal", kind: "chat", from: ALICE.uid, peer: ALICE.peer, chat: { text: "secret plans" }, ...(to ? { to } : {}) });
 /** What the server delivers: the sent data with its own stamps. */
 const stamped = (data: Record<string, unknown>, sender = ALICE) => ({ ...data, from: sender.uid, peer: sender.peer });
+/** `receiver` taking a fresh signal of `sender`'s (`as`): what announces the frame salt and counter its frames are then checked against. */
+const announce = async (sender: MeetingCipher, receiver: MeetingCipher, as = ALICE) => expect(await receiver.open(stamped(await sender.seal(chat()), as))).toBeDefined();
+/** A signal of ALICE's sealed by hand, with `inner` as its plaintext's extra fields. */
+async function sealInner(key: CryptoKey, inner: Record<string, unknown>) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const plain = new TextEncoder().encode(JSON.stringify({ from: ALICE.uid, peer: ALICE.peer, data: chat(), ...inner }));
+    const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: new TextEncoder().encode(`rapidmx-signal-v2|${MEETING}`) }, key, plain));
+    return stamped({ e: Buffer.from([...iv, ...sealed]).toString("base64url") });
+}
 
 describe("MeetingCipher", () => {
     it("seals a signal to an opaque envelope - only `to` readable - that the other participant opens with the server's stamps", async () => {
@@ -73,6 +82,7 @@ describe("MeetingCipher", () => {
 
     it("seals relay frames bound to their sender and every header field, each with a fresh nonce", async () => {
         const { alice, bob } = await pair();
+        await announce(alice, bob);
         const frame = new TextEncoder().encode("encoded video picture");
         const one = await alice.encryptFrame(hdr(2), frame);
         const two = await alice.encryptFrame(hdr(2), frame);
@@ -86,6 +96,7 @@ describe("MeetingCipher", () => {
 
     it("drops a relay frame whose seq, timestamp, key-frame flag or kind was rewritten, and binds them at their wire widths", async () => {
         const { alice, bob } = await pair();
+        await announce(alice, bob);
         const frame = new TextEncoder().encode("delta picture");
         const header = hdr(2, { keyFrame: false, seq: 40, timestampMs: 5000 });
         const sealed = await alice.encryptFrame(header, frame);
@@ -159,6 +170,7 @@ describe("MeetingCipher", () => {
 
     it("refuses to seal past the counter's last value rather than reuse a nonce, and still opens the last one sealed", async () => {
         const { alice, bob } = await pair();
+        await announce(alice, bob);
         const frame = new TextEncoder().encode("picture");
         (alice as any).frameCounter = MAX_FRAME_COUNTER - 1;
         const last = await alice.encryptFrame(hdr(2), frame);
@@ -187,6 +199,7 @@ describe("MeetingCipher", () => {
 
     it("drops a replayed relay frame, one too far behind its sender's newest, and one under another salt for the same peer", async () => {
         const { alice, bob, secret } = await pair();
+        await announce(alice, bob);
         const frame = new TextEncoder().encode("picture");
         const first = await alice.encryptFrame(hdr(2), frame);
         const second = await alice.encryptFrame(hdr(1), frame);
@@ -213,7 +226,87 @@ describe("MeetingCipher", () => {
         // A second session under the same peer id (another salt) is refused; another peer's frames are tracked apart.
         const replayer = new MeetingCipher(await deriveLiveKey(secret, MEETING), MEETING, ALICE);
         expect(await bob.decryptFrame(hdr(2), ALICE.peer, await replayer.encryptFrame(hdr(2), frame))).toBeUndefined();
-        const carol = new MeetingCipher(await deriveLiveKey(secret, MEETING), MEETING, { uid: "carol", peer: "carol~1" });
+        const CAROL = { uid: "carol", peer: "carol~1" };
+        const carol = new MeetingCipher(await deriveLiveKey(secret, MEETING), MEETING, CAROL);
+        await announce(carol, bob, CAROL);
         expect(await bob.decryptFrame(hdr(2), "carol~1", await carol.encryptFrame(hdr(2), frame))).toBeDefined();
+    });
+
+    it("plays a sender's frames only once a fresh signal announced its salt and counter, so frames the server kept can't pass as live to a later joiner", async () => {
+        const secret = randomSecret();
+        let now = 1_000_000_000_000;
+        const alice = new MeetingCipher(await deriveLiveKey(secret, MEETING), MEETING, ALICE, () => now);
+        const frame = new TextEncoder().encode("what alice said an hour ago");
+        // What the relay kept of alice's frames: a window's worth an announcement of her counter no longer covers, then one still covered.
+        const kept: Uint8Array[] = [];
+        for (let i = 0n; i < 2n * FRAME_REPLAY_WINDOW; i++) {
+            kept.push(await alice.encryptFrame(hdr(2), frame));
+        }
+        // Someone joining later, having heard nothing from alice yet, plays none of her frames.
+        const late = new MeetingCipher(await deriveLiveKey(secret, MEETING), MEETING, BOB, () => now);
+        expect(await late.decryptFrame(hdr(2), ALICE.peer, kept[0])).toBeUndefined();
+        // A signal too old to be live announces nothing either.
+        const stale = await alice.seal(chat());
+        now += MAX_SIGNAL_AGE_MS + 1;
+        expect(await late.open(stamped(stale))).toBeUndefined();
+        expect(await late.decryptFrame(hdr(2), ALICE.peer, kept[kept.length - 1])).toBeUndefined();
+
+        // Alice's fresh hello announces the counter she has reached: what she sealed before the window below it stays dead.
+        await announce(alice, late);
+        for (const old of kept.slice(0, Number(FRAME_REPLAY_WINDOW))) {
+            expect(await late.decryptFrame(hdr(2), ALICE.peer, old)).toBeUndefined();
+        }
+        // The frames sealed just before her hello, still on their way, play once; what she seals from now on plays.
+        expect(await late.decryptFrame(hdr(2), ALICE.peer, kept[kept.length - 1])).toBeDefined();
+        expect(await late.decryptFrame(hdr(2), ALICE.peer, kept[Number(FRAME_REPLAY_WINDOW)])).toBeDefined();
+        expect(await late.decryptFrame(hdr(2), ALICE.peer, kept[kept.length - 1])).toBeUndefined();
+        expect(await late.decryptFrame(hdr(2), ALICE.peer, await alice.encryptFrame(hdr(2), frame))).toBeDefined();
+
+        // Another session of the same peer id - a salt she didn't announce - is refused, and its signal doesn't re-pin the salt.
+        const other = new MeetingCipher(await deriveLiveKey(secret, MEETING), MEETING, ALICE, () => now);
+        const otherFrame = await other.encryptFrame(hdr(2), frame);
+        const otherSalt = Buffer.from(otherFrame.subarray(0, 8)).toString("hex");
+        expect(await late.open(await sealInner(await deriveLiveKey(secret, MEETING), { n: 100, t: now, f: { s: otherSalt, c: 1 } }))).toBeDefined();
+        expect(await late.decryptFrame(hdr(2), ALICE.peer, otherFrame)).toBeUndefined();
+        expect(await late.decryptFrame(hdr(2), ALICE.peer, await alice.encryptFrame(hdr(2), frame))).toBeDefined();
+    });
+
+    it("moves a sender's window up to a later announcement, so frames the server held back while none reached this tab don't play late", async () => {
+        const { alice, bob } = await pair();
+        const frame = new TextEncoder().encode("picture");
+        await announce(alice, bob);
+        expect(await bob.decryptFrame(hdr(2), ALICE.peer, await alice.encryptFrame(hdr(2), frame))).toBeDefined();
+        const held: Uint8Array[] = [];
+        for (let i = 0n; i < 2n * FRAME_REPLAY_WINDOW; i++) {
+            held.push(await alice.encryptFrame(hdr(2), frame));
+        }
+        await announce(alice, bob);
+        expect(await bob.decryptFrame(hdr(2), ALICE.peer, held[0])).toBeUndefined();
+        expect(await bob.decryptFrame(hdr(2), ALICE.peer, held[held.length - 1])).toBeDefined();
+
+        // An announcement behind what already played changes nothing.
+        const behind = await alice.seal(chat());
+        const played = await alice.encryptFrame(hdr(2), frame);
+        const next = await alice.encryptFrame(hdr(2), frame);
+        expect(await bob.decryptFrame(hdr(2), ALICE.peer, next)).toBeDefined();
+        expect(await bob.open(stamped(behind))).toBeDefined();
+        expect(await bob.decryptFrame(hdr(2), ALICE.peer, played)).toBeDefined();
+        expect(await bob.decryptFrame(hdr(2), ALICE.peer, next)).toBeUndefined();
+    });
+
+    it("announces nothing from a signal without a well-formed frame salt and counter, though the signal itself is delivered", async () => {
+        const key = await deriveLiveKey(randomSecret(), MEETING);
+        const alice = new MeetingCipher(key, MEETING, ALICE);
+        const sealedFrame = await alice.encryptFrame(hdr(2), new TextEncoder().encode("picture"));
+        const salt = Buffer.from(sealedFrame.subarray(0, 8)).toString("hex");
+        let n = 0;
+        const bob = new MeetingCipher(key, MEETING, BOB);
+        const malformed = [undefined, null, "f", { c: 0 }, { s: "z".repeat(16), c: 0 }, { s: salt + "00", c: 0 }, { s: salt, c: "0" }, { s: salt, c: 0.5 }, { s: salt, c: -1 }, { s: salt, c: MAX_FRAME_COUNTER + 1 }];
+        for (const f of malformed) {
+            expect(await bob.open(await sealInner(key, { n: ++n, t: Date.now(), f }))).toBeDefined();
+            expect(await bob.decryptFrame(hdr(2), ALICE.peer, sealedFrame)).toBeUndefined();
+        }
+        expect(await bob.open(await sealInner(key, { n: ++n, t: Date.now(), f: { s: salt, c: 0 } }))).toBeDefined();
+        expect(await bob.decryptFrame(hdr(2), ALICE.peer, sealedFrame)).toBeDefined();
     });
 });

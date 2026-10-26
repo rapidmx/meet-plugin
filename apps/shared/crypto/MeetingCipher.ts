@@ -7,7 +7,7 @@
  * in web-client's `lib/crypto/meetingKeys.ts`):
  *
  * - **Signaling** (version 2): every `SignalMessage` - offers, answers, ICE candidates, presence and names, moderation, chat, whiteboard,
- * cursors, reactions - travels as `{ to?, e }`, `e` being AES-256-GCM of `{ from, peer, n, t, data }` bound to the meeting. The server
+ * cursors, reactions - travels as `{ to?, e }`, `e` being AES-256-GCM of `{ from, peer, n, t, f, data }` bound to the meeting. The server
  * still stamps `from`/`peer` and routes by `to`; a receiver drops a message it can't open, one whose sealed sender differs from the
  * stamped one, one replayed (`n` not above the last it accepted from that peer), one sealed more than `MAX_SIGNAL_AGE_MS` from now
  * (`t`, so what the server kept from an earlier session or occurrence can't be passed off as live), and anything sent in the clear.
@@ -15,7 +15,10 @@
  * and to every header field a receiver acts on (kind, key-frame flag, seq, timestamp - `FrameHeader`), so a relay or peer rewriting
  * one makes the frame fail to open. Its nonce is a 64-bit random salt per sending session and a 32-bit counter (`encryptFrame()`), so
  * the many sessions that share the one long-lived live key don't collide. A receiver drops a frame whose nonce it already accepted
- * from that sender, or one too far behind the newest (`FRAME_REPLAY_WINDOW`).
+ * from that sender, or one too far behind the newest (`FRAME_REPLAY_WINDOW`). Frames carry no time a receiver can check, so every
+ * sealed signal announces its sender's frame salt and counter (`f`), fresh because the signal is: a receiver plays a sender's frames
+ * only under the salt it announced and from just below the counter it announced (`acceptFrameAnnouncement()`), so what the server kept
+ * of a sender's earlier frames can't be passed off as live to someone who joins later.
  *
  * - **Waiting-room names**: the name a guest gives to wait for the host (`sealWaitingName()`), which the server keeps and lists to
  * the host only sealed (`specs/meeting_privacy.md` §6.1).
@@ -54,6 +57,8 @@ const TAG_BYTES = 16;
  * series) seals under the one live key, so this is wide enough that no two sessions plausibly draw the same salt: with 4 bytes, a
  * collision - and with it GCM nonce reuse, which leaks the authentication key - was likely within about 100k relay sessions. */
 const SALT_BYTES = 8;
+/** An announced frame salt (`f.s` of a sealed signal): `SALT_BYTES` as lower-case hex. */
+const FRAME_SALT_HEX = new RegExp(`^[0-9a-f]{${SALT_BYTES * 2}}$`);
 /** The most frames one session seals: the counter is the nonce's last 4 bytes. */
 export const MAX_FRAME_COUNTER = 0xffffffff;
 /** What a frame's AAD starts with; the version changes whenever what it binds does. */
@@ -74,15 +79,29 @@ export const FRAME_REPLAY_WINDOW = 128n;
 
 /** What a sealed message's envelope adds around `e`: `{"op":"signal","data":{"to":"<peer id>","e":""}}`, with room for a long peer id. */
 const SIGNAL_ENVELOPE_OVERHEAD_BYTES = 512;
-/** What the sealed plaintext adds around the message: `{"from":..,"peer":..,"n":..,"t":..,"data":}`, with room for long ids. */
-const SIGNAL_INNER_OVERHEAD_BYTES = 512;
+/** What the sealed plaintext adds around the message: `{"from":..,"peer":..,"n":..,"t":..,"f":{"s":..,"c":..},"data":}`, with room for
+ * long ids. */
+const SIGNAL_INNER_OVERHEAD_BYTES = 576;
 
-/** The frames accepted from one sender: its session's salt, the highest counter, and which of the `FRAME_REPLAY_WINDOW` counters below
- * it were seen (bit `i` is `highest - i`). */
+/** The frames accepted from one sender: its session's salt (the one its signals announced), the highest counter (accepted, or
+ * announced), and which of the `FRAME_REPLAY_WINDOW` counters below it were seen (bit `i` is `highest - i`). */
 interface FrameReplayState {
     salt: string;
     highest: bigint;
     seen: bigint;
+}
+
+/** `bytes` as lower-case hex: how a frame salt is announced and kept. */
+function toHex(bytes: Uint8Array): string {
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/** Moves `state`'s window up to `counter`, a counter above its highest, marking `counter` seen when a frame under it was accepted. */
+function advanceFrameWindow(state: FrameReplayState, counter: bigint, seen: boolean): void {
+    const shift = counter - state.highest;
+    const kept = shift >= FRAME_REPLAY_WINDOW ? 0n : (state.seen << shift) & ((1n << FRAME_REPLAY_WINDOW) - 1n);
+    state.seen = seen ? kept | 1n : kept;
+    state.highest = counter;
 }
 
 function concat(...parts: Uint8Array[]): Uint8Array {
@@ -125,10 +144,10 @@ export class MeetingCipher implements SignalCipher {
     /** The highest `n` accepted per peer. */
     private readonly accepted = new Map<string, number>();
     private readonly signalAad: Uint8Array;
-    /** This sender's frame nonces: a random salt for this session (drawn with the first frame), then a counter. */
-    private frameSalt?: Uint8Array;
+    /** This sender's frame nonces: a random salt for this session (drawn up front, since every signal announces it), then a counter. */
+    private readonly frameSalt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
     private frameCounter = 0;
-    /** The frames accepted per sender peer - see `acceptFrameNonce()`. */
+    /** The frames accepted per sender peer, from its first fresh signal on - see `acceptFrameAnnouncement()`, `acceptFrameNonce()`. */
     private readonly framesAccepted = new Map<string, FrameReplayState>();
 
     /**
@@ -148,7 +167,9 @@ export class MeetingCipher implements SignalCipher {
 
     public async seal(message: SignalMessage): Promise<Record<string, unknown>> {
         const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
-        const plain = new TextEncoder().encode(JSON.stringify({ from: this.self.uid, peer: this.self.peer, n: ++this.sent, t: this.now(), data: message }));
+        // `f`: this session's frame salt and the last counter it sealed, so a receiver knows which of its frames can still be live.
+        const f = { s: toHex(this.frameSalt), c: this.frameCounter };
+        const plain = new TextEncoder().encode(JSON.stringify({ from: this.self.uid, peer: this.self.peer, n: ++this.sent, t: this.now(), f, data: message }));
         const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: this.signalAad as BufferSource }, this.liveKey, plain));
         const e = toBase64Url(concat(iv, sealed));
         return message.to !== undefined ? { to: message.to, e } : { e };
@@ -158,7 +179,7 @@ export class MeetingCipher implements SignalCipher {
         if (typeof data.e !== "string") {
             return undefined;
         }
-        let inner: { from?: unknown; peer?: unknown; n?: unknown; t?: unknown; data?: unknown };
+        let inner: { from?: unknown; peer?: unknown; n?: unknown; t?: unknown; f?: unknown; data?: unknown };
         try {
             const bytes = fromBase64Url(data.e);
             const plain = await crypto.subtle.decrypt(
@@ -181,6 +202,7 @@ export class MeetingCipher implements SignalCipher {
             return undefined;
         }
         this.accepted.set(peer, inner.n);
+        this.acceptFrameAnnouncement(peer, inner.f);
         // The server's stamps, which the sealed sender has just been checked against.
         return { ...(inner.data as SignalMessage), from: data.from as string, peer: data.peer as string | undefined };
     }
@@ -198,7 +220,6 @@ export class MeetingCipher implements SignalCipher {
             throw new Error("This session has sealed as many relay frames as its nonces allow.");
         }
         const nonce = new Uint8Array(IV_BYTES);
-        this.frameSalt ??= crypto.getRandomValues(new Uint8Array(SALT_BYTES));
         nonce.set(this.frameSalt, 0);
         new DataView(nonce.buffer).setUint32(SALT_BYTES, ++this.frameCounter);
         const sealed = await crypto.subtle.encrypt(
@@ -231,25 +252,41 @@ export class MeetingCipher implements SignalCipher {
     }
 
     /**
-     * Whether a frame of `senderPeer` that opened under `nonce` is new, recording it when it is. Only frames that opened get here, so a
-     * forged nonce can't move anything. The salt is pinned to the first one seen, since a peer id is one session. A counter above the
-     * highest so far is accepted; one within `FRAME_REPLAY_WINDOW` below it, once; anything older, or seen before, is a replay.
+     * Records the frame salt and counter (`f`) that a signal of `senderPeer` announced - only one that opened, from that peer, sealed
+     * within `MAX_SIGNAL_AGE_MS` of this tab's clock, gets here. The first announcement pins the salt (a peer id is one session) and
+     * makes the announced counter the highest, none of the `FRAME_REPLAY_WINDOW` below it seen yet: frames sealed just before the signal,
+     * still on their way, play, and anything older doesn't. A later one moves the window up when the sender's frames have stopped
+     * reaching this tab, so what the server held back meanwhile can't be played late. Anything malformed, or another salt, is ignored.
      */
-    private acceptFrameNonce(senderPeer: string, nonce: Uint8Array): boolean {
-        const salt = Array.from(nonce.subarray(0, SALT_BYTES), (byte) => byte.toString(16).padStart(2, "0")).join("");
-        const counter = BigInt(new DataView(nonce.buffer, nonce.byteOffset, nonce.byteLength).getUint32(SALT_BYTES));
+    private acceptFrameAnnouncement(senderPeer: string, announced: unknown): void {
+        const { s, c } = (announced ?? {}) as { s?: unknown; c?: unknown };
+        if (typeof s !== "string" || !FRAME_SALT_HEX.test(s) || typeof c !== "number" || !Number.isInteger(c) || c < 0 || c > MAX_FRAME_COUNTER) {
+            return;
+        }
+        const counter = BigInt(c);
         const state = this.framesAccepted.get(senderPeer);
         if (!state) {
-            this.framesAccepted.set(senderPeer, { salt, highest: counter, seen: 1n });
-            return true;
+            this.framesAccepted.set(senderPeer, { salt: s, highest: counter, seen: 0n });
+        } else if (state.salt === s && counter > state.highest) {
+            advanceFrameWindow(state, counter, false);
         }
-        if (state.salt !== salt) {
+    }
+
+    /**
+     * Whether a frame of `senderPeer` that opened under `nonce` is new, recording it when it is. Only frames that opened get here, so a
+     * forged nonce can't move anything. A frame of a sender none of whose fresh signals has arrived yet, or under a salt other than the
+     * one it announced, is dropped (`acceptFrameAnnouncement()`). A counter above the highest so far is accepted; one within
+     * `FRAME_REPLAY_WINDOW` below it, once; anything older, or seen before, is a replay.
+     */
+    private acceptFrameNonce(senderPeer: string, nonce: Uint8Array): boolean {
+        const salt = toHex(nonce.subarray(0, SALT_BYTES));
+        const counter = BigInt(new DataView(nonce.buffer, nonce.byteOffset, nonce.byteLength).getUint32(SALT_BYTES));
+        const state = this.framesAccepted.get(senderPeer);
+        if (!state || state.salt !== salt) {
             return false;
         }
         if (counter > state.highest) {
-            const shift = counter - state.highest;
-            state.seen = shift >= FRAME_REPLAY_WINDOW ? 1n : ((state.seen << shift) | 1n) & ((1n << FRAME_REPLAY_WINDOW) - 1n);
-            state.highest = counter;
+            advanceFrameWindow(state, counter, true);
             return true;
         }
         const offset = state.highest - counter;
