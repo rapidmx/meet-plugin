@@ -1704,3 +1704,7 @@ Fixed (findings by review id):
   account for a while instead would drop a legitimate rejoin's `hello`, which nobody repeats.
 - **#229 Failed admit/deny re-listing sealed names as "Someone".** The poll and both failure re-fetches in `_CallView` go through one
   module function, `fetchWaitingParticipants(meetingUid, liveKey)`, which opens sealed names.
+- **#207 Keyed link in replies (spec only).** restapi's `buildEventIcs()` no longer writes `LOCATION` in a `REPLY` or a plain `COUNTER`
+  (restapi a0c5a5d). `specs/meeting_privacy.md` §4.1 now says so: replies and proposals RapidMX composes never carry `LOCATION`, so an
+  attendee's `#k=` link isn't sent back to the organizer. It also records the known limit: an external client's own `REPLY` may still
+  echo the keyed link to an organizer mailbox here that stores mail readable, which this server can't prevent.

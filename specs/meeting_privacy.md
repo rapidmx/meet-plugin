@@ -60,6 +60,14 @@ so a key wrapped to a participant's own zero-access key couldn't be opened in th
   - A keyed link goes to no copy this server would store readable: an address on another server, or a mailbox here whose mail is
     zero-access. A mailbox here without zero-access, or any other address on a domain this server serves (a list, an unknown
     address), is skipped with a warning, like a guest with no key (restapi `MeetingInviteSender`, `host.mayCarryMeetingKey`).
+- **Replies and proposals.** An attendee's copy holds their keyed link in `LOCATION`, so the replies and proposals RapidMX composes for
+  an attendee (an iTIP `REPLY`, a `COUNTER` proposing a new time, the resource auto-reply) never carry `LOCATION`. Only a change request
+  that asks to move the meeting carries one, the place the guest asks for. The attendee's `#k=` link therefore never travels back to the
+  organizer, whose mailbox may store its mail readable: a meeting is protected whenever its organizer has a zero-access key (§2), not
+  only when their mail is zero-access (restapi `buildEventIcs()`).
+  - **Known limit.** An external attendee's own client (Outlook, for one) typically echoes `LOCATION` in its `REPLY`, so the keyed link
+    can still reach an organizer mailbox here that stores mail readable. This server can't stop another client from sending it. The
+    leaked key is that meeting's only, expires with it (§8), and lands only in the organizer's own mailbox.
 
 ### 4.2 The organizer's wrap
 
