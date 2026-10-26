@@ -114,6 +114,11 @@
  * unavailable (turned off by the operator, or a browser without WebCodecs) the pair is marked `"failed"` and stays
  * in the roster, rather than the participant vanishing with no explanation as it used to.
  *
+ * In a protected meeting a receiver plays a sender's relayed frames only while it holds a fresh announcement of them,
+ * which every sealed signal carries (`MeetingCipher`'s `acceptFrameAnnouncement()`). So the side told by `relay-fallback`
+ * answers with its `state` (the side that sent it announced itself in that very message), and a tab sending on the
+ * relay re-sends its `state` every `RELAY_ANNOUNCE_INTERVAL_MS`, however quiet it otherwise is.
+ *
  * A pair never moves back up: once on the relay it stays there for the rest of the call - except that the whole
  * waterfall is itself only what `"auto"` mode does; see the next section.
  *
@@ -184,6 +189,11 @@ export const DEFAULT_DISCONNECTED_GRACE_MS = 8_000;
  * free to call every frame. */
 export const DEFAULT_DIAGNOSTICS_POLL_MS = 3_000;
 
+/** How often a tab sending on the relay re-sends its `state`, whose seal announces its frames: well within
+ * `MeetingCipher`'s `MAX_SIGNAL_AGE_MS`, after which a receiver stops playing frames it has had no fresh word of
+ * (counted from when the signal was sealed, so this leaves room for a sender's clock up to about 4 minutes behind). */
+export const RELAY_ANNOUNCE_INTERVAL_MS = 60_000;
+
 type MediaKind = "audio" | "video";
 
 interface PeerState extends MeshParticipant {
@@ -252,6 +262,8 @@ export class MeshConnectionManager {
     private currentPresenterUid: string | undefined;
     private currentTransportMode: TransportMode;
     private readonly selfId: string;
+    /** Re-sends `state` while this tab sends on the relay - see `syncRelaySending()`. */
+    private relayAnnounceTimer: ReturnType<typeof setInterval> | undefined;
 
     constructor(private readonly options: MeshConnectionManagerOptions) {
         this.selfId = options.peerId ?? options.selfUid;
@@ -320,6 +332,8 @@ export class MeshConnectionManager {
         this.orphanCandidates.clear();
         this.removedPeers.clear();
         this.listeners.clear();
+        clearInterval(this.relayAnnounceTimer);
+        this.relayAnnounceTimer = undefined;
         this.options.relay?.close();
     }
 
@@ -806,16 +820,29 @@ export class MeshConnectionManager {
         }
     }
 
+    /** Follows the peer onto the relay, then answers with this tab's `state`: the peer may not have heard from it for longer
+     * than a frame announcement lasts, and plays none of its relayed frames until it has. */
     private handleRelayFallback(from: string): void {
         const peer = this.peers.get(from);
         if (peer) {
             this.fallBack(peer, false);
+            if (peer.transport === "websocket") {
+                this.send({ kind: "state", to: peer.uid, state: this.localState });
+            }
         }
     }
 
-    /** The relay only encodes and uploads the local media while at least one pair is actually using it. */
+    /** The relay only encodes and uploads the local media while at least one pair is actually using it, and while it does,
+     * this tab's `state` is re-sent every `RELAY_ANNOUNCE_INTERVAL_MS` - see this module's doc comment on the relay. */
     private syncRelaySending(): void {
-        this.options.relay?.setSending([...this.peers.values()].some((peer) => peer.transport === "websocket"));
+        const sending = [...this.peers.values()].some((peer) => peer.transport === "websocket");
+        this.options.relay?.setSending(sending);
+        if (sending && !this.relayAnnounceTimer) {
+            this.relayAnnounceTimer = setInterval(() => this.send({ kind: "state", state: this.localState }), RELAY_ANNOUNCE_INTERVAL_MS);
+        } else if (!sending && this.relayAnnounceTimer) {
+            clearInterval(this.relayAnnounceTimer);
+            this.relayAnnounceTimer = undefined;
+        }
     }
 
     /** Rebuilds `uid`'s connection from scratch under the current `TransportMode` - see this module's doc comment

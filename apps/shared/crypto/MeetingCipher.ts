@@ -17,8 +17,11 @@
  * the many sessions that share the one long-lived live key don't collide. A receiver drops a frame whose nonce it already accepted
  * from that sender, or one too far behind the newest (`FRAME_REPLAY_WINDOW`). Frames carry no time a receiver can check, so every
  * sealed signal announces its sender's frame salt and counter (`f`), fresh because the signal is: a receiver plays a sender's frames
- * only under the salt it announced and from just below the counter it announced (`acceptFrameAnnouncement()`), so what the server kept
- * of a sender's earlier frames can't be passed off as live to someone who joins later.
+ * only under the salt it announced, no further back than `FRAME_ANNOUNCE_SLACK` below the counter it announced, and only while its
+ * last announcement is younger than `MAX_SIGNAL_AGE_MS` (`acceptFrameAnnouncement()`), so what the server kept of a sender's earlier
+ * frames can't be passed off as live to someone who joins later, or who moves onto the relay long after last hearing from it. A
+ * sender that seals no frame for `FRAME_IDLE_SKIP_MS` skips its counter past the slack (`skipIdleFrameCounter()`), so the frames it
+ * relayed before going quiet die with its next announcement rather than staying within the slack for as long as it stays quiet.
  *
  * - **Waiting-room names**: the name a guest gives to wait for the host (`sealWaitingName()`), which the server keeps and lists to
  * the host only sealed (`specs/meeting_privacy.md` §6.1).
@@ -77,16 +80,32 @@ export const MAX_SIGNAL_AGE_MS = 5 * 60 * 1000;
  * counter, so their frames don't always complete in the order they were sealed. */
 export const FRAME_REPLAY_WINDOW = 128n;
 
+/** How many frame counters below the one a sender's signal announced its frames still play from. The signal travels on the nearly idle
+ * signaling socket and overtakes what is queued on the relay: up to `RelayClient`'s `MAX_BUFFERED_BYTES` (about 1.4 s) at the sender,
+ * `RelayHub`'s `RELAY_WS_MAX_BACKPRESSURE_BYTES` (about 2.7 s at the full stream rate, longer on a downlink slower than it) at the
+ * server, and the sockets' own buffers. At about 65 frames a second (Opus every 20 ms plus 15 fps of video, one counter) this is
+ * about 15 s, 20 s with the camera off - also the most of a sender's latest frames the server can replay to a new receiver. */
+export const FRAME_ANNOUNCE_SLACK = 1024n;
+
+/** How long a sender may seal no relay frame before its counter skips `FRAME_ANNOUNCE_SLACK` ahead (`skipIdleFrameCounter()`). A
+ * sending session produces a frame every 20 ms or so (a muted microphone still encodes silence), so a gap this long means it stopped
+ * relaying. Its earlier frames are then at least this old, and only one still queued on the relay that much later is lost to the skip. */
+export const FRAME_IDLE_SKIP_MS = 5_000;
+
 /** What a sealed message's envelope adds around `e`: `{"op":"signal","data":{"to":"<peer id>","e":""}}`, with room for a long peer id. */
 const SIGNAL_ENVELOPE_OVERHEAD_BYTES = 512;
 /** What the sealed plaintext adds around the message: `{"from":..,"peer":..,"n":..,"t":..,"f":{"s":..,"c":..},"data":}`, with room for
  * long ids. */
 const SIGNAL_INNER_OVERHEAD_BYTES = 576;
 
-/** The frames accepted from one sender: its session's salt (the one its signals announced), the highest counter (accepted, or
- * announced), and which of the `FRAME_REPLAY_WINDOW` counters below it were seen (bit `i` is `highest - i`). */
+/** The frames accepted from one sender: its session's salt (the one its signals announced), the counter at or below which none plays
+ * (`FRAME_ANNOUNCE_SLACK` below the highest announced), when the latest announcement this tab accepted was sealed (its own clock if
+ * that is earlier), the highest
+ * counter accepted, and which of the `FRAME_REPLAY_WINDOW` counters below that were seen (bit `i` is `highest - i`). */
 interface FrameReplayState {
     salt: string;
+    floor: bigint;
+    announcedAt: number;
     highest: bigint;
     seen: bigint;
 }
@@ -96,11 +115,11 @@ function toHex(bytes: Uint8Array): string {
     return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/** Moves `state`'s window up to `counter`, a counter above its highest, marking `counter` seen when a frame under it was accepted. */
-function advanceFrameWindow(state: FrameReplayState, counter: bigint, seen: boolean): void {
+/** Moves `state`'s window up to `counter`, a counter above its highest whose frame was just accepted. */
+function advanceFrameWindow(state: FrameReplayState, counter: bigint): void {
     const shift = counter - state.highest;
     const kept = shift >= FRAME_REPLAY_WINDOW ? 0n : (state.seen << shift) & ((1n << FRAME_REPLAY_WINDOW) - 1n);
-    state.seen = seen ? kept | 1n : kept;
+    state.seen = kept | 1n;
     state.highest = counter;
 }
 
@@ -147,6 +166,9 @@ export class MeetingCipher implements SignalCipher {
     /** This sender's frame nonces: a random salt for this session (drawn up front, since every signal announces it), then a counter. */
     private readonly frameSalt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
     private frameCounter = 0;
+    /** When this tab last sealed a relay frame, by its own clock - `undefined` before the first, and once the counter has skipped
+     * since (`skipIdleFrameCounter()`). */
+    private lastFrameAt: number | undefined;
     /** The frames accepted per sender peer, from its first fresh signal on - see `acceptFrameAnnouncement()`, `acceptFrameNonce()`. */
     private readonly framesAccepted = new Map<string, FrameReplayState>();
 
@@ -167,6 +189,7 @@ export class MeetingCipher implements SignalCipher {
 
     public async seal(message: SignalMessage): Promise<Record<string, unknown>> {
         const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
+        this.skipIdleFrameCounter();
         // `f`: this session's frame salt and the last counter it sealed, so a receiver knows which of its frames can still be live.
         const f = { s: toHex(this.frameSalt), c: this.frameCounter };
         const plain = new TextEncoder().encode(JSON.stringify({ from: this.self.uid, peer: this.self.peer, n: ++this.sent, t: this.now(), f, data: message }));
@@ -202,7 +225,7 @@ export class MeetingCipher implements SignalCipher {
             return undefined;
         }
         this.accepted.set(peer, inner.n);
-        this.acceptFrameAnnouncement(peer, inner.f);
+        this.acceptFrameAnnouncement(peer, inner.f, inner.t);
         // The server's stamps, which the sealed sender has just been checked against.
         return { ...(inner.data as SignalMessage), from: data.from as string, peer: data.peer as string | undefined };
     }
@@ -216,12 +239,14 @@ export class MeetingCipher implements SignalCipher {
     /** `frame` (one encoded packet or picture) sealed to send through the relay under `header`: nonce (`salt[8] || counter u32`), then
      * ciphertext. Throws, sealing nothing, once the session has sealed `MAX_FRAME_COUNTER` frames, rather than reuse a nonce. */
     public async encryptFrame(header: FrameHeader, frame: Uint8Array): Promise<Uint8Array> {
+        this.skipIdleFrameCounter();
         if (this.frameCounter >= MAX_FRAME_COUNTER) {
             throw new Error("This session has sealed as many relay frames as its nonces allow.");
         }
         const nonce = new Uint8Array(IV_BYTES);
         nonce.set(this.frameSalt, 0);
         new DataView(nonce.buffer).setUint32(SALT_BYTES, ++this.frameCounter);
+        this.lastFrameAt = this.now();
         const sealed = await crypto.subtle.encrypt(
             { name: "AES-GCM", iv: nonce, additionalData: this.frameAad(header, this.self.peer) as BufferSource },
             this.liveKey,
@@ -252,41 +277,64 @@ export class MeetingCipher implements SignalCipher {
     }
 
     /**
-     * Records the frame salt and counter (`f`) that a signal of `senderPeer` announced - only one that opened, from that peer, sealed
-     * within `MAX_SIGNAL_AGE_MS` of this tab's clock, gets here. The first announcement pins the salt (a peer id is one session) and
-     * makes the announced counter the highest, none of the `FRAME_REPLAY_WINDOW` below it seen yet: frames sealed just before the signal,
-     * still on their way, play, and anything older doesn't. A later one moves the window up when the sender's frames have stopped
-     * reaching this tab, so what the server held back meanwhile can't be played late. Anything malformed, or another salt, is ignored.
+     * Once this tab has sealed no relay frame for `FRAME_IDLE_SKIP_MS`, moves its frame counter `FRAME_ANNOUNCE_SLACK` ahead (at most
+     * to `MAX_FRAME_COUNTER`), once per quiet spell, before it is next announced or used. Otherwise a sender that stopped relaying
+     * would keep announcing the counter it stopped at, and every receiver would keep the last `FRAME_ANNOUNCE_SLACK` frames it relayed
+     * playable for as long as it stayed off the relay: the server could feed them to a participant who moves onto the relay, or joins,
+     * much later. After the skip its next announcement sets every receiver's floor at or above its last frame.
      */
-    private acceptFrameAnnouncement(senderPeer: string, announced: unknown): void {
+    private skipIdleFrameCounter(): void {
+        if (this.lastFrameAt !== undefined && this.now() - this.lastFrameAt > FRAME_IDLE_SKIP_MS) {
+            this.frameCounter = Math.min(this.frameCounter + Number(FRAME_ANNOUNCE_SLACK), MAX_FRAME_COUNTER);
+            this.lastFrameAt = undefined;
+        }
+    }
+
+    /**
+     * Records the frame salt and counter (`f`) that a signal of `senderPeer` sealed at `sealedAt` (`t`, the sender's clock) announced -
+     * only one that opened, from that peer, sealed within `MAX_SIGNAL_AGE_MS` of this tab's clock, gets here. The first announcement
+     * pins the salt (a peer id is one session). Each one under that salt renews the anchor and raises the floor to
+     * `FRAME_ANNOUNCE_SLACK` below the announced counter: the frames the sender sealed shortly before the signal, still queued on the
+     * relay the signal overtook, play, and anything older doesn't, so what the server held back can't be played late. The anchor dates
+     * from when the signal was sealed, or from now if that is earlier (a sender's clock ahead of this tab's), so one the server held back
+     * buys no extra time. The floor never moves the reorder window (`highest`), which only accepted frames do, so a signal doesn't drop
+     * the relay's backlog. Anything malformed, or another salt, is ignored.
+     */
+    private acceptFrameAnnouncement(senderPeer: string, announced: unknown, sealedAt: number): void {
         const { s, c } = (announced ?? {}) as { s?: unknown; c?: unknown };
         if (typeof s !== "string" || !FRAME_SALT_HEX.test(s) || typeof c !== "number" || !Number.isInteger(c) || c < 0 || c > MAX_FRAME_COUNTER) {
             return;
         }
-        const counter = BigInt(c);
+        const floor = BigInt(c) > FRAME_ANNOUNCE_SLACK ? BigInt(c) - FRAME_ANNOUNCE_SLACK : 0n;
+        const announcedAt = Math.min(this.now(), sealedAt);
         const state = this.framesAccepted.get(senderPeer);
         if (!state) {
-            this.framesAccepted.set(senderPeer, { salt: s, highest: counter, seen: 0n });
-        } else if (state.salt === s && counter > state.highest) {
-            advanceFrameWindow(state, counter, false);
+            this.framesAccepted.set(senderPeer, { salt: s, floor, announcedAt, highest: floor, seen: 0n });
+        } else if (state.salt === s) {
+            state.announcedAt = Math.max(state.announcedAt, announcedAt);
+            if (floor > state.floor) {
+                state.floor = floor;
+            }
         }
     }
 
     /**
      * Whether a frame of `senderPeer` that opened under `nonce` is new, recording it when it is. Only frames that opened get here, so a
-     * forged nonce can't move anything. A frame of a sender none of whose fresh signals has arrived yet, or under a salt other than the
-     * one it announced, is dropped (`acceptFrameAnnouncement()`). A counter above the highest so far is accepted; one within
-     * `FRAME_REPLAY_WINDOW` below it, once; anything older, or seen before, is a replay.
+     * forged nonce can't move anything. A frame is dropped when none of the sender's fresh signals has arrived yet, or none for
+     * `MAX_SIGNAL_AGE_MS` (so a receiver that moves onto the relay long after last hearing from the sender waits for a fresh anchor), when
+     * it is under a salt other than the one the sender announced, or at or below the floor its signals set (`acceptFrameAnnouncement()`).
+     * Otherwise a counter above the highest so far is accepted; one within `FRAME_REPLAY_WINDOW` below it, once; anything older, or seen
+     * before, is a replay.
      */
     private acceptFrameNonce(senderPeer: string, nonce: Uint8Array): boolean {
         const salt = toHex(nonce.subarray(0, SALT_BYTES));
         const counter = BigInt(new DataView(nonce.buffer, nonce.byteOffset, nonce.byteLength).getUint32(SALT_BYTES));
         const state = this.framesAccepted.get(senderPeer);
-        if (!state || state.salt !== salt) {
+        if (!state || state.salt !== salt || !(this.now() - state.announcedAt <= MAX_SIGNAL_AGE_MS) || counter <= state.floor) {
             return false;
         }
         if (counter > state.highest) {
-            advanceFrameWindow(state, counter, true);
+            advanceFrameWindow(state, counter);
             return true;
         }
         const offset = state.highest - counter;

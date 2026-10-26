@@ -1807,3 +1807,56 @@ Fixed (findings by review id):
 - **Why.** CI's `validate` job (`validate.sh`: `yarn npm audit -R --severity high --no-deprecations`, production then development) failed on high/critical advisories in transitive dependencies.
 - **Fixed by `resolutions`** in `package.json` (descriptor-scoped, same style as the existing ones; drop each once the parent's own range picks up the fixed version): undici ^8.4.1/^8.10.2 -> ^8.12.3 (jsdom, dev). Only the development audit failed here.
 - **node-forge exception.** `.yarnrc.yml` `npmAuditIgnoreAdvisories: ["1240912"]` ignores only GHSA-86w9-cpqp-85rv (npm advisory id 1240912; node-forge <=1.4.0 RSA PKCS#1 v1.5 signature verification accepting extra nested DigestAlgorithm elements), which has no fixed node-forge release; it comes in through `acme-client` 5.4.0 (`^1.3.1`). Every other node-forge advisory still fails the audit. **Remove the exception once acme-client or node-forge ships a fix** (then add a resolution or bump acme-client instead).
+
+## 2026-10-26: Review round 8 fixes
+
+- **#806 (a signal dropped the relay's backlog).** Round 7's #715 fix made every announcement move a sender's reorder window
+  (`highest`) up to the announced counter. Signals ride the nearly idle signaling socket and overtake what is queued on the relay
+  (`RelayClient`'s 64 KiB, about 1.4 s, plus `RelayHub`'s 128 KiB per receiver, 2.7 s or more on a slow downlink), and the 128-counter
+  window is only about 2 s of media at 65 frames/s, so on a lagging relay every cursor or chat signal discarded everything in flight.
+  Fix: `FrameReplayState` gains a `floor`. An announcement only raises the floor to `FRAME_ANNOUNCE_SLACK` (1024, about 15 s, 20 s
+  with the camera off) below the announced counter and never touches `highest`/`seen`, which accepted frames alone move again, so the
+  bitmap only absorbs audio/video reordering as before #715. `acceptFrameNonce()` drops a counter at or below the floor. The first
+  announcement starts `highest` at the floor. Cost: the server can now replay or delay up to 1024 counters behind the latest accepted
+  announcement (was 128). Counted in frames, so a sender producing frames slowly (camera off, no microphone) has somewhat older frames
+  inside it; a time-based bound would need the sender's media clock in `f`, which wasn't worth a wire change. A sender that stopped
+  relaying is covered by the idle skip below, not by this.
+- **#807 (an old anchor never expired).** An anchor set by, say, a join-time `hello` kept accepting every higher counter forever, so a
+  participant who moved onto the relay 40 minutes later (or who stayed on it while a quiet sender sent no signal) could be fed frames
+  the server kept meanwhile. Fix: `FrameReplayState.announcedAt` records when an announcement under the pinned salt was accepted (any,
+  even one announcing no new frame; dated from its sealing since review issue 2 below), and `acceptFrameNonce()` drops the sender's frames once that is more than
+  `MAX_SIGNAL_AGE_MS` old, until a fresh signal arrives. To keep live media flowing, `MeshConnectionManager` now re-sends `state`
+  (broadcast) every `RELAY_ANNOUNCE_INTERVAL_MS` (60 s) while it sends on the relay (`syncRelaySending()` starts/stops the interval,
+  `stop()` clears it), and `handleRelayFallback()` answers the peer with a point-to-point `state` once the pair is on the relay (the
+  side sending `relay-fallback` announces itself in that message). Chose expiry plus keepalive over the panel's "expect a fresh
+  announcement when `receiveFrom()` starts" because the latter wipes the anchor of the very `relay-fallback` that triggered the
+  receive (it is opened before `handleRelayFallback()` runs), and because expiry also bounds the quiet-sender delay on a pair that has
+  been on the relay all along. The keepalive is sent in unprotected meetings too (the manager doesn't know which it is); a repeated
+  `state` is a no-op for receivers (`updatePeer()` ignores an unchanged state).
+  Tests: `MeetingCipher.test.ts` (frames 384 counters behind a later announcement all play once; a stale anchor refuses kept frames
+  until a fresh one, which still refuses those below its floor; a frame-less announcement renews; expiry), the #715 tests resized to
+  the slack; `MeshConnectionManager.test.ts` (the `relay-fallback` reply, none without a relay; the interval while relaying, kept while
+  one pair uses the relay, stopped by the last leaving and by `stop()`), and the diagnostics timer counts include the new interval.
+  Spec §5.2 "Freshness"/"Replay" rewritten. Nothing in booking-plugin uses this.
+- **Review of the above, issue 1 (a sender off the relay kept its last 1024 frames replayable).** A sender's counter moves only while
+  it seals relay frames, and `syncRelaySending()` detaches its senders as soon as no pair uses the relay, so a sender that relayed to Z
+  and then went back to direct-only kept announcing the counter it stopped at in every signal (keepalive, chat, the `relay-fallback`
+  reply, a newcomer's hello), and every receiver kept its last ~15 s of relayed frames above the floor indefinitely: 30 minutes later
+  the server could feed them to Y as it moved onto the relay, or to a newcomer. Fix: `MeetingCipher.skipIdleFrameCounter()`, called
+  from `seal()` and `encryptFrame()`: once no frame has been sealed for `FRAME_IDLE_SKIP_MS` (5 s; a sending session seals one every
+  ~20 ms, a muted mic included, since `track.enabled = false` still encodes silence), the counter moves `FRAME_ANNOUNCE_SLACK` ahead
+  (capped at `MAX_FRAME_COUNTER`), once per quiet spell (`lastFrameAt` cleared until the next frame). The next announcement then puts
+  every receiver's floor at or above the last frame relayed before the pause; skipping in `encryptFrame()` too covers frames resuming
+  before any signal. Cost: a frame still queued on the relay more than 5 s after the sender's last one, overtaken by a signal, is
+  dropped, and up to 1024 counters per quiet spell are spent (2^32 leaves room for millions). Test: "skips a sender's counter past the
+  slack once it has sealed no frame for a while..." (fails without the skip in either place).
+- **Review issue 2 (a held-back signal stretched the anchor to ~2x `MAX_SIGNAL_AGE_MS`).** `announcedAt` was the arrival time, so a
+  signal held back 4m59s anchored for another 5 minutes. Fix: `acceptFrameAnnouncement()` takes the signal's `t` and anchors at
+  `min(now, t)`, never moving an existing anchor back (`max` with the previous). Cost: a sender whose clock is behind the receiver's
+  gives shorter anchors; the 60 s keepalive absorbs up to ~4 minutes of skew, and signals beyond 5 minutes of skew were already
+  refused. Test: "dates a sender's anchor from when its signal was sealed..." (fails with arrival time). Spec §5.2 now states the bound
+  as 5 minutes from sealing, give or take the clocks' difference.
+  Left deliberately: a server that holds back a signal can still make it count until 5 minutes after it was sealed, the bound every
+  sealed signal already has; a receiver whose clock jumps (sleep/resume) waits for the next `state`, at most a minute; and a frame
+  sealed within the 1024 counters before an announcement stays replayable/delayable for those 5 minutes (the slack's purpose).
+  Unproven findings this round: none.

@@ -133,14 +133,26 @@ The hub only ever reads `to`, and stamps `from` and `peer`. A protected meeting'
   the ciphertext and fails the tag. `FLAG_ENCRYPTED` is implied by the frame being opened at all.
 - **Freshness.** A frame carries no time a receiver can check (its timestamp is the sender's page clock), so a frame is anchored to its
   sender's signaling instead. Every sealed signal announces the sender's frame salt and the last counter it sealed (`f`, §5.1), and only
-  a signal that passed §5.1's checks, freshness included, counts. The first announcement from a peer pins its salt and sets the highest
-  counter to the announced one, none of the 128 below it seen yet. A later announcement above the highest moves the window up to it.
-  Without this, a receiver that had never heard from a peer would accept any first frame that opened, so the server could replay a
-  participant's earlier frames, kept from the relay, to someone who joins later or reloads, as if they were live.
-- **Replay.** A receiver drops every frame of a sender peer none of whose fresh signals has arrived yet, and every frame under a salt
-  other than the one that peer announced. It accepts a counter above the highest, or one of the 128 below it once, so frames sealed just
-  before the announcing signal and still in flight play. Anything else is a replay and is dropped. A client older than `f` announces
-  nothing, so its relayed frames don't play for a newer one; the two still talk, and direct WebRTC media is unaffected.
+  a signal that passed §5.1's checks, freshness included, counts. The first announcement from a peer pins its salt. Each announcement
+  under that salt renews the anchor and raises a floor to 1024 counters below the announced one (`FRAME_ANNOUNCE_SLACK`, about 15 s of
+  audio and video): the signal travels on the nearly idle signaling socket and overtakes what is queued on the relay (about 1.4 s at the
+  sender, 2.7 s or more at the server on a slow downlink), and that backlog must still play. The floor never moves the reorder window,
+  which only accepted frames move. An anchor lasts 5 minutes (`MAX_SIGNAL_AGE_MS`) from when the signal was sealed (its `t`), or from
+  when the receiver accepted it if that is earlier (a sender clock ahead of the receiver's); after that the sender's frames don't play
+  until a fresh signal arrives. So a participant answers a `relay-fallback` with its `state`, and one sending on the relay re-sends its
+  `state` every minute (`RELAY_ANNOUNCE_INTERVAL_MS`). A sender that has sealed no frame for 5 s (`FRAME_IDLE_SKIP_MS`: it stopped
+  relaying, since a sending session produces a frame every 20 ms, a muted microphone included) moves its counter 1024 ahead before it
+  next announces or seals one, once per quiet spell, so its next announcement puts every receiver's floor at or above the last frame it
+  relayed. Without this, the server could replay a participant's earlier frames, kept from the relay, as if they were live: to someone
+  who joins later or reloads, who would accept any first frame that opened, or to someone who moves onto the relay long after last
+  hearing from the participant. What it can still replay or delay is bounded: at most the 1024 counters below the latest announcement a
+  receiver accepted, none of them from before a pause of 5 s or more in the sender's relaying, and only until 5 minutes after the
+  sender sealed that announcement, give or take the two clocks' difference.
+- **Replay.** A receiver drops every frame of a sender peer none of whose fresh signals has arrived yet or none for 5 minutes, every
+  frame under a salt other than the one that peer announced, and every frame at or below the floor. Above it, it accepts a counter
+  above the highest accepted, or one of the 128 below that once (audio and video share the counter and don't always complete in order).
+  Anything else is a replay and is dropped. A client older than `f` announces nothing, so its relayed frames don't play for a newer one;
+  the two still talk, and direct WebRTC media is unaffected.
 - **The flag.** Flag bit 1 (`FLAG_ENCRYPTED`) marks an encrypted frame. A protected meeting drops frames without it.
 - **Requirement.** Encryption is required: a browser that can't run WebCrypto AES-GCM over the frames can't join a protected meeting.
 

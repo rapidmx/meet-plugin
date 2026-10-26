@@ -7,6 +7,7 @@ import {
     DEFAULT_CONNECT_TIMEOUT_MS,
     DEFAULT_DIAGNOSTICS_POLL_MS,
     DEFAULT_DISCONNECTED_GRACE_MS,
+    RELAY_ANNOUNCE_INTERVAL_MS,
     MeshConnectionManager,
     type MeshConnectionManagerOptions,
     isOfferer,
@@ -1104,12 +1105,63 @@ describe("MeshConnectionManager - media paths (p2p, then TURN, then the WebSocke
         expect(manager.participants[0].transport).toBe("websocket");
         expect(pc.close).toHaveBeenCalledTimes(1);
         expect(relay.receiveFrom).toHaveBeenCalledTimes(1);
-        expect(channel.sent).toEqual([]);
+        // Only its state, sealed with a fresh frame announcement in a protected meeting, so the peer plays what it relays.
+        const reply = { type: "video-meeting-signal", kind: "state", from: "a", to: "z", state: { audioOn: true, videoOn: true, handRaised: false } };
+        expect(channel.sent).toEqual([reply]);
 
-        // Hearing it again, or from someone unknown, does nothing more.
+        // Hearing it again only answers again; from someone unknown, nothing.
         channel.emit(signal("relay-fallback", "z", { to: "a" }));
         channel.emit(signal("relay-fallback", "nobody", { to: "a" }));
         expect(relay.receiveFrom).toHaveBeenCalledTimes(1);
+        expect(channel.sent).toEqual([reply, reply]);
+
+        // Without a relay to move to, there is nothing to announce.
+        const failed = await setupWithPeer(fakeRelay(false));
+        failed.channel.sent.length = 0;
+        failed.channel.emit(signal("relay-fallback", "z", { to: "a" }));
+        expect(failed.manager.participants[0].transport).toBe("failed");
+        expect(failed.channel.sent).toEqual([]);
+    });
+
+    it("re-announces its state while sending on the relay, so receivers' anchors of its frames never go stale", async () => {
+        vi.useFakeTimers();
+        const relay = fakeRelay();
+        const { manager, channel, created } = await setupWithPeer(relay, { connectTimeoutMs: 10 * RELAY_ANNOUNCE_INTERVAL_MS });
+        channel.emit(hello("y", "Yan"));
+        await flush();
+        channel.sent.length = 0;
+        const state = { type: "video-meeting-signal", kind: "state", from: "a", state: { audioOn: true, videoOn: true, handRaised: false } };
+
+        // Not before a pair uses the relay.
+        vi.advanceTimersByTime(RELAY_ANNOUNCE_INTERVAL_MS);
+        expect(channel.sent).toEqual([]);
+
+        setState(created[0], "failed");
+        setState(created[1], "failed");
+        channel.sent.length = 0;
+        vi.advanceTimersByTime(RELAY_ANNOUNCE_INTERVAL_MS - 1);
+        expect(channel.sent).toEqual([]);
+        vi.advanceTimersByTime(1);
+        expect(channel.sent).toEqual([state]);
+        vi.advanceTimersByTime(RELAY_ANNOUNCE_INTERVAL_MS);
+        expect(channel.sent).toEqual([state, state]);
+
+        // One pair leaving the relay keeps it going; the last one stops it.
+        channel.emit(signal("bye", "z"));
+        vi.advanceTimersByTime(RELAY_ANNOUNCE_INTERVAL_MS);
+        expect(channel.sent).toHaveLength(3);
+        channel.emit(signal("bye", "y"));
+        vi.advanceTimersByTime(3 * RELAY_ANNOUNCE_INTERVAL_MS);
+        expect(channel.sent).toHaveLength(3);
+
+        // And stopping stops it.
+        const stopped = await setupWithPeer(fakeRelay());
+        setState(stopped.created[0], "failed");
+        stopped.manager.stop();
+        stopped.channel.sent.length = 0;
+        vi.advanceTimersByTime(3 * RELAY_ANNOUNCE_INTERVAL_MS);
+        expect(stopped.channel.sent).toEqual([]);
+        manager.stop();
     });
 
     it("ignores a late connection event from a connection it already left, or after stopping", async () => {
@@ -1245,7 +1297,8 @@ describe("MeshConnectionManager - diagnostics polling", () => {
 
         setState(pc, "failed");
         expect(manager.participants[0]?.diagnostics).toBeUndefined();
-        expect(vi.getTimerCount()).toBe(0);
+        // Only the relay's re-announcement of this tab's state (`RELAY_ANNOUNCE_INTERVAL_MS`) is left.
+        expect(vi.getTimerCount()).toBe(1);
         await vi.advanceTimersByTimeAsync(60_000);
         expect(pc.collectDiagnostics).toHaveBeenCalledTimes(1); // just the one poll from before the fallback
     });
@@ -1357,7 +1410,8 @@ describe("MeshConnectionManager - relay diagnostics polling", () => {
         const relay = { ...fakeRelay(), diagnostics: vi.fn(() => relaySample()) };
         const { pc, channel } = await setupWithPeer(relay);
         setState(pc, "failed");
-        expect(vi.getTimerCount()).toBe(1);
+        // The relay's diagnostics poll and its re-announcement of this tab's state.
+        expect(vi.getTimerCount()).toBe(2);
         channel.emit(signal("bye", "z"));
         expect(vi.getTimerCount()).toBe(0);
     });
