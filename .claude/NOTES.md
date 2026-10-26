@@ -1795,3 +1795,8 @@ Fixed (findings by review id):
   Left deliberately: a client from before this change sends no `f`, so a newer receiver plays none of its relayed frames (signaling and
   direct WebRTC media are unaffected). Accepting an unannounced sender would reopen the replay, and every client is served by the same
   deployment, so the mix only lasts for tabs left open across an upgrade.
+
+## 2026-10-26: Dependency audit
+- **Why.** CI's `validate` job (`validate.sh`: `yarn npm audit -R --severity high --no-deprecations`, production then development) failed on high/critical advisories in transitive dependencies.
+- **Fixed by `resolutions`** in `package.json` (descriptor-scoped, same style as the existing ones; drop each once the parent's own range picks up the fixed version): undici ^8.4.1/^8.10.2 -> ^8.12.3 (jsdom, dev). Only the development audit failed here.
+- **node-forge exception.** `.yarnrc.yml` `npmAuditIgnoreAdvisories: ["1240912"]` ignores only GHSA-86w9-cpqp-85rv (npm advisory id 1240912; node-forge <=1.4.0 RSA PKCS#1 v1.5 signature verification accepting extra nested DigestAlgorithm elements), which has no fixed node-forge release; it comes in through `acme-client` 5.4.0 (`^1.3.1`). Every other node-forge advisory still fails the audit. **Remove the exception once acme-client or node-forge ships a fix** (then add a resolution or bump acme-client instead).

@@ -81,7 +81,9 @@
     },
     "resolutions": {
         "@rapidmx/restapi": "^0.23.0",
-        "@rapidmx/web-client": "^0.22.0"
+        "@rapidmx/web-client": "^0.22.0",
+        "undici@npm:^8.10.2": "^8.12.3",
+        "undici@npm:^8.4.1": "^8.12.3"
     },
     "packageManager": "yarn@4.5.3",
     "engines": {
