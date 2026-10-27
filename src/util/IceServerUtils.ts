@@ -3,6 +3,13 @@
 // SPDX-License-Identifier: MPL-2.0
 ///////////////////////////////////////////////////////////////////////////////
 import * as crypto from "crypto";
+import * as restapi from "@rapidmx/restapi";
+
+/** What this file uses from `@rapidmx/restapi` that a server from before Integrations doesn't export. Read through the
+ * module namespace, never imported by name: a named import of a missing export fails the whole plugin's load (the
+ * server never checks a plugin's peer range against its own restapi), where reading it here finds it unset and keeps
+ * the built-in STUN servers. */
+const hostApi: Partial<Pick<typeof restapi, "HostConfig" | "normalizeStunUrls">> = restapi;
 
 /** A single ICE server entry, matching the shape the browser `RTCPeerConnection` `iceServers` constructor option
  * expects (`RTCIceServer`), so the join response can be handed to it directly with no reshaping. */
@@ -56,6 +63,123 @@ export const DEFAULT_STUN_SERVERS: readonly IceServerConfig[] = [
     { urls: "stun:stun.cloudflare.com:3478" },
 ];
 
+/** The host's config key for the STUN servers an administrator sets under Integrations in the admin console
+ * (`integrations:stun:urls`, set by the server's integrations layer, or by the deployment's own configuration). Written
+ * out rather than taken from restapi's `INTEGRATION_CONFIG_KEYS`, which a server from before Integrations lacks. */
+export const STUN_URLS_CONFIG_KEY: string = "integrations:stun:urls";
+
+/** Where `stunServers()` reports an `integrations:stun:urls` value it ignored part or all of. */
+export interface StunWarningLogger {
+    warn(message: string): void;
+}
+
+/** What `readStunUrls()` made of a value: the usable URIs, how many entries it had and how many of them were ignored,
+ * and `unreadable` for a value that isn't a list in any form `parseStunUrls()` reads. */
+interface StunUrlsReading {
+    urls: string[];
+    entries: number;
+    ignored: number;
+    unreadable: boolean;
+}
+
+/** Reads an `integrations:stun:urls` value for `parseStunUrls()` and the warning in `stunServers()`. Blank entries (a
+ * trailing comma, say) aren't counted as entries at all, and a repeat isn't an ignored one. */
+function readStunUrls(value: unknown): StunUrlsReading {
+    let entries: unknown[] = [];
+    let unreadable: boolean = false;
+    if (Array.isArray(value)) {
+        entries = value;
+    } else if (typeof value === "string" && value.trim().startsWith("[")) {
+        try {
+            // Text starting with `[` that parses at all is a list.
+            entries = JSON.parse(value) as unknown[];
+        } catch {
+            unreadable = true;
+        }
+    } else if (typeof value === "string") {
+        entries = value.split(",");
+    } else if (value !== undefined && value !== null) {
+        unreadable = true;
+    }
+    const urls: string[] = [];
+    let counted: number = 0;
+    let ignored: number = 0;
+    for (const entry of entries) {
+        if (typeof entry === "string" && !entry.trim()) {
+            continue;
+        }
+        counted++;
+        try {
+            // Missing only on a server from before Integrations, where nothing is accepted (`stunServers()` checks first).
+            const [url] = hostApi.normalizeStunUrls!([entry]);
+            if (!urls.includes(url)) {
+                urls.push(url);
+            }
+        } catch {
+            ignored++;
+        }
+    }
+    return { urls, entries: counted, ignored, unreadable };
+}
+
+/**
+ * The STUN URIs in an `integrations:stun:urls` value, read as the server reads the deployment's value for the console: a
+ * list, JSON text of a list, or URIs separated by commas. Each is checked as the console checks the administrator's
+ * (`normalizeStunUrls()`: `stun:`/`stuns:`, a host and an optional port), lowercased and kept once. Anything else is
+ * dropped rather than handed out: a browser refuses the whole `iceServers` list over one malformed URL, so a bad entry in
+ * the deployment's configuration would otherwise break every call.
+ */
+export function parseStunUrls(value: unknown): string[] {
+    return readStunUrls(value).urls;
+}
+
+/** A hash of the value `stunServers()` last warned about, so a bad value is reported once rather than at every join.
+ * Cleared by a value with nothing ignored, so one that goes bad again is reported again. */
+let lastWarnedStunValue: string | undefined;
+
+/** Warns, once per distinct value, that `integrations:stun:urls` was ignored in part or whole. The message gives counts
+ * only, never the value: the console shows that to whoever may see it. */
+function warnIgnoredStunUrls(value: unknown, reading: StunUrlsReading, logger: StunWarningLogger): void {
+    // `String()`: `JSON.stringify` gives `undefined` for a function or symbol, which no hash takes.
+    const text: string = typeof value === "string" ? value : String(JSON.stringify(value));
+    const fingerprint: string = crypto.createHash("sha256").update(text).digest("hex");
+    if (fingerprint === lastWarnedStunValue) {
+        return;
+    }
+    lastWarnedStunValue = fingerprint;
+    const fallback: string = reading.urls.length === 0 ? "; using the built-in STUN servers instead" : "";
+    logger.warn(
+        reading.unreadable
+            ? `${STUN_URLS_CONFIG_KEY} isn't a list of STUN URIs and is ignored${fallback}.`
+            : `${STUN_URLS_CONFIG_KEY}: ${reading.ignored} of ${reading.entries} entries aren't STUN URIs (stun: or stuns:, a host and an optional port) and are ignored${fallback}.`,
+    );
+}
+
+/**
+ * The STUN servers to hand out right now: the administrator's (`STUN_URLS_CONFIG_KEY`), read through `HostConfig` on
+ * every call, since the plugin's `@Config` fields are a startup snapshot and the setting changes while the server runs.
+ * Falls back to `DEFAULT_STUN_SERVERS` when the setting names none: unset (no host configuration installed, or a server
+ * from before Integrations, whose restapi has no `HostConfig` at all), an empty list, or nothing usable
+ * (`parseStunUrls()`).
+ *
+ * @param logger Told, once per distinct value, when entries of the setting (or all of it) are ignored. The console shows
+ * a deployment's value as configured, so without this an operator would see servers listed that no call uses.
+ */
+export function stunServers(logger?: StunWarningLogger): IceServerConfig[] {
+    const { HostConfig, normalizeStunUrls } = hostApi;
+    if (!HostConfig || !normalizeStunUrls) {
+        return [...DEFAULT_STUN_SERVERS];
+    }
+    const value: unknown = HostConfig.get(STUN_URLS_CONFIG_KEY);
+    const reading: StunUrlsReading = readStunUrls(value);
+    if (reading.ignored === 0 && !reading.unreadable) {
+        lastWarnedStunValue = undefined;
+    } else if (logger) {
+        warnIgnoredStunUrls(value, reading, logger);
+    }
+    return reading.urls.length > 0 ? reading.urls.map((url) => ({ urls: url })) : [...DEFAULT_STUN_SERVERS];
+}
+
 /** How long a minted TURN REST credential remains valid for, in seconds. One hour comfortably covers ICE
  * negotiation and reconnection attempts for the length of a typical call without minting a fresh credential on
  * every join. */
@@ -88,7 +212,7 @@ export function turnRestCredential(
 }
 
 /**
- * Builds the full ICE server list for a join response: the hardcoded public STUN servers, plus a TURN entry when
+ * Builds the full ICE server list for a join response: the STUN servers (`stunServers()`), plus a TURN entry when
  * `settings.url` is configured (see `withTcpFallback()` for the URLs it carries). When a `sharedSecret` is also configured, the TURN entry carries a fresh,
  * time-limited credential (`turnRestCredential()`) rather than the static `username`/`credential` pair, which is
  * used verbatim only when no shared secret is set. A TURN url with neither a shared secret nor a static
@@ -98,13 +222,14 @@ export function turnRestCredential(
  * @param settings The `mail:videoconf:turn:*` settings, exactly as configured.
  * @param options `ttlSeconds`/`now` are forwarded to `turnRestCredential()`. `randomUserPart` supplies the
  * generated identity portion of a shared-secret credential's username when `settings.username` is unset -
- * defaults to a fresh random hex string; a test may override it for a deterministic assertion.
+ * defaults to a fresh random hex string; a test may override it for a deterministic assertion. `logger` is handed to
+ * `stunServers()`.
  */
 export function buildIceServers(
     settings: TurnSettings,
-    options?: { ttlSeconds?: number; now?: Date; randomUserPart?: () => string },
+    options?: { ttlSeconds?: number; now?: Date; randomUserPart?: () => string; logger?: StunWarningLogger },
 ): IceServerConfig[] {
-    const servers: IceServerConfig[] = [...DEFAULT_STUN_SERVERS];
+    const servers: IceServerConfig[] = stunServers(options?.logger);
     const configured: string[] = parseTurnUrls(settings.url);
     if (configured.length === 0) {
         return servers;

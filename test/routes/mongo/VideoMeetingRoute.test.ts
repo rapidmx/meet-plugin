@@ -7,7 +7,7 @@ import config from "../../config.js";
 import { request } from "@rapidrest/service-core/test";
 import { MongoConnection, MongoRepository, Server, ObjectFactory, ConnectionManager, RateLimiter, ACLUtils, ACLAction } from "@rapidrest/service-core";
 import { JWTUtils, Logger } from "@rapidrest/core";
-import { MailPushRoute } from "@rapidmx/restapi";
+import { HostConfig, MailPushRoute } from "@rapidmx/restapi";
 import { MongoMemoryServer } from "mongodb-memory-server";
 import * as uuid from "uuid";
 import { CalendarEventAttendeeLinkMongo, MailboxMongo } from "@rapidmx/restapi/mongo";
@@ -15,7 +15,7 @@ import { VideoMeetingMongo } from "../../../src/models/mongo/VideoMeetingMongo.j
 import { VideoMeetingInviteeMongo } from "../../../src/models/mongo/VideoMeetingInviteeMongo.js";
 import { VideoMeetingStatus, VideoMeetingVisibility } from "../../../src/models/types.js";
 import { GUEST_JWT_TTL_SECONDS, GUEST_UID_PREFIX } from "../../../src/routes/BaseVideoMeetingRoute.js";
-import { turnRestCredential } from "../../../src/util/IceServerUtils.js";
+import { DEFAULT_STUN_SERVERS, turnRestCredential } from "../../../src/util/IceServerUtils.js";
 import { effectsSuite } from "../effectsSuite.js";
 import { relaySuite } from "../relaySuite.js";
 import { signalingSuite } from "../signalingSuite.js";
@@ -590,6 +590,35 @@ describe("Route:VideoMeetingMongo Tests", () => {
                 route.turnUrl = "";
                 route.turnUsername = "";
                 route.turnSharedSecret = "";
+            }
+        });
+
+        it("Hands out the STUN servers the host's integrations config names at each join, so a change applies without a restart.", async () => {
+            // HostConfig is frozen (no vi.spyOn): install a fake source as the server installs its config, and remove it with the returned handle.
+            let stunUrls: unknown = ["stun:stun.example.com:3478"];
+            const uninstall = HostConfig.install({ get: (key: string) => (key === "integrations:stun:urls" ? stunUrls : undefined) });
+            try {
+                const created = await authed(ownerToken).post(baseUrl).send({ mailboxUid: mailbox.uid, title: "x", visibility: "public" });
+                const join = async () => (await request(server.getApplication()).get(`${baseUrl}/join/${created.body.meeting.publicSlug}`)).body.iceServers;
+
+                expect(await join()).toEqual([{ urls: "stun:stun.example.com:3478" }]);
+
+                stunUrls = ["stuns:stun.example.net:5349", "stun:stun.example.org"];
+                expect(await join()).toEqual([{ urls: "stuns:stun.example.net:5349" }, { urls: "stun:stun.example.org" }]);
+
+                stunUrls = undefined;
+                expect(await join()).toEqual(DEFAULT_STUN_SERVERS);
+
+                // A deployment value no browser takes: the route warns through its own logger, once for the value.
+                const route: any = objectFactory.getInstance("routes.VideoMeetingRoute");
+                const warn = vi.spyOn(route.logger, "warn");
+                stunUrls = ["turn:route-warning.example.com"];
+                expect(await join()).toEqual(DEFAULT_STUN_SERVERS);
+                expect(await join()).toEqual(DEFAULT_STUN_SERVERS);
+                expect(warn.mock.calls.filter(([message]) => String(message).startsWith("integrations:stun:urls"))).toHaveLength(1);
+                warn.mockRestore();
+            } finally {
+                uninstall();
             }
         });
 

@@ -1547,12 +1547,15 @@ export abstract class BaseVideoMeetingRoute<VM extends VideoMeeting, VMI extends
         await this.ensureChannelGrant(meeting.uid, selfUid);
         const relayEnabled: boolean = this.isRelayEnabled();
         const effectsAssetsUrl: string | undefined = parseEffectsAssetsUrl(this.effectsAssetsUrlSetting);
-        const iceServers: IceServerConfig[] = buildIceServers({
-            url: this.turnUrl,
-            username: this.turnUsername,
-            credential: this.turnCredential,
-            sharedSecret: this.turnSharedSecret,
-        });
+        const iceServers: IceServerConfig[] = buildIceServers(
+            {
+                url: this.turnUrl,
+                username: this.turnUsername,
+                credential: this.turnCredential,
+                sharedSecret: this.turnSharedSecret,
+            },
+            { logger: this.logger },
+        );
         return { meeting: publicMeeting, iceServers, authenticated, selfUid, relayEnabled, ...(effectsAssetsUrl && { effectsAssetsUrl }) };
     }
 

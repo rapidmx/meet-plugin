@@ -1864,3 +1864,30 @@ Fixed (findings by review id):
 ## 2026-10-26: Publish gate
 
 - **Publish only from the tag's own green Build.** A release pushes `main` and its tag at the same commit, and each push runs Build. The old Publish ran after *any* green Build of a tagged commit, so a failed Build on the other ref (activesync v1.2.0's tag run, web-client v0.37.0's `main` run) didn't stop the release, and the second Publish run always failed as a duplicate. `.github/workflows/publish.yml`'s `check` job now runs only for a tag push's Build, verifies the tag points at the commit on `main`, and waits until every Build of that commit has finished, refusing if any did not succeed (a green rerun triggers Publish again). Same change as activesync 9c0f71d, which was verified with a real release (activesync 1.2.1).
+
+## 2026-10-28: DNS publishing and Integrations
+
+Spec: `restapi/specs/dns_publishing_and_integrations.md` (this repo's part is §11.3's STUN row and §18's meet-plugin step).
+
+- **STUN servers from Integrations.** `stunServers()` (`src/util/IceServerUtils.ts`) reads `integrations:stun:urls` through restapi's
+  `HostConfig` every time `buildIceServers()` builds a join's list (`@Config` is only a startup snapshot; the setting changes live), and
+  falls back to `DEFAULT_STUN_SERVERS` when it names none: unset, no host config installed, `[]` (Integrations never saves one, but a
+  deployment's config may), or nothing usable. `parseStunUrls()` reads the value as restapi's `integrationDefaults()` does (a list, JSON
+  text of one, or comma-separated) and keeps each entry restapi's `normalizeStunUrls()` accepts (lowercased, once); the rest is dropped,
+  since a browser refuses the whole `iceServers` list over one malformed URL. TURN is unchanged and still follows the STUN entries.
+- **No named imports of new restapi exports.** `HostConfig` and `normalizeStunUrls` are read through `import * as restapi`, and
+  `STUN_URLS_CONFIG_KEY` is written out (a test checks it equals `INTEGRATION_CONFIG_KEYS.stun.urls`). The server installs plugins with
+  `--omit=peer --legacy-peer-deps` and never checks a plugin's peer range, so a named import of an export an older server's restapi lacks
+  would fail the whole plugin's load (no meetings at all); through the namespace it reads `undefined` and keeps the built-in list. Test:
+  `test/util/IceServerUtilsOlderServer.test.ts` mocks restapi without them (fails with the named import). Do the same for any other
+  export newer than the oldest server this plugin release may land on.
+- **Ignored entries are logged.** The console shows a deployment's value as configured (`integrationDefaults()` doesn't filter it), so a
+  dropped entry (e.g. `?transport=udp`, which `normalizeStunUrls()` refuses) would otherwise send calls to the public servers unseen.
+  `stunServers(logger)` warns once per distinct value (a SHA-256 of it is kept, cleared by a clean read) with counts only, never the
+  value, and says when the built-in list is used instead; the route passes its `@Logger` through `buildIceServers(..., { logger })`.
+- Tests can't `vi.spyOn(HostConfig, "get")` (the class is frozen): they `HostConfig.install({ get })` a fake source and call the returned
+  handle in `afterEach`/`finally`. Mongo and SQL route tests check a join gets the configured servers, a change applies at the next
+  join, the fallback, and one warning through the route's logger.
+- Release: built against the restapi that exports `HostConfig` (the usual "Build against" bump); it still loads on an older server, with
+  the built-in list. CI here installs the published restapi and is red until that release; verified locally with restapi's fresh dist
+  copied into `node_modules/@rapidmx/restapi`.
