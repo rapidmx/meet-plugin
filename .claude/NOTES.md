@@ -5,6 +5,18 @@ project's other repos (`booking-plugin`, `restapi`, `server`, `react-shared`, `w
 one dated section per unit of work, newest at the bottom, never rewritten - see those repos' own `.claude/NOTES.md`
 for the exact style to match.
 
+## Agent model assignments (JP, 2026-10-28)
+
+Standing rule for every AI agent working on this project (applies to all RapidMX and RapidREST repositories):
+
+| Kind of work | Model |
+|---|---|
+| Design (specs, plans, architecture proposals) | Opus 5.5 (`claude-opus-5-5`) |
+| Architectural review | Opus 5.5 (`claude-opus-5-5`) |
+| Code review (finding and verifying defects in diffs or code) | Sonnet 5.5 (`claude-sonnet-5-5`) |
+| Fixes (implementing review findings and other code changes) | Sonnet 5.5 (`claude-sonnet-5-5`) |
+| Simple operations (file operations, renames, project initialization and similar mechanical tasks) | Haiku 5.5 (`claude-haiku-5-5`) |
+
 ## Design (agreed before Phase 1 started)
 
 - **Scale**: full-mesh peer-to-peer WebRTC (every participant connects directly to every other). Good for small
@@ -1891,16 +1903,3 @@ Spec: `restapi/specs/dns_publishing_and_integrations.md` (this repo's part is §
 - Release: built against the restapi that exports `HostConfig` (the usual "Build against" bump); it still loads on an older server, with
   the built-in list. CI here installs the published restapi and is red until that release; verified locally with restapi's fresh dist
   copied into `node_modules/@rapidmx/restapi`.
-
-
-## Agent model assignments (JP, 2026-10-28)
-
-Standing rule for every AI agent working on this project (applies to all RapidMX and RapidREST repositories):
-
-| Kind of work | Model |
-|---|---|
-| Design (specs, plans, architecture proposals) | Opus 5.5 (`claude-opus-5-5`) |
-| Architectural review | Opus 5.5 (`claude-opus-5-5`) |
-| Code review (finding and verifying defects in diffs or code) | Sonnet 5.5 (`claude-sonnet-5-5`) |
-| Fixes (implementing review findings and other code changes) | Sonnet 5.5 (`claude-sonnet-5-5`) |
-| Simple operations (file operations, renames, project initialization and similar mechanical tasks) | Haiku 5.5 (`claude-haiku-5-5`) |
