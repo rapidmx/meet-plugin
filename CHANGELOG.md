@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-29
+
+### Added
+- Added the rule that the more specific agent model assignment wins where categories overlap
+
+### Changed
+- Hand out the STUN servers integrations:stun:urls names, read through the host's HostConfig at every join so a change applies without a restart, falling back to the built-in list when it names none
+- Keep only the STUN entries normalizeStunUrls() accepts, lowercased and once each, so one malformed URI in a deployment's config can't make browsers refuse every call's ICE servers
+- Read HostConfig and normalizeStunUrls through the restapi module namespace, so the plugin still loads and keeps the built-in STUN list on a server whose restapi lacks them
+- Warn once per distinct integrations:stun:urls value, with counts only, when entries are ignored or the built-in list is used instead, through the route's logger
+- Mention the STUN servers set under Integrations in the TURN server URL setting's help
+- Note the STUN integration in NOTES.md
+- Record the standing agent model assignments in the project notes
+- Move the agent model assignments to the top of the project notes, keeping session history at the bottom
+- Update the agent model assignments to JP's revised criteria: Sonnet for general code and review, Opus for architecture, planning, investigation, security and performance, Haiku for simple operations
+- Require @rapidmx/restapi 0.36 and @rapidmx/web-client 0.38 for the STUN servers read from integrations:stun:urls
+- Note the STUN servers setting and the dependency bump in the Unreleased release notes
+- Install corepack with npm before enabling it in the workflows, as the node lts image no longer ships it
+
 ## [0.18.0] - 2026-10-26
 
 ### Added
@@ -699,7 +718,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/rapidmx/meet-plugin/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/rapidmx/meet-plugin/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/rapidmx/meet-plugin/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/rapidmx/meet-plugin/compare/v0.15.0...v0.16.0
