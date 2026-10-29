@@ -945,8 +945,8 @@ __metadata:
   resolution: "@rapidmx/meet-plugin@workspace:."
   dependencies:
     "@mediapipe/tasks-vision": "npm:^1.0.1"
-    "@rapidmx/restapi": "npm:^0.35.0"
-    "@rapidmx/web-client": "npm:^0.37.0"
+    "@rapidmx/restapi": "npm:^0.36.0"
+    "@rapidmx/web-client": "npm:^0.38.0"
     "@rapidrest/core": "npm:^6.0.0"
     "@rapidrest/react": "npm:^2.1.0"
     "@rapidrest/service-core": "npm:^2.4.0"
@@ -990,8 +990,8 @@ __metadata:
     vitest: "npm:^5.0.0"
     winston: "npm:^3.19.0"
   peerDependencies:
-    "@rapidmx/restapi": ">=0.35.0 <1"
-    "@rapidmx/web-client": ">=0.37.0 <1"
+    "@rapidmx/restapi": ">=0.36.0 <1"
+    "@rapidmx/web-client": ">=0.38.0 <1"
     "@rapidrest/core": 5.x
     "@rapidrest/react": ">=2.1.0 <3"
     "@rapidrest/service-core": 2.x
@@ -1000,9 +1000,9 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@rapidmx/restapi@npm:^0.35.0":
-  version: 0.35.0
-  resolution: "@rapidmx/restapi@npm:0.35.0"
+"@rapidmx/restapi@npm:^0.36.0":
+  version: 0.36.0
+  resolution: "@rapidmx/restapi@npm:0.36.0"
   dependencies:
     "@peculiar/x509": "npm:^2.1.0"
     acme-client: "npm:^5.4.0"
@@ -1038,13 +1038,13 @@ __metadata:
       optional: true
     pdf-parse:
       optional: true
-  checksum: 10c0/cdc866f621c81dc55410ce27f8d73358db22fdb02a5c00c500a0dd401d59882d1ed21736981defa04819e0f9535b34d89d08022e0f97a61bfd4202949afb4f4d
+  checksum: 10c0/0bc5e4fb9722c93653bc853a1738cb12eda86148bce1dc9fdf9ff4ebc4c207bca791e38830d6f8eeb4c8fd6dddb04dd6dce4f8e83c5b35a8a9e691ec86a9c026
   languageName: node
   linkType: hard
 
-"@rapidmx/web-client@npm:^0.37.0":
-  version: 0.37.0
-  resolution: "@rapidmx/web-client@npm:0.37.0"
+"@rapidmx/web-client@npm:^0.38.0":
+  version: 0.38.1
+  resolution: "@rapidmx/web-client@npm:0.38.1"
   dependencies:
     "@dnd-kit/core": "npm:^6.3.1"
     "@emoji-mart/data": "npm:^1.2.1"
@@ -1074,7 +1074,7 @@ __metadata:
     "@rapidrest/react": 2.x
     react: 19.x
     react-dom: 19.x
-  checksum: 10c0/06a2ab40fb7a4385938b050309070898860c54c94bb7c7b13b447a9fd91a0be1aded0db0ba62824e386eb9ea051ed1e75d6220bc9dae8159c7b84c8bf115e594
+  checksum: 10c0/573cfaee8d815ef8a345d475e128c97900e40c28230ddf0da9cdceed11f9ff5ced836eaa8f568bca8560df070fa09bcbb1c45bb3b5efa471991003c5d216941d
   languageName: node
   linkType: hard
 

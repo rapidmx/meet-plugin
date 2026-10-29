@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- **STUN servers from the console.** The STUN servers handed to a call are now read from the Integrations setting `integrations:stun:urls` (through restapi's `HostConfig`) on every join, falling back to the built-in list when it is unset or holds nothing usable. Needs `@rapidmx/restapi` 0.36 and builds against `@rapidmx/web-client` 0.38.
+
 ## v0.18.0
 
 ### Added
