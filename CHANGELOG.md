@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-05
+
+### Added
+- Added the RapidREST Claude Code plugin to the project settings
+
+### Changed
+- Upgrade @rapidrest/core to 6.1.0, @rapidrest/service-core to 2.5.1 and @rapidrest/react to 2.3.0
+- Raise the @rapidrest/core peer range from 5.x to 6.x, which @rapidrest/service-core 2.5 requires
+- Upgrade @rapidmx/web-client to ^0.38.1
+- Upgrade every other dependency to its latest release, keeping typescript on 6.x
+- Update MEDIAPIPE_VERSION to 1.2.2 to match @mediapipe/tasks-vision ^1.2.2, whose wasm and models load at runtime
+
 ## [0.19.0] - 2026-10-29
 
 ### Added
@@ -718,7 +730,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document in NOTES.md the same review's lower-priority finding that a call's TURN credential can outlive its 1-hour TTL mid-call with no ICE refresh mechanism, as a known limitation for a future phase
 - Upgraded rapidrest and rapidmx deps
 
-[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/rapidmx/meet-plugin/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/rapidmx/meet-plugin/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/rapidmx/meet-plugin/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/rapidmx/meet-plugin/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/rapidmx/meet-plugin/compare/v0.16.0...v0.17.0
