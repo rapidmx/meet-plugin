@@ -26,7 +26,7 @@ import type { FaceLandmark } from "./accessories.js";
 
 /** Must match the installed `@mediapipe/tasks-vision` (a test checks): the `.wasm` fetched at runtime has to be the
  * version the JavaScript was built against. */
-export const MEDIAPIPE_VERSION = "1.0.1";
+export const MEDIAPIPE_VERSION = "1.2.2";
 
 const CDN_WASM = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VERSION}/wasm`;
 const CDN_SEGMENTER_MODEL =
